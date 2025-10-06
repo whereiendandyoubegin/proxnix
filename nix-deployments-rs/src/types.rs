@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::Utf8Error, string::FromUtf8Error};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -13,7 +13,11 @@ pub enum AppError {
     #[error("File IO error {0}")]
     FileIOError(#[from] std::io::Error),
     #[error("Serialisation error at some point {0}")]
-    SerialisationError(#[from] serde_json::Error), 
+    SerialisationError(#[from] serde_json::Error),
+    #[error("Command error: {0}")]
+    CmdError(String),
+    #[error("Type conversion error {0}")]
+    ConversionError(#[from] FromUtf8Error), 
 }
 
 pub type Result<T> = std::result::Result<T, AppError>; 
