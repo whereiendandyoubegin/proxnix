@@ -55,6 +55,8 @@ async fn webhook_handler(
 
 #[tokio::main]
 async fn main(){
+    let config = state::load_json("definitions/config.json");
+    println!("{:#?}", config);
     let main_semaphore = Arc::new(Semaphore::new(4));
     let app_state = AppState { main_semaphore };
 

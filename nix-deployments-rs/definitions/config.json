@@ -1,26 +1,39 @@
-{"widget": {
-    "debug": "on",
-    "window": {
-        "title": "Sample Konfabulator Widget",
-        "name": "main_window",
-        "width": 500,
-        "height": 500
+{
+  "vms": {
+    "k3s-cp-01": {
+      "name": "k3s-cp-01",
+      "vm_id": 800,
+      "image_type": "k3s-control",
+      "cores": 2,
+      "sockets": 2,
+      "memory_mb": 10240,
+      "disk_gb": 20,
+      "storage_location": "local-lvm",
+      "cloud_init": "None"
     },
-    "image": { 
-        "src": "Images/Sun.png",
-        "name": "sun1",
-        "hOffset": 250,
-        "vOffset": 250,
-        "alignment": "center"
+    "k3s-cp-02": {
+      "name": "k3s-cp-02",
+      "vm_id": 801,
+      "image_type": "k3s-control",
+      "cores": 2,
+      "sockets": 2,
+      "memory_mb": 10240,
+      "disk_gb": 20,
+      "storage_location": "local-lvm",
+      "cloud_init": "None"
     },
-    "text": {
-        "data": "Click Here",
-        "size": 36,
-        "style": "bold",
-        "name": "text1",
-        "hOffset": 250,
-        "vOffset": 100,
-        "alignment": "center",
-        "onMouseUp": "sun1.opacity = (sun1.opacity / 100) * 90;"
+    "k3s-wrk-01": {
+      "name": "k3s-wrk-01",
+      "vm_id": 805,
+      "image_type": "k3s-worker",
+      "cores": 8,
+      "sockets": 1,
+      "memory_mb": 15360,
+      "disk_gb": 20,
+      "storage_location": "local-lvm",
+      "cloud_init": {
+        "StorageReference": "local:iso/cloud-init-worker.iso"
+      }
     }
-}}    
+  }
+}
