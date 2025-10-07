@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::Utf8Error, string::FromUtf8Error};
+use std::{collections::HashMap, string::FromUtf8Error};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -14,10 +14,10 @@ pub enum AppError {
     FileIOError(#[from] std::io::Error),
     #[error("Serialisation error at some point {0}")]
     SerialisationError(#[from] serde_json::Error),
+    #[error("Error during UTF8 conversion {0}")]
+    UTF8Error(#[from] FromUtf8Error),
     #[error("Command error: {0}")]
-    CmdError(String),
-    #[error("Type conversion error {0}")]
-    ConversionError(#[from] FromUtf8Error), 
+    CmdError(String), 
 }
 
 pub type Result<T> = std::result::Result<T, AppError>; 
@@ -39,6 +39,16 @@ pub struct VMConfig {
 pub enum CloudInit {
     None,
     StorageReference(String),
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct QMList {
+    pub vm_id: u32,
+    pub name: String,
+    pub status: String,
+    pub mem_mb: u32,
+    pub bootdisk_gb: u32,
+    pub pid: u32,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

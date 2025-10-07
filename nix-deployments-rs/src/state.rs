@@ -1,9 +1,10 @@
-use crate::types::{ DesiredState, DeployedState, Result, AppError };
+use crate::types::{ DesiredState, DeployedState, Result, AppError, QMList };
 use std::io::BufReader;
 use std::path::Path;
 use std::fs::{self, File};
 use serde_json::Value;
-use std::process::Command;
+use std::process::{Command, Output};
+
 
 
 pub fn load_json(path: &str) -> Result<DesiredState> {
@@ -23,7 +24,12 @@ pub fn qm_list() -> Result<String> {
     }
     let stdout_bytes = qm_list.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
-    let success = match 
     
-    return output_string
+    Ok(output_string)
 }
+
+pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
+    let lines = output_string.lines();
+    
+}
+    
