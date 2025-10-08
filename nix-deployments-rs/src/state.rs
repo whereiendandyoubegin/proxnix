@@ -29,7 +29,39 @@ pub fn qm_list() -> Result<String> {
 }
 
 pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
-    let lines = output_string.lines();
+      let lines = output_string
+        .lines()
+        .skip(1)
+        .map(|line| -> Result<QMList>{
+            let parts: Vec<&str> = line.split_whitespace().collect();
+
+            Ok(QMList {
+                vm_id: parts[0].parse()?,
+                name: parts[1].to_string(),
+                status: parts[2].to_string(),
+                mem_mb: parts[3].parse()?,
+                bootdisk_gb: parts[4].parse()?,
+                pid: parts[5].parse()?,
+            })
+        })
+        .collect();
     
+        lines
 }
     
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    
+    pub fn test_parse_qm_list() {
+        let sample = "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID
+                            100 master               stopped    8000              52.00 0";
+
+
+        let result = parse_qm_list(sample);
+        println!("{:#?}", result);
+    }
+
+}

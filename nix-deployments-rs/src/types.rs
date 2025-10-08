@@ -17,7 +17,11 @@ pub enum AppError {
     #[error("Error during UTF8 conversion {0}")]
     UTF8Error(#[from] FromUtf8Error),
     #[error("Command error: {0}")]
-    CmdError(String), 
+    CmdError(String),
+    #[error("Parsing int error: {0}")]
+    ParseIntError(#[from] std::num::ParseIntError),
+    #[error("Parsing float error: {0}")]
+    ParseFloatError(#[from] std::num::ParseFloatError),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>; 
@@ -47,7 +51,7 @@ pub struct QMList {
     pub name: String,
     pub status: String,
     pub mem_mb: u32,
-    pub bootdisk_gb: u32,
+    pub bootdisk_gb: f64,
     pub pid: u32,
 }
 
