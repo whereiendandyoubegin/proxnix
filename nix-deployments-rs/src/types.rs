@@ -59,8 +59,12 @@ pub struct QMList {
 pub struct DeployedVM {
     pub vm_id: u32,
     pub vm_name: String,
-    pub template_id: u32,
-    pub commit_hash: String,
+    pub commit_hash: Option<String>,
+    pub template_id: Option<u32>,
+    pub mem_mb: u32,
+    pub bootdisk_gb: f64,
+    pub status: String,
+    pub pid: u32,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
