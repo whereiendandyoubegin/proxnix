@@ -1,4 +1,4 @@
-use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, QMList, Result };
+use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, QMList,  Result, StateDiff, VMConfig };
 use std::fmt::DebugTuple;
 use std::io::BufReader;
 use std::path::Path;
@@ -73,7 +73,27 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
         }
 }
 
-pub fn save_deployed_state
+pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
+    let file = File::create(path)?;
+    let write_state = serde_json::to_writer_pretty(file, state)?;
+
+    Ok(())
+}
+
+pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
+    let mut to_create: Vec<VMConfig> = Vec::new();
+    let mut to_update: Vec<(String, VMConfig)> = Vec::new();
+    let mut to_delete: Vec<String>;
+
+    for (name, vmconfig) in &desired.vms {
+        if deployed.vms.contains_key(name) {
+            let deployed_vm = deployed.vms.get(name);    
+        }
+        else {
+            to_create.push(vmconfig.clone())
+        }
+    }
+}
     
 #[cfg(test)]
 mod tests {

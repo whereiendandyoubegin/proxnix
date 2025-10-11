@@ -76,3 +76,11 @@ pub struct DesiredState {
 pub struct DeployedState {
     pub vms: HashMap<String, DeployedVM>
 }
+
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct StateDiff {
+    pub to_create: Vec<VMConfig>,
+    pub to_update: Vec<(String, VMConfig)>,
+    pub to_delete: Vec<String>,
+}
