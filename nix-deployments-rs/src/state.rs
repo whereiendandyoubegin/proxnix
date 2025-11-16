@@ -30,6 +30,21 @@ pub fn qm_list() -> Result<String> {
     Ok(output_string)
 }
 
+pub fn qm_config(vm_id: u32) -> Result<String> {
+    let qm_config = Command::new("qm")
+        .arg("config")
+        .arg(vm_id.to_string())
+        .output()?;
+    if !qm_config.status.success() {
+        return Err(AppError::CmdError(format!("qm config has failed with exit code: {:?}", qm_config.status.code())));
+    }
+
+    let stdout_bytes = qm_config.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}
+
 pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
       let lines = output_string
         .lines()
@@ -80,20 +95,47 @@ pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
     Ok(())
 }
 
+
+
 pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
     let mut to_update: Vec<(String, VMConfig)> = Vec::new();
-    let mut to_delete: Vec<String>;
-
+    let mut to_delete: Vec<String> = Vec::new();
+    
     for (name, vmconfig) in &desired.vms {
         if deployed.vms.contains_key(name) {
-            let deployed_vm = deployed.vms.get(name);    
+            let deployed_vm = deployed.vms.get(name)?;
+            if vmconfig.memory_mb != deployed_vm.mem_mb {
+                to_update.push((name.clone(), vmconfig.name()));
+            }
+            if vmconfig.disk_gb != deployed_vm.bootdisk_gb {
+                to_update.push(vmconfig.name)
+            }
+            if vmconfig.cores != deployed_vm.cores {
+                to_update.push((name.clone(), vmconfig.name()));
+            }
+            if vmconfig.sockets != deployed_vm.sockets {
+                to_update.push((name.clone(), vmconfig.name()));
+            }
         }
         else {
-            to_create.push(vmconfig.clone())
+            to_create.push((name.clone, vmconfig.clone()))
         }
     }
+    
+    for (name, deployed_vm) in &deployed.vms {
+        if !desired.vms.contains_key(name) {
+            to_delete.push(name.clone())
+        }
+    }
+    
+    StateDiff {
+        to_create,
+        to_update,
+        to_delete,
+    }
 }
+
     
 #[cfg(test)]
 mod tests {

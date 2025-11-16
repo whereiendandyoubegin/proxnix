@@ -65,6 +65,35 @@ pub struct DeployedVM {
     pub bootdisk_gb: f64,
     pub status: String,
     pub pid: u32,
+    pub cores: u16,
+    pub sockets: u8,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct QMConfig {
+    pub agent: String,
+    pub balloon: bool,
+    pub boot: char,
+    pub bootdisk: String,
+    pub cipassword: Option<String>,
+    pub ciuser: Option<String>,
+    pub cores: u8,
+    pub cpu: String,
+    pub cpuunits: u16,
+    pub disks: HashMap<String, String>,
+    pub ipconfigs: HashMap<String, String>,
+    pub memory: u32,
+    pub meta: String,
+    pub name: String,
+    pub networks: HashMap<String, String>,
+    pub numa: bool,
+    pub onboot: bool,
+    pub protection: bool,
+    pub serial: HashMap<String, String>,
+    pub sockets: u8,
+    pub sshkeys: Option<String>,
+    pub vga: String,
+    pub vmgenid: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
