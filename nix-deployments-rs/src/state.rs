@@ -1,4 +1,4 @@
-use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, QMList,  Result, StateDiff, VMConfig };
+use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate };
 use std::fmt::DebugTuple;
 use std::io::BufReader;
 use std::path::Path;
@@ -79,6 +79,8 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                 bootdisk_gb: qmlist.bootdisk_gb,
                 status: qmlist.status,
                 pid: qmlist.pid,
+                cores: 0, //placeholder
+                sockets: 0, //placeholder
             })
        })
         .collect();
@@ -99,29 +101,49 @@ pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
 
 pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
-    let mut to_update: Vec<(String, VMConfig)> = Vec::new();
+    let mut to_update: Vec<VMUpdate> = Vec::new();
     let mut to_delete: Vec<String> = Vec::new();
     
     for (name, vmconfig) in &desired.vms {
+        let mut changes = Vec::new();
+        
         if deployed.vms.contains_key(name) {
-            let deployed_vm = deployed.vms.get(name)?;
+            let deployed_vm = deployed.vms.get(name).unwrap();
             if vmconfig.memory_mb != deployed_vm.mem_mb {
-                to_update.push((name.clone(), vmconfig.name()));
+                changes.push(FieldChange::Memory);
             }
-            if vmconfig.disk_gb != deployed_vm.bootdisk_gb {
-                to_update.push(vmconfig.name)
+            if vmconfig.disk_gb as f64 != deployed_vm.bootdisk_gb {
+                changes.push(FieldChange::Disk);
             }
             if vmconfig.cores != deployed_vm.cores {
-                to_update.push((name.clone(), vmconfig.name()));
+                changes.push(FieldChange::Cores);
             }
             if vmconfig.sockets != deployed_vm.sockets {
-                to_update.push((name.clone(), vmconfig.name()));
+                changes.push(FieldChange::Sockets);
             }
+            if !changes.is_empty() {
+
+            let action = if vmconfig.protected {
+                UpdateAction::Protected
+            } else if changes.contains(&FieldChange::Disk) {
+                UpdateAction::Rebuild
+            } else {
+                UpdateAction::InPlace
+            };
+            
+            to_update.push(VMUpdate {
+                name: name.clone(),
+                config: vmconfig.clone(),
+                changed_fields: changes,
+                required_action: action,
+            });         
+        }
         }
         else {
-            to_create.push((name.clone, vmconfig.clone()))
+            to_create.push((vmconfig.clone()))
         }
     }
+
     
     for (name, deployed_vm) in &deployed.vms {
         if !desired.vms.contains_key(name) {

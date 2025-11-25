@@ -37,6 +37,7 @@ pub struct VMConfig {
     pub storage_location: String,
     pub disk_gb: u32,
     pub cloud_init: CloudInit,
+    pub protected: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -110,6 +111,36 @@ pub struct DeployedState {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct StateDiff {
     pub to_create: Vec<VMConfig>,
-    pub to_update: Vec<(String, VMConfig)>,
+    pub to_update: Vec<VMUpdate>,
     pub to_delete: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct VMUpdate {
+    pub name: String,
+    pub config: VMConfig,
+    pub changed_fields: Vec<FieldChange>,
+    pub required_action: UpdateAction, 
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum UpdateAction{
+    InPlace,
+    Rebuild,
+    Protected,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub enum FieldChange {
+    Memory,
+    Cores, 
+    Sockets,
+    Disk,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum RebuildStrategy {
+    Rebuild,
+    InPlace,
+    Protected,
 }
