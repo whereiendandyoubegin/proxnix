@@ -19,3 +19,5 @@ Cargo.lock
 result
 result-*
 
+# Development state file, will replace once I have everything workingd
+definitions/desiredstate.json
