@@ -3,9 +3,11 @@ use std::fmt::DebugTuple;
 use std::io::BufReader;
 use std::path::Path;
 use std::fs::{self, File};
+use std::rc::Rc;
 use git2::CheckoutNotificationType;
 use serde_json::Value;
 use std::process::{Command, Output};
+use std::collections::HashMap;
 
 
 
@@ -114,6 +116,32 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
         .collect();
     
         lines
+}
+
+pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
+    
+    let deployedvms = deployed.vms
+        .into_iter()
+        .map(|(name, vm)| -> Result<(String, DeployedVM)> {
+            let config = qm_config(vm.vm_id)?;
+            let parsed = parse_qm_config(&config)?;
+            Ok((vm.vm_name.clone(), DeployedVM {
+                vm_id: vm.vm_id,
+                vm_name: vm.vm_name,
+                commit_hash: vm.commit_hash,
+                template_id: vm.template_id,
+                mem_mb: vm.mem_mb,
+                bootdisk_gb: vm.bootdisk_gb,
+                status: vm.status,
+                pid: vm.pid,
+                cores: parsed.cores as u16,
+                sockets: parsed.sockets,
+            }))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+    Ok(DeployedState {
+        vms: deployedvms
+    })
 }
 
 pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
