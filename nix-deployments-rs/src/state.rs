@@ -1,4 +1,4 @@
-use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate };
+use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate };
 use std::fmt::DebugTuple;
 use std::io::BufReader;
 use std::path::Path;
@@ -43,6 +43,56 @@ pub fn qm_config(vm_id: u32) -> Result<String> {
     let output_string = String::from_utf8(stdout_bytes)?;
 
     Ok(output_string)
+}
+
+pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
+    let qmconfig = output_string
+        .lines()
+        .fold(QMConfig::default(), |mut accumulator, line| {
+           let (key, value) = line.split_once(':').unwrap(); // TODO Maybe make a function to validate qm config output in the future
+           let key = key.trim();
+           let value = value.trim();
+
+           match key {
+               "agent" => accumulator.agent = value.parse().unwrap(),
+               "balloon" => accumulator.balloon = value.parse().unwrap(),
+               "boot" => accumulator.boot = value.parse().unwrap(),
+               "bootdisk" => accumulator.bootdisk = value.parse().unwrap(),
+               "cipassword" => accumulator.cipassword = Some(value.to_string()),
+               "ciuser" => accumulator.ciuser = Some(value.to_string()),
+               "cores" => accumulator.cores = value.parse().unwrap(),
+               "cpu" => accumulator.cpu = value.parse().unwrap(),
+               "cpuunits" => accumulator.cpuunits = value.parse().unwrap(),
+               "memory" => accumulator.memory = value.parse().unwrap(),
+               "meta" => accumulator.meta = value.parse().unwrap(),
+               "name" => accumulator.name = value.parse().unwrap(),
+               "numa" => accumulator.numa = value.parse().unwrap(),
+               "onboot" => accumulator.onboot = value.parse().unwrap(),
+               "protection" => accumulator.protection = value.parse().unwrap(),
+               "sockets" => accumulator.sockets = value.parse().unwrap(),
+               "sshkeys" => accumulator.sshkeys = Some(value.to_string()),
+               "vga" => accumulator.vga = value.parse().unwrap(),
+               "vmgenid" => accumulator.vmgenid = value.parse().unwrap(),
+               key if key.starts_with("scsi")
+               || key.starts_with("sata")
+               || key.starts_with("ide")
+               || key.starts_with("virtio") => {
+                   accumulator.disks.insert(key.to_string(), value.to_string());
+               }
+               key if key.starts_with("ipconfig") => {
+                   accumulator.ipconfigs.insert(key.to_string(), value.to_string());
+               }
+               key if key.starts_with("net") => {
+                   accumulator.networks.insert(key.to_string(), value.to_string());
+               }
+               key if key.starts_with("serial") => {
+                   accumulator.serial.insert(key.to_string(), value.to_string());
+               }
+               _ => {}
+            }
+            accumulator
+        });
+    Ok(qmconfig)
 }
 
 pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {

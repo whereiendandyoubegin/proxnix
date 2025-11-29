@@ -70,11 +70,11 @@ pub struct DeployedVM {
     pub sockets: u8,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
 pub struct QMConfig {
     pub agent: String,
     pub balloon: bool,
-    pub boot: char,
+    pub boot: String,
     pub bootdisk: String,
     pub cipassword: Option<String>,
     pub ciuser: Option<String>,
