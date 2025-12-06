@@ -236,6 +236,22 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
     }
 }
 
+pub fn load_state() ->  Result<DeployedState> {
+    let qm_list = qm_list()?;
+    let parsed_qm_list = parse_qm_list(&qm_list)?;
+    let deployed_vm = list_to_deployed_vm(parsed_qm_list);
+    let enriched = enrich_cpu_info(deployed_vm)?;
+
+    Ok(enriched)
+}
+
+pub fn full_diff(config_path: &str) -> Result<StateDiff> {
+    let deployed = load_state()?;
+    let desired = load_json(config_path)?;
+    let diff = diff_state(&deployed, &desired);
+
+    Ok(diff)
+}
     
 #[cfg(test)]
 mod tests {
