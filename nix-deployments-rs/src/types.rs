@@ -38,6 +38,19 @@ pub struct VMConfig {
     pub disk_gb: u32,
     pub cloud_init: CloudInit,
     pub protected: bool,
+    #[serde(default = "default_network_bridge")]
+    pub network_bridge: String,
+    #[serde(default = "default_scsi_hw")]
+    pub scsi_hw: String,
+}
+
+// Defaults for VMConfig
+fn default_network_bridge() -> String {
+    "vmbr0".to_string()
+}
+
+fn default_scsi_hw() -> String {
+    "virtio-scsi-pci".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
