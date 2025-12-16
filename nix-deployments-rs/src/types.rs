@@ -42,6 +42,8 @@ pub struct VMConfig {
     pub network_bridge: String,
     #[serde(default = "default_scsi_hw")]
     pub scsi_hw: String,
+    #[serde(default = "default_disk_slot")]
+    pub disk_slot: String,
 }
 
 // Defaults for VMConfig
@@ -51,6 +53,10 @@ fn default_network_bridge() -> String {
 
 fn default_scsi_hw() -> String {
     "virtio-scsi-pci".to_string()
+}
+
+fn default_disk_slot() -> String {
+    "scsi0".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

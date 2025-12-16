@@ -26,7 +26,7 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
 
     Ok(output_string)
 }
-
+//TODO Pase this output and use it in qm_set_disk where it is currently set to disk-0
 pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<String> {
     let qm_importdisk = Command::new("qm")
         .arg("importdisk")
@@ -43,3 +43,89 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
 
     Ok(output_string)
 }
+
+pub fn qm_set_disk(vm_id: u32, storage: &str, disk_slot: &str) -> Result<String> {
+    let qm_set_disk = Command::new("qm")
+        .arg("set")
+        .arg(vm_id.to_string())
+        .arg(format!("--{}", disk_slot))
+        .arg(format!("{}:vm-{}-disk-0", storage, vm_id))
+        .arg("--boot")
+        .arg(format!("order={}", disk_slot))
+        .output()?;
+    if !qm_set_disk.status.success() {
+        return Err(AppError::CmdError(format!("qm set disk has failed with the exit code: {:?}", qm_set_disk.status.code())));
+    }
+    let stdout_bytes = qm_set_disk.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}
+//TODO MAYBE add something other than socket as the serial console, bit of a nitpick
+pub fn qm_set_agent(vm_id: u32) -> Result<String> {
+    let qm_set_agent = Command::new("qm")
+        .arg("set")
+        .arg(vm_id.to_string())
+        .arg("--agent")
+        .arg("1")
+        .arg("--serial0")
+        .arg("socket")
+        .output()?;
+    if !qm_set_agent.status.success() {
+        return Err(AppError::CmdError(format!("qm set agent has failed with the exit code: {:?}", qm_set_agent.status.code())));
+    }
+    let stdout_bytes = qm_set_agent.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}
+
+pub fn qm_template(vm_id: u32) -> Result<String> {
+    let qm_template = Command::new("qm")
+        .arg("template")
+        .arg(vm_id.to_string())
+        .output()?;
+    if !qm_template.status.success() {
+        return Err(AppError::CmdError(format!("qm template has failed with the exit code: {:?}", qm_template.status.code())));
+    }
+    let stdout_bytes = qm_template.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}
+
+
+pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String> {
+    let qm_clone = Command::new("qm")
+        .arg("clone")
+        .arg(source_vm_id.to_string())
+        .arg(dest_vm_id.to_string())
+        .arg("--name")
+        .arg(name.to_string())
+        .arg("--full")
+        .arg("0")
+        .output()?;
+    if !qm_clone.status.success() {
+        return Err(AppError::CmdError(format!("qm clone has failed with the exit code: {:?}", qm_clone.status.code())));
+    }
+    let stdout_bytes = qm_clone.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}
+
+
+pub fn qm_destroy(vm_id: u32) -> Result<String> {
+    let qm_destroy = Command::new("qm")
+        .arg("destroy")
+        .arg(vm_id.to_string())
+        .output()?;
+    if !qm_destroy.status.success() {
+        return Err(AppError::CmdError(format!("qm destroy has failed with the exit code: {:?}", qm_destroy.status.code())));
+    }
+    let stdout_bytes = qm_destroy.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}
+
