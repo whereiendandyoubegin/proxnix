@@ -10,6 +10,8 @@ mod state;
 mod build;
 mod types;
 mod qm;
+mod nix;
+mod git;
 
 #[derive(Deserialize)]
 struct Response {
