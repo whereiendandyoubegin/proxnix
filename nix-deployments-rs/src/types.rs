@@ -22,6 +22,8 @@ pub enum AppError {
     ParseIntError(#[from] std::num::ParseIntError),
     #[error("Parsing float error: {0}")]
     ParseFloatError(#[from] std::num::ParseFloatError),
+    #[error("Git2 error: {0}")]
+    Git2Error(#[from] git2::Error)
 }
 
 pub type Result<T> = std::result::Result<T, AppError>; 

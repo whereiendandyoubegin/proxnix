@@ -1,5 +1,5 @@
-use crate::{types::{AppError, Result}, Repository};
-use git2::{Repository, Oid};
+use crate::{types::{AppError, Result}};
+use git2::{Oid, Repository};
 use std::path::Path;
 
 pub fn git_clone(repo_url: &str, dest_path: &str) -> Result<Repository> {
