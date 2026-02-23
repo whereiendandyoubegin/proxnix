@@ -23,10 +23,12 @@ pub enum AppError {
     #[error("Parsing float error: {0}")]
     ParseFloatError(#[from] std::num::ParseFloatError),
     #[error("Git2 error: {0}")]
-    Git2Error(#[from] git2::Error)
+    Git2Error(#[from] git2::Error),
+    #[error("Parsing module error: {0}")]
+    ParsingModuleError(String),
 }
 
-pub type Result<T> = std::result::Result<T, AppError>; 
+pub type Result<T> = std::result::Result<T, AppError>;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct VMConfig {
@@ -120,14 +122,13 @@ pub struct QMConfig {
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DesiredState {
-    pub vms: HashMap<String, VMConfig>
+    pub vms: HashMap<String, VMConfig>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeployedState {
-    pub vms: HashMap<String, DeployedVM>
+    pub vms: HashMap<String, DeployedVM>,
 }
-
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct StateDiff {
@@ -141,11 +142,11 @@ pub struct VMUpdate {
     pub name: String,
     pub config: VMConfig,
     pub changed_fields: Vec<FieldChange>,
-    pub required_action: UpdateAction, 
+    pub required_action: UpdateAction,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum UpdateAction{
+pub enum UpdateAction {
     InPlace,
     Rebuild,
     Protected,
@@ -154,7 +155,7 @@ pub enum UpdateAction{
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub enum FieldChange {
     Memory,
-    Cores, 
+    Cores,
     Sockets,
     Disk,
 }
@@ -164,4 +165,15 @@ pub enum RebuildStrategy {
     Rebuild,
     InPlace,
     Protected,
+}
+
+#[derive(Debug)]
+pub struct ParsedWebhook {
+    pub repository: String,
+    pub hash: String,
+}
+
+#[derive(Clone)]
+struct AppState {
+    main_semaphore: Arc<Semaphore>,
 }

@@ -8,6 +8,7 @@ use tokio::sync::Semaphore;
 mod build;
 mod git;
 mod nix;
+mod parsing;
 mod qm;
 mod state;
 mod types;
@@ -17,26 +18,10 @@ struct Response {
     response: String,
 }
 
-#[derive(Deserialize, Debug)]
-struct Repository {
-    ssh_url: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct GiteaWebhook {
-    repository: Repository,
-    after: String,
-}
-
-#[derive(Clone)]
-struct AppState {
-    main_semaphore: Arc<Semaphore>,
-}
-
 #[axum::debug_handler]
 async fn webhook_handler(
     State(state): State<AppState>,
-    Json(payload): Json<GiteaWebhook>,
+    Json(payload): Json<ParsedWebhook>,
 ) -> StatusCode {
     println!("Raw JSON:\n{}", payload);
     let git_repo_url = payload.repository.ssh_url.clone();
