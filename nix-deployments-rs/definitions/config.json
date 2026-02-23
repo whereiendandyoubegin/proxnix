@@ -9,7 +9,8 @@
       "memory_mb": 10240,
       "disk_gb": 20,
       "storage_location": "local-lvm",
-      "cloud_init": "None"
+      "cloud_init": "None",
+      "protected": false
     },
     "k3s-cp-02": {
       "name": "k3s-cp-02",
@@ -20,7 +21,8 @@
       "memory_mb": 10240,
       "disk_gb": 20,
       "storage_location": "local-lvm",
-      "cloud_init": "None"
+      "cloud_init": "None",
+      "protected": false
     },
     "k3s-wrk-01": {
       "name": "k3s-wrk-01",
@@ -33,7 +35,8 @@
       "storage_location": "local-lvm",
       "cloud_init": {
         "StorageReference": "local:iso/cloud-init-worker.iso"
-      }
+      },
+      "protected": false
     }
   }
 }

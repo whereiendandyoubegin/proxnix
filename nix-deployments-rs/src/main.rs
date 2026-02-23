@@ -1,29 +1,28 @@
-use axum::{
-    extract::State, http::StatusCode, routing::post, Json, Router
-};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 
-use std::{sync::Arc, thread::sleep, time::Duration};
 use serde::Deserialize;
+use std::fmt::Display;
+use std::{sync::Arc, thread::sleep, time::Duration};
 use tokio::sync::Semaphore;
 
-mod state;
 mod build;
-mod types;
-mod qm;
-mod nix;
 mod git;
+mod nix;
+mod qm;
+mod state;
+mod types;
 
 #[derive(Deserialize)]
 struct Response {
-    response: String
+    response: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct Repository {
     ssh_url: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct GiteaWebhook {
     repository: Repository,
     after: String,
@@ -31,14 +30,15 @@ struct GiteaWebhook {
 
 #[derive(Clone)]
 struct AppState {
-    main_semaphore: Arc<Semaphore>
+    main_semaphore: Arc<Semaphore>,
 }
 
 #[axum::debug_handler]
 async fn webhook_handler(
     State(state): State<AppState>,
     Json(payload): Json<GiteaWebhook>,
-    ) -> StatusCode { 
+) -> StatusCode {
+    println!("Raw JSON:\n{}", payload);
     let git_repo_url = payload.repository.ssh_url.clone();
     let current_git_commit = payload.after.clone();
 
@@ -48,16 +48,22 @@ async fn webhook_handler(
     };
 
     tokio::spawn(async move {
-        println!("Pipeline started for repo: {}, commit: {}", git_repo_url, current_git_commit);
+        println!(
+            "Pipeline started for repo: {}, commit: {}",
+            git_repo_url, current_git_commit
+        );
         tokio::time::sleep(Duration::from_secs(10)).await;
-        println!("Pipeline finished for repo: {}, commit: {}", git_repo_url, current_git_commit);
+        println!(
+            "Pipeline finished for repo: {}, commit: {}",
+            git_repo_url, current_git_commit
+        );
         drop(permit);
     });
-    StatusCode::OK  
+    StatusCode::OK
 }
 
 #[tokio::main]
-async fn main(){
+async fn main() {
     let config = state::load_json("definitions/config.json");
     println!("{:#?}", config);
     let main_semaphore = Arc::new(Semaphore::new(4));
@@ -71,3 +77,11 @@ async fn main(){
     axum::serve(listener, app).await.unwrap_or_default()
 }
 
+pub fn strip_role(roles: Vec<String>) -> Vec<String> {
+    let stripped = roles
+        .into_iter()
+        .filter(|role: String| role.contains("build-qcow2"))
+        .map(|role| role.strip_prefix("build-qcow2").unwrap)
+        .collect();
+    stripped
+}
