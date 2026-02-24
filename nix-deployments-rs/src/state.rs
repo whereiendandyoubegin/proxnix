@@ -1,6 +1,6 @@
 use crate::types::{
-    AppError, DeployedState, DeployedVM, DesiredState, QMConfig, QMList, Result, StateDiff,
-    UpdateAction, VMConfig, VMUpdate,
+    AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result,
+    StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -141,7 +141,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
     let deployedvms = deployed
         .vms
         .into_iter()
-        .map(|(name, vm)| -> Result<(String, DeployedVM)> {
+        .map(|(_name, vm)| -> Result<(String, DeployedVM)> {
             let config = qm_config(vm.vm_id)?;
             let parsed = parse_qm_config(&config)?;
             Ok((
@@ -191,7 +191,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
 
 pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
     let file = File::create(path)?;
-    let write_state = serde_json::to_writer_pretty(file, state)?;
+    serde_json::to_writer_pretty(file, state)?;
 
     Ok(())
 }
