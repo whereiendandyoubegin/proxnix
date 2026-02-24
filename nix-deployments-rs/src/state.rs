@@ -272,8 +272,21 @@ pub fn load_state() -> Result<DeployedState> {
     Ok(enriched)
 }
 
+pub fn load_deployed_state(path: &str) -> Result<DeployedState> {
+    let p = Path::new(path);
+    if !p.exists() {
+        return Ok(DeployedState {
+            vms: HashMap::new(),
+        });
+    }
+    let file = File::open(p)?;
+    let reader = BufReader::new(file);
+    let state: DeployedState = serde_json::from_reader(reader)?;
+    Ok(state)
+}
+
 pub fn full_diff(config_path: &str) -> Result<StateDiff> {
-    let deployed = load_state()?;
+    let deployed = load_deployed_state(DEPLOYED_STATE_PATH)?;
     let desired = load_json(config_path)?;
     let diff = diff_state(&deployed, &desired);
 

@@ -1,41 +1,39 @@
 {
   "vms": {
-    "k3s-cp-01": {
-      "name": "k3s-cp-01",
+    "k3s-init": {
+      "name": "k3s-init",
       "vm_id": 800,
-      "image_type": "k3s-control",
+      "image_type": "build-qcow2-init",
       "cores": 2,
-      "sockets": 2,
-      "memory_mb": 10240,
-      "disk_gb": 20,
+      "sockets": 1,
+      "memory_mb": 2048,
+      "disk_gb": 10,
       "storage_location": "local-lvm",
       "cloud_init": "None",
       "protected": false
     },
-    "k3s-cp-02": {
-      "name": "k3s-cp-02",
+    "k3s-cp-01": {
+      "name": "k3s-cp-01",
       "vm_id": 801,
-      "image_type": "k3s-control",
+      "image_type": "build-qcow2-cp",
       "cores": 2,
-      "sockets": 2,
-      "memory_mb": 10240,
-      "disk_gb": 20,
+      "sockets": 1,
+      "memory_mb": 2048,
+      "disk_gb": 10,
       "storage_location": "local-lvm",
       "cloud_init": "None",
       "protected": false
     },
     "k3s-wrk-01": {
       "name": "k3s-wrk-01",
-      "vm_id": 805,
-      "image_type": "k3s-worker",
-      "cores": 8,
+      "vm_id": 802,
+      "image_type": "build-qcow2-worker",
+      "cores": 2,
       "sockets": 1,
-      "memory_mb": 15360,
-      "disk_gb": 20,
+      "memory_mb": 2048,
+      "disk_gb": 10,
       "storage_location": "local-lvm",
-      "cloud_init": {
-        "StorageReference": "local:iso/cloud-init-worker.iso"
-      },
+      "cloud_init": "None",
       "protected": false
     }
   }
