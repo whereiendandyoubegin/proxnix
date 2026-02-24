@@ -1,9 +1,13 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 
 use serde::Deserialize;
-use std::fmt::Display;
-use std::{sync::Arc, thread::sleep, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
+
+#[derive(Clone)]
+struct AppState {
+    main_semaphore: Arc<Semaphore>,
+}
 
 mod build;
 mod git;
@@ -21,11 +25,18 @@ struct Response {
 #[axum::debug_handler]
 async fn webhook_handler(
     State(state): State<AppState>,
-    Json(payload): Json<ParsedWebhook>,
+    Json(payload): Json<serde_json::Value>,
 ) -> StatusCode {
-    println!("Raw JSON:\n{}", payload);
-    let git_repo_url = payload.repository.ssh_url.clone();
-    let current_git_commit = payload.after.clone();
+    let parsed = match parsing::webhook_parse(payload) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Failed to parse webhook: {:?}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
+    let git_repo_url = parsed.repository.clone();
+    let current_git_commit = parsed.hash.clone();
 
     let permit = match state.main_semaphore.try_acquire_owned() {
         Ok(permit) => permit,
@@ -65,8 +76,8 @@ async fn main() {
 pub fn strip_role(roles: Vec<String>) -> Vec<String> {
     let stripped = roles
         .into_iter()
-        .filter(|role: String| role.contains("build-qcow2"))
-        .map(|role| role.strip_prefix("build-qcow2").unwrap)
+        .filter(|role: &String| role.contains("build-qcow2"))
+        .map(|role| role.strip_prefix("build-qcow2").unwrap_or("").to_string())
         .collect();
     stripped
 }

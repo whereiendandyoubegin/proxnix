@@ -26,7 +26,28 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
 
     Ok(output_string)
 }
-//TODO Pase this output and use it in qm_set_disk where it is currently set to disk-0
+// Parses output like: "Successfully imported disk as 'unused0:local-lvm:vm-100-disk-1'"
+// Returns the disk reference: "local-lvm:vm-100-disk-1"
+fn parse_importdisk_output(output: &str) -> Result<String> {
+    let inner = output
+        .lines()
+        .find_map(|line| {
+            let start = line.find('\'')?;
+            let end = line.rfind('\'')?;
+            if start < end { Some(&line[start + 1..end]) } else { None }
+        })
+        .ok_or_else(|| AppError::CmdError("could not find disk reference in qm importdisk output".to_string()))?;
+
+    // inner is e.g. "unused0:local-lvm:vm-100-disk-1"
+    // drop the "unusedN:" prefix to get the attachable disk reference
+    let disk_ref = inner
+        .splitn(2, ':')
+        .nth(1)
+        .ok_or_else(|| AppError::CmdError(format!("unexpected importdisk output format: {}", inner)))?;
+
+    Ok(disk_ref.to_string())
+}
+
 pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<String> {
     let qm_importdisk = Command::new("qm")
         .arg("importdisk")
@@ -38,18 +59,18 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
     if !qm_importdisk.status.success() {
         return Err(AppError::CmdError(format!("qm importdisk has failed with exit code: {:?}", qm_importdisk.status.code())));
     }
-    let stdout_bytes = qm_importdisk.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
+    let output_string = String::from_utf8(qm_importdisk.stdout)?;
+    let disk_ref = parse_importdisk_output(&output_string)?;
 
-    Ok(output_string)
+    Ok(disk_ref)
 }
 
-pub fn qm_set_disk(vm_id: u32, storage: &str, disk_slot: &str) -> Result<String> {
+pub fn qm_set_disk(vm_id: u32, disk_ref: &str, disk_slot: &str) -> Result<String> {
     let qm_set_disk = Command::new("qm")
         .arg("set")
         .arg(vm_id.to_string())
         .arg(format!("--{}", disk_slot))
-        .arg(format!("{}:vm-{}-disk-0", storage, vm_id))
+        .arg(disk_ref)
         .arg("--boot")
         .arg(format!("order={}", disk_slot))
         .output()?;

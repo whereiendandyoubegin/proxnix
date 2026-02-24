@@ -134,7 +134,7 @@ pub struct DeployedState {
 pub struct StateDiff {
     pub to_create: Vec<VMConfig>,
     pub to_update: Vec<VMUpdate>,
-    pub to_delete: Vec<String>,
+    pub to_delete: Vec<DeployedVM>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -173,7 +173,3 @@ pub struct ParsedWebhook {
     pub hash: String,
 }
 
-#[derive(Clone)]
-struct AppState {
-    main_semaphore: Arc<Semaphore>,
-}

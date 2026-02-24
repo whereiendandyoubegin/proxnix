@@ -104,13 +104,19 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
         .map(|line| -> Result<QMList>{
             let parts: Vec<&str> = line.split_whitespace().collect();
 
+            let mut col = |n: usize| -> crate::types::Result<&str> {
+                parts.get(n).copied().ok_or_else(|| AppError::ParsingModuleError(
+                    format!("qm list line has fewer columns than expected: '{}'", line)
+                ))
+            };
+
             Ok(QMList {
-                vm_id: parts[0].parse()?,
-                name: parts[1].to_string(),
-                status: parts[2].to_string(),
-                mem_mb: parts[3].parse()?,
-                bootdisk_gb: parts[4].parse()?,
-                pid: parts[5].parse()?,
+                vm_id: col(0)?.parse()?,
+                name: col(1)?.to_string(),
+                status: col(2)?.to_string(),
+                mem_mb: col(3)?.parse()?,
+                bootdisk_gb: col(4)?.parse()?,
+                pid: col(5)?.parse()?,
             })
         })
         .collect();
@@ -180,7 +186,7 @@ pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
 pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
     let mut to_update: Vec<VMUpdate> = Vec::new();
-    let mut to_delete: Vec<String> = Vec::new();
+    let mut to_delete: Vec<DeployedVM> = Vec::new();
     
     for (name, vmconfig) in &desired.vms {
         let mut changes = Vec::new();
@@ -225,7 +231,7 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
     
     for (name, deployed_vm) in &deployed.vms {
         if !desired.vms.contains_key(name) {
-            to_delete.push(name.clone())
+            to_delete.push(deployed_vm.clone())
         }
     }
     
