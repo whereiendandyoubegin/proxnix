@@ -1,8 +1,4 @@
-use crate::types::{
-    AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result,
-    StateDiff, UpdateAction, VMConfig, VMUpdate,
-};
-use std::path::Path;
+use crate::types::{AppError, FieldChange, Result, VMConfig, VMUpdate};
 use std::process::Command;
 
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
