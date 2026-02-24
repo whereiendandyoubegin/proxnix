@@ -13,6 +13,8 @@ use std::process::{Command, Output};
 use std::rc::Rc;
 use tokio::sync::mpsc::error::SendError;
 
+pub const DEPLOYED_STATE_PATH: &str = "/var/lib/proxnix/deployed_state.json";
+
 pub fn load_json(path: &str) -> Result<DesiredState> {
     let file = File::open(path)?;
     let file_read = BufReader::new(file);

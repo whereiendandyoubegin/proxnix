@@ -1,12 +1,12 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 
-use serde::Deserialize;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 struct AppState {
-    main_semaphore: Arc<Semaphore>,
+    semaphore: Arc<Semaphore>,
+    config_path: String,
 }
 
 mod build;
@@ -16,11 +16,6 @@ mod parsing;
 mod qm;
 mod state;
 mod types;
-
-#[derive(Deserialize)]
-struct Response {
-    response: String,
-}
 
 #[axum::debug_handler]
 async fn webhook_handler(
@@ -38,32 +33,40 @@ async fn webhook_handler(
     let git_repo_url = parsed.repository.clone();
     let current_git_commit = parsed.hash.clone();
 
-    let permit = match state.main_semaphore.try_acquire_owned() {
+    let permit = match state.semaphore.try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => return StatusCode::TOO_MANY_REQUESTS,
     };
 
-    tokio::spawn(async move {
+    let config_path = state.config_path.clone();
+
+    tokio::task::spawn_blocking(move || {
         println!(
             "Pipeline started for repo: {}, commit: {}",
             git_repo_url, current_git_commit
         );
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        println!(
-            "Pipeline finished for repo: {}, commit: {}",
-            git_repo_url, current_git_commit
-        );
+        match build::run_pipeline(&git_repo_url, &current_git_commit, &config_path) {
+            Ok(_) => println!(
+                "Pipeline finished for repo: {}, commit: {}",
+                git_repo_url, current_git_commit
+            ),
+            Err(e) => println!(
+                "Pipeline failed for repo: {}, commit: {}, error: {:?}",
+                git_repo_url, current_git_commit, e
+            ),
+        }
         drop(permit);
     });
+
     StatusCode::OK
 }
 
 #[tokio::main]
 async fn main() {
-    let config = state::load_json("definitions/config.json");
-    println!("{:#?}", config);
-    let main_semaphore = Arc::new(Semaphore::new(4));
-    let app_state = AppState { main_semaphore };
+    let app_state = AppState {
+        semaphore: Arc::new(Semaphore::new(1)),
+        config_path: "definitions/config.json".to_string(),
+    };
 
     let app = Router::new()
         .route("/whlisten", post(webhook_handler))
@@ -71,13 +74,4 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:6780").await.unwrap();
     axum::serve(listener, app).await.unwrap_or_default()
-}
-
-pub fn strip_role(roles: Vec<String>) -> Vec<String> {
-    let stripped = roles
-        .into_iter()
-        .filter(|role: &String| role.contains("build-qcow2"))
-        .map(|role| role.strip_prefix("build-qcow2").unwrap_or("").to_string())
-        .collect();
-    stripped
 }

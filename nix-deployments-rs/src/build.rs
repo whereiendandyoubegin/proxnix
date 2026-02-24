@@ -3,7 +3,7 @@ use crate::nix::{BASE_REPO_PATH, configure_dirs, list_nix_configs, nix_build};
 use crate::qm::{
     qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources,
 };
-use crate::state::{full_diff, save_deployed_state, update_deployed_state_commit};
+use crate::state::{full_diff, load_state, save_deployed_state, update_deployed_state_commit, DEPLOYED_STATE_PATH};
 use crate::types::{
     AppError, RebuildStrategy, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
@@ -31,6 +31,33 @@ pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<St
         })
         .collect::<Result<HashMap<_, _>>>()?;
     Ok(builds)
+}
+
+pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Result<()> {
+    let built_configs = build_all_configs(repo_url, commit_hash)?;
+    let diff = full_diff(config_path)?;
+
+    let newly_imaged: Vec<String> = diff
+        .to_create
+        .iter()
+        .map(|c| c.name.clone())
+        .chain(
+            diff.to_update
+                .iter()
+                .filter(|u| matches!(u.required_action, UpdateAction::Rebuild))
+                .map(|u| u.name.clone()),
+        )
+        .collect();
+
+    reconcile(diff, built_configs)?;
+
+    let mut deployed = load_state()?;
+    for name in &newly_imaged {
+        update_deployed_state_commit(&mut deployed, name, commit_hash);
+    }
+    save_deployed_state(&deployed, DEPLOYED_STATE_PATH)?;
+
+    Ok(())
 }
 
 pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Result<()> {
