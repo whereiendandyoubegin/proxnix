@@ -1,6 +1,9 @@
-use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate };
-use std::process::Command;
+use crate::types::{
+    AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result,
+    StateDiff, UpdateAction, VMConfig, VMUpdate,
+};
 use std::path::Path;
+use std::process::Command;
 
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
 pub fn qm_create(config: &VMConfig) -> Result<String> {
@@ -19,7 +22,10 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
         .arg(config.scsi_hw.to_string())
         .output()?;
     if !qm_create.status.success() {
-        return Err(AppError::CmdError(format!("qm create has failed with exit code: {:?}", qm_create.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm create has failed with exit code: {:?}",
+            qm_create.status.code()
+        )));
     }
     let stdout_bytes = qm_create.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
@@ -34,16 +40,21 @@ fn parse_importdisk_output(output: &str) -> Result<String> {
         .find_map(|line| {
             let start = line.find('\'')?;
             let end = line.rfind('\'')?;
-            if start < end { Some(&line[start + 1..end]) } else { None }
+            if start < end {
+                Some(&line[start + 1..end])
+            } else {
+                None
+            }
         })
-        .ok_or_else(|| AppError::CmdError("could not find disk reference in qm importdisk output".to_string()))?;
+        .ok_or_else(|| {
+            AppError::CmdError("could not find disk reference in qm importdisk output".to_string())
+        })?;
 
     // inner is e.g. "unused0:local-lvm:vm-100-disk-1"
     // drop the "unusedN:" prefix to get the attachable disk reference
-    let disk_ref = inner
-        .splitn(2, ':')
-        .nth(1)
-        .ok_or_else(|| AppError::CmdError(format!("unexpected importdisk output format: {}", inner)))?;
+    let disk_ref = inner.splitn(2, ':').nth(1).ok_or_else(|| {
+        AppError::CmdError(format!("unexpected importdisk output format: {}", inner))
+    })?;
 
     Ok(disk_ref.to_string())
 }
@@ -57,7 +68,10 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
         .arg("--format=qcow2")
         .output()?;
     if !qm_importdisk.status.success() {
-        return Err(AppError::CmdError(format!("qm importdisk has failed with exit code: {:?}", qm_importdisk.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm importdisk has failed with exit code: {:?}",
+            qm_importdisk.status.code()
+        )));
     }
     let output_string = String::from_utf8(qm_importdisk.stdout)?;
     let disk_ref = parse_importdisk_output(&output_string)?;
@@ -75,7 +89,10 @@ pub fn qm_set_disk(vm_id: u32, disk_ref: &str, disk_slot: &str) -> Result<String
         .arg(format!("order={}", disk_slot))
         .output()?;
     if !qm_set_disk.status.success() {
-        return Err(AppError::CmdError(format!("qm set disk has failed with the exit code: {:?}", qm_set_disk.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm set disk has failed with the exit code: {:?}",
+            qm_set_disk.status.code()
+        )));
     }
     let stdout_bytes = qm_set_disk.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
@@ -93,7 +110,10 @@ pub fn qm_set_agent(vm_id: u32) -> Result<String> {
         .arg("socket")
         .output()?;
     if !qm_set_agent.status.success() {
-        return Err(AppError::CmdError(format!("qm set agent has failed with the exit code: {:?}", qm_set_agent.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm set agent has failed with the exit code: {:?}",
+            qm_set_agent.status.code()
+        )));
     }
     let stdout_bytes = qm_set_agent.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
@@ -107,14 +127,16 @@ pub fn qm_template(vm_id: u32) -> Result<String> {
         .arg(vm_id.to_string())
         .output()?;
     if !qm_template.status.success() {
-        return Err(AppError::CmdError(format!("qm template has failed with the exit code: {:?}", qm_template.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm template has failed with the exit code: {:?}",
+            qm_template.status.code()
+        )));
     }
     let stdout_bytes = qm_template.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
 
     Ok(output_string)
 }
-
 
 pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String> {
     let qm_clone = Command::new("qm")
@@ -127,7 +149,10 @@ pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String
         .arg("0")
         .output()?;
     if !qm_clone.status.success() {
-        return Err(AppError::CmdError(format!("qm clone has failed with the exit code: {:?}", qm_clone.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm clone has failed with the exit code: {:?}",
+            qm_clone.status.code()
+        )));
     }
     let stdout_bytes = qm_clone.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
@@ -135,14 +160,16 @@ pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String
     Ok(output_string)
 }
 
-
 pub fn qm_destroy(vm_id: u32) -> Result<String> {
     let qm_destroy = Command::new("qm")
         .arg("destroy")
         .arg(vm_id.to_string())
         .output()?;
     if !qm_destroy.status.success() {
-        return Err(AppError::CmdError(format!("qm destroy has failed with the exit code: {:?}", qm_destroy.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm destroy has failed with the exit code: {:?}",
+            qm_destroy.status.code()
+        )));
     }
     let stdout_bytes = qm_destroy.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
@@ -150,3 +177,34 @@ pub fn qm_destroy(vm_id: u32) -> Result<String> {
     Ok(output_string)
 }
 
+pub fn qm_set_resources(vm_id: u32, update: &VMUpdate) -> Result<String> {
+    let mut qm_set_resources = Command::new("qm");
+    qm_set_resources.arg("set");
+    qm_set_resources.arg(vm_id.to_string());
+
+    for field in &update.changed_fields {
+        match field {
+            FieldChange::Memory => {
+                qm_set_resources
+                    .arg("--memory")
+                    .arg(update.config.memory_mb.to_string());
+            }
+            FieldChange::Cores => {
+                qm_set_resources
+                    .arg("--cores")
+                    .arg(update.config.cores.to_string());
+            }
+            FieldChange::Sockets => {
+                qm_set_resources
+                    .arg("--sockets")
+                    .arg(update.config.sockets.to_string());
+            }
+            _ => {}
+        }
+    }
+    let output = qm_set_resources.output()?;
+    let stdout_bytes = output.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}

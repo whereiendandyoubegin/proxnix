@@ -30,7 +30,7 @@ pub fn find_string(json: &serde_json::Value, predicate: &impl Fn(&str) -> bool) 
             }
         }
         Value::Array(array) => {
-            for (a) in array {
+            for a in array {
                 let result = find_string(a, predicate);
                 if result.is_some() {
                     return result;
