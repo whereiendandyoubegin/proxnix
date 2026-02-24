@@ -1,15 +1,17 @@
-use crate::types::{ AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate };
-use std::fmt::DebugTuple;
-use std::io::BufReader;
-use std::path::Path;
-use std::fs::{self, File};
-use std::rc::Rc;
+use crate::types::{
+    AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result,
+    StateDiff, UpdateAction, VMConfig, VMUpdate,
+};
 use git2::CheckoutNotificationType;
 use serde_json::Value;
-use std::process::{Command, Output};
 use std::collections::HashMap;
-
-
+use std::fmt::DebugTuple;
+use std::fs::{self, File};
+use std::io::BufReader;
+use std::path::Path;
+use std::process::{Command, Output};
+use std::rc::Rc;
+use tokio::sync::mpsc::error::SendError;
 
 pub fn load_json(path: &str) -> Result<DesiredState> {
     let file = File::open(path)?;
@@ -20,15 +22,16 @@ pub fn load_json(path: &str) -> Result<DesiredState> {
 }
 
 pub fn qm_list() -> Result<String> {
-    let qm_list = Command::new("qm")
-        .arg("list")
-        .output()?;
+    let qm_list = Command::new("qm").arg("list").output()?;
     if !qm_list.status.success() {
-        return Err(AppError::CmdError(format!("qm list has failed with exit code: {:?}", qm_list.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm list has failed with exit code: {:?}",
+            qm_list.status.code()
+        )));
     }
     let stdout_bytes = qm_list.stdout;
     let output_string = String::from_utf8(stdout_bytes)?;
-    
+
     Ok(output_string)
 }
 
@@ -38,7 +41,10 @@ pub fn qm_config(vm_id: u32) -> Result<String> {
         .arg(vm_id.to_string())
         .output()?;
     if !qm_config.status.success() {
-        return Err(AppError::CmdError(format!("qm config has failed with exit code: {:?}", qm_config.status.code())));
+        return Err(AppError::CmdError(format!(
+            "qm config has failed with exit code: {:?}",
+            qm_config.status.code()
+        )));
     }
 
     let stdout_bytes = qm_config.stdout;
@@ -51,46 +57,53 @@ pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
     let qmconfig = output_string
         .lines()
         .fold(QMConfig::default(), |mut accumulator, line| {
-           let (key, value) = line.split_once(':').unwrap(); // TODO Maybe make a function to validate qm config output in the future
-           let key = key.trim();
-           let value = value.trim();
+            let (key, value) = line.split_once(':').unwrap(); // TODO Maybe make a function to validate qm config output in the future
+            let key = key.trim();
+            let value = value.trim();
 
-           match key {
-               "agent" => accumulator.agent = value.parse().unwrap(),
-               "balloon" => accumulator.balloon = value.parse().unwrap(),
-               "boot" => accumulator.boot = value.parse().unwrap(),
-               "bootdisk" => accumulator.bootdisk = value.parse().unwrap(),
-               "cipassword" => accumulator.cipassword = Some(value.to_string()),
-               "ciuser" => accumulator.ciuser = Some(value.to_string()),
-               "cores" => accumulator.cores = value.parse().unwrap(),
-               "cpu" => accumulator.cpu = value.parse().unwrap(),
-               "cpuunits" => accumulator.cpuunits = value.parse().unwrap(),
-               "memory" => accumulator.memory = value.parse().unwrap(),
-               "meta" => accumulator.meta = value.parse().unwrap(),
-               "name" => accumulator.name = value.parse().unwrap(),
-               "numa" => accumulator.numa = value.parse().unwrap(),
-               "onboot" => accumulator.onboot = value.parse().unwrap(),
-               "protection" => accumulator.protection = value.parse().unwrap(),
-               "sockets" => accumulator.sockets = value.parse().unwrap(),
-               "sshkeys" => accumulator.sshkeys = Some(value.to_string()),
-               "vga" => accumulator.vga = value.parse().unwrap(),
-               "vmgenid" => accumulator.vmgenid = value.parse().unwrap(),
-               key if key.starts_with("scsi")
-               || key.starts_with("sata")
-               || key.starts_with("ide")
-               || key.starts_with("virtio") => {
-                   accumulator.disks.insert(key.to_string(), value.to_string());
-               }
-               key if key.starts_with("ipconfig") => {
-                   accumulator.ipconfigs.insert(key.to_string(), value.to_string());
-               }
-               key if key.starts_with("net") => {
-                   accumulator.networks.insert(key.to_string(), value.to_string());
-               }
-               key if key.starts_with("serial") => {
-                   accumulator.serial.insert(key.to_string(), value.to_string());
-               }
-               _ => {}
+            match key {
+                "agent" => accumulator.agent = value.parse().unwrap(),
+                "balloon" => accumulator.balloon = value.parse().unwrap(),
+                "boot" => accumulator.boot = value.parse().unwrap(),
+                "bootdisk" => accumulator.bootdisk = value.parse().unwrap(),
+                "cipassword" => accumulator.cipassword = Some(value.to_string()),
+                "ciuser" => accumulator.ciuser = Some(value.to_string()),
+                "cores" => accumulator.cores = value.parse().unwrap(),
+                "cpu" => accumulator.cpu = value.parse().unwrap(),
+                "cpuunits" => accumulator.cpuunits = value.parse().unwrap(),
+                "memory" => accumulator.memory = value.parse().unwrap(),
+                "meta" => accumulator.meta = value.parse().unwrap(),
+                "name" => accumulator.name = value.parse().unwrap(),
+                "numa" => accumulator.numa = value.parse().unwrap(),
+                "onboot" => accumulator.onboot = value.parse().unwrap(),
+                "protection" => accumulator.protection = value.parse().unwrap(),
+                "sockets" => accumulator.sockets = value.parse().unwrap(),
+                "sshkeys" => accumulator.sshkeys = Some(value.to_string()),
+                "vga" => accumulator.vga = value.parse().unwrap(),
+                "vmgenid" => accumulator.vmgenid = value.parse().unwrap(),
+                key if key.starts_with("scsi")
+                    || key.starts_with("sata")
+                    || key.starts_with("ide")
+                    || key.starts_with("virtio") =>
+                {
+                    accumulator.disks.insert(key.to_string(), value.to_string());
+                }
+                key if key.starts_with("ipconfig") => {
+                    accumulator
+                        .ipconfigs
+                        .insert(key.to_string(), value.to_string());
+                }
+                key if key.starts_with("net") => {
+                    accumulator
+                        .networks
+                        .insert(key.to_string(), value.to_string());
+                }
+                key if key.starts_with("serial") => {
+                    accumulator
+                        .serial
+                        .insert(key.to_string(), value.to_string());
+                }
+                _ => {}
             }
             accumulator
         });
@@ -98,16 +111,19 @@ pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
 }
 
 pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
-      let lines = output_string
+    let lines = output_string
         .lines()
         .skip(1)
-        .map(|line| -> Result<QMList>{
+        .map(|line| -> Result<QMList> {
             let parts: Vec<&str> = line.split_whitespace().collect();
 
             let mut col = |n: usize| -> crate::types::Result<&str> {
-                parts.get(n).copied().ok_or_else(|| AppError::ParsingModuleError(
-                    format!("qm list line has fewer columns than expected: '{}'", line)
-                ))
+                parts.get(n).copied().ok_or_else(|| {
+                    AppError::ParsingModuleError(format!(
+                        "qm list line has fewer columns than expected: '{}'",
+                        line
+                    ))
+                })
             };
 
             Ok(QMList {
@@ -120,58 +136,60 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
             })
         })
         .collect();
-    
-        lines
+
+    lines
 }
 
 pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
-    
-    let deployedvms = deployed.vms
+    let deployedvms = deployed
+        .vms
         .into_iter()
         .map(|(name, vm)| -> Result<(String, DeployedVM)> {
             let config = qm_config(vm.vm_id)?;
             let parsed = parse_qm_config(&config)?;
-            Ok((vm.vm_name.clone(), DeployedVM {
-                vm_id: vm.vm_id,
-                vm_name: vm.vm_name,
-                commit_hash: vm.commit_hash,
-                template_id: vm.template_id,
-                mem_mb: vm.mem_mb,
-                bootdisk_gb: vm.bootdisk_gb,
-                status: vm.status,
-                pid: vm.pid,
-                cores: parsed.cores as u16,
-                sockets: parsed.sockets,
-            }))
+            Ok((
+                vm.vm_name.clone(),
+                DeployedVM {
+                    vm_id: vm.vm_id,
+                    vm_name: vm.vm_name,
+                    commit_hash: vm.commit_hash,
+                    template_id: vm.template_id,
+                    mem_mb: vm.mem_mb,
+                    bootdisk_gb: vm.bootdisk_gb,
+                    status: vm.status,
+                    pid: vm.pid,
+                    cores: parsed.cores as u16,
+                    sockets: parsed.sockets,
+                },
+            ))
         })
         .collect::<Result<HashMap<_, _>>>()?;
-    Ok(DeployedState {
-        vms: deployedvms
-    })
+    Ok(DeployedState { vms: deployedvms })
 }
 
 pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
     let lists = qmlists
         .into_iter()
         .map(|qmlist| -> (String, DeployedVM) {
-            (qmlist.name.clone(), DeployedVM {
-                vm_id: qmlist.vm_id,
-                vm_name: qmlist.name,
-                commit_hash: None,
-                template_id: None,
-                mem_mb: qmlist.mem_mb,
-                bootdisk_gb: qmlist.bootdisk_gb,
-                status: qmlist.status,
-                pid: qmlist.pid,
-                cores: 0, //placeholder
-                sockets: 0, //placeholder
-            })
-       })
+            (
+                qmlist.name.clone(),
+                DeployedVM {
+                    vm_id: qmlist.vm_id,
+                    vm_name: qmlist.name,
+                    commit_hash: None,
+                    template_id: None,
+                    mem_mb: qmlist.mem_mb,
+                    bootdisk_gb: qmlist.bootdisk_gb,
+                    status: qmlist.status,
+                    pid: qmlist.pid,
+                    cores: 0,   //placeholder
+                    sockets: 0, //placeholder
+                },
+            )
+        })
         .collect();
 
-        DeployedState {
-            vms: lists
-        }
+    DeployedState { vms: lists }
 }
 
 pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
@@ -181,16 +199,14 @@ pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
     Ok(())
 }
 
-
-
 pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
     let mut to_update: Vec<VMUpdate> = Vec::new();
     let mut to_delete: Vec<DeployedVM> = Vec::new();
-    
+
     for (name, vmconfig) in &desired.vms {
         let mut changes = Vec::new();
-        
+
         if deployed.vms.contains_key(name) {
             let deployed_vm = deployed.vms.get(name).unwrap();
             if vmconfig.memory_mb != deployed_vm.mem_mb {
@@ -206,35 +222,32 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
                 changes.push(FieldChange::Sockets);
             }
             if !changes.is_empty() {
+                let action = if vmconfig.protected {
+                    UpdateAction::Protected
+                } else if changes.contains(&FieldChange::Disk) {
+                    UpdateAction::Rebuild
+                } else {
+                    UpdateAction::InPlace
+                };
 
-            let action = if vmconfig.protected {
-                UpdateAction::Protected
-            } else if changes.contains(&FieldChange::Disk) {
-                UpdateAction::Rebuild
-            } else {
-                UpdateAction::InPlace
-            };
-            
-            to_update.push(VMUpdate {
-                name: name.clone(),
-                config: vmconfig.clone(),
-                changed_fields: changes,
-                required_action: action,
-            });         
-        }
-        }
-        else {
+                to_update.push(VMUpdate {
+                    name: name.clone(),
+                    config: vmconfig.clone(),
+                    changed_fields: changes,
+                    required_action: action,
+                });
+            }
+        } else {
             to_create.push((vmconfig.clone()))
         }
     }
 
-    
     for (name, deployed_vm) in &deployed.vms {
         if !desired.vms.contains_key(name) {
             to_delete.push(deployed_vm.clone())
         }
     }
-    
+
     StateDiff {
         to_create,
         to_update,
@@ -242,7 +255,13 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
     }
 }
 
-pub fn load_state() ->  Result<DeployedState> {
+pub fn update_deployed_state_commit(deployed: &mut DeployedState, name: &str, commit: &str) -> () {
+    if let Some(vm) = deployed.vms.get_mut(name) {
+        vm.commit_hash = Some(String::from(commit))
+    }
+}
+
+pub fn load_state() -> Result<DeployedState> {
     let qm_list = qm_list()?;
     let parsed_qm_list = parse_qm_list(&qm_list)?;
     let deployed_vm = list_to_deployed_vm(parsed_qm_list);
@@ -258,13 +277,13 @@ pub fn full_diff(config_path: &str) -> Result<StateDiff> {
 
     Ok(diff)
 }
-    
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    
+
     pub fn test_parse_qm_list() {
         let sample = "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID
        100 master               stopped    8000              52.00 0
@@ -292,9 +311,7 @@ mod tests {
       9006 nixos-template       stopped    4096               3.91 0
       9010 clean-ubuntu         stopped    1024               2.20 0";
 
-
         let result = parse_qm_list(sample);
         println!("{:#?}", result)
     }
-
 }
