@@ -1,10 +1,19 @@
 use crate::types::{AppError, Result};
-use git2::{Oid, Repository};
+use git2::{FetchOptions, Oid, RemoteCallbacks, Repository, build::RepoBuilder};
+use std::path::Path;
 
 pub fn git_clone(repo_url: &str, dest_path: &str) -> Result<Repository> {
-    let repo = Repository::clone(repo_url, dest_path)
-        .map_err(|e| AppError::GitError(e.to_string()))?;
-    Ok(repo)   
+    let mut callbacks = RemoteCallbacks::new();
+    callbacks.credentials(|_url, username, _allowed| {
+        git2::Cred::ssh_key_from_agent(username.unwrap_or("git"))
+    });
+    let mut fetch_opts = FetchOptions::new();
+    fetch_opts.remote_callbacks(callbacks);
+    let mut builder = RepoBuilder::new();
+    builder.fetch_options(fetch_opts);
+    builder
+        .clone(repo_url, Path::new(dest_path))
+        .map_err(|e| AppError::GitError(e.to_string()))
 }
 
 pub fn git_checkout(repo: &Repository, commit_hash: &str) -> Result<()> {
