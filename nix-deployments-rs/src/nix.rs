@@ -67,9 +67,9 @@ pub fn configure_dirs(commit_hash: &str, configs: Vec<String>, repo_path: &str) 
 
     let base = repo_base.join(commit_hash);
 
-    std::fs::create_dir(&base)?;
+    std::fs::create_dir_all(&base)?;
     for config in configs {
-        std::fs::create_dir(base.join(config))?;
+        std::fs::create_dir_all(base.join(config))?;
     }
 
     Ok(())

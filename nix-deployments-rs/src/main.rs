@@ -61,7 +61,7 @@ async fn main() {
 
     let app_state = AppState {
         semaphore: Arc::new(Semaphore::new(1)),
-        config_path: "definitions/config.json".to_string(),
+        config_path: state::CONFIG_PATH.to_string(),
     };
 
     let app = Router::new()
