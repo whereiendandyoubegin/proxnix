@@ -3,7 +3,10 @@ use crate::nix::{BASE_REPO_PATH, configure_dirs, list_nix_configs, nix_build};
 use crate::qm::{
     qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources, qm_start,
 };
-use crate::state::{full_diff, get_vm_statuses, load_deployed_state, save_deployed_state, update_deployed_state_commit, DEPLOYED_STATE_PATH};
+use crate::state::{
+    DEPLOYED_STATE_PATH, full_diff, get_vm_statuses, load_deployed_state, save_deployed_state,
+    update_deployed_state_commit,
+};
 use crate::types::{
     AppError, DeployedVM, FieldChange, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
@@ -25,10 +28,17 @@ pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
 
 pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<String, String>> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
-    info!("Cloning {} at commit {} to {}", repo_url, commit_hash, dest_path);
+    info!(
+        "Cloning {} at commit {} to {}",
+        repo_url, commit_hash, dest_path
+    );
     git_ensure_commit(&repo_url, &dest_path, &commit_hash)?;
     let config_names = list_nix_configs(&dest_path)?;
-    info!("Found {} nix configs: {:?}", config_names.len(), config_names);
+    info!(
+        "Found {} nix configs: {:?}",
+        config_names.len(),
+        config_names
+    );
     configure_dirs(config_names.clone(), &dest_path)?;
     let builds = config_names
         .iter()
@@ -60,8 +70,10 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
         info!("{}: no longer in config -> will be destroyed", vm.vm_name);
     }
     for update in &diff.to_update {
-        let changes: Vec<String> = update.changed_fields.iter().map(|f| {
-            match f {
+        let changes: Vec<String> = update
+            .changed_fields
+            .iter()
+            .map(|f| match f {
                 FieldChange::Memory => {
                     format!("memory")
                 }
@@ -74,17 +86,29 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
                 FieldChange::Disk => {
                     format!("disk")
                 }
-            }
-        }).collect();
+            })
+            .collect();
         match &update.required_action {
             UpdateAction::InPlace => {
-                info!("{}: {} changed -> in-place update", update.name, changes.join(", "));
+                info!(
+                    "{}: {} changed -> in-place update",
+                    update.name,
+                    changes.join(", ")
+                );
             }
             UpdateAction::Rebuild => {
-                info!("{}: {} changed -> full rebuild", update.name, changes.join(", "));
+                info!(
+                    "{}: {} changed -> full rebuild",
+                    update.name,
+                    changes.join(", ")
+                );
             }
             UpdateAction::Protected => {
-                warn!("{}: {} changed but vm is protected -> no action", update.name, changes.join(", "));
+                warn!(
+                    "{}: {} changed but vm is protected -> no action",
+                    update.name,
+                    changes.join(", ")
+                );
             }
         }
     }
@@ -113,7 +137,9 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
 
     let mut deployed = load_deployed_state(DEPLOYED_STATE_PATH)?;
 
-    deployed.vms.retain(|_, v| !to_delete_ids.contains(&v.vm_id));
+    deployed
+        .vms
+        .retain(|_, v| !to_delete_ids.contains(&v.vm_id));
 
     for config in &new_vms {
         deployed.vms.insert(
@@ -182,14 +208,20 @@ pub fn ensure_vms_running() {
             return;
         }
     };
-    info!("Periodic reconcile: checking {} managed VMs", deployed.vms.len());
+    info!(
+        "Periodic reconcile: checking {} managed VMs",
+        deployed.vms.len()
+    );
     for (name, vm) in &deployed.vms {
         match actual.get(&vm.vm_id).map(|s| s.as_str()) {
             Some("running") => {
                 info!("Periodic reconcile: {} (id: {}) is running", name, vm.vm_id);
             }
             Some(status) => {
-                info!("Periodic reconcile: {} (id: {}) is {} -> starting", name, vm.vm_id, status);
+                info!(
+                    "Periodic reconcile: {} (id: {}) is {} -> starting",
+                    name, vm.vm_id, status
+                );
                 match qm_start(vm.vm_id) {
                     Ok(true) => {
                         info!("Periodic reconcile: started VM {}", name);
@@ -203,7 +235,10 @@ pub fn ensure_vms_running() {
                 }
             }
             None => {
-                warn!("Periodic reconcile: {} (id: {}) is in state but does not exist in Proxmox", name, vm.vm_id);
+                warn!(
+                    "Periodic reconcile: {} (id: {}) is in state but does not exist in Proxmox",
+                    name, vm.vm_id
+                );
             }
         }
     }
@@ -233,12 +268,13 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
             }
             UpdateAction::Rebuild => {
                 info!("Rebuilding VM {} (destroy + provision)", actions.name);
-                let qcow_path = built_configs
-                    .get(&actions.config.image_type)
-                    .ok_or(AppError::CmdError(format!(
-                        "No built image for type '{}' (vm: {})",
-                        actions.config.image_type, actions.name
-                    )))?;
+                let qcow_path =
+                    built_configs
+                        .get(&actions.config.image_type)
+                        .ok_or(AppError::CmdError(format!(
+                            "No built image for type '{}' (vm: {})",
+                            actions.config.image_type, actions.name
+                        )))?;
                 qm_destroy(actions.config.vm_id)?;
                 provision_vm(&actions.config, qcow_path)?;
             }
