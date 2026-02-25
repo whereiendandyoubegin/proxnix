@@ -31,7 +31,12 @@ pub fn git_checkout(repo: &Repository, commit_hash: &str) -> Result<()> {
 }
 
 pub fn git_ensure_commit(repo_url: &str, dest_path: &str, commit_hash: &str) -> Result<Repository> {
-    let repo = git_clone(repo_url, dest_path)?;
+    let repo = if Path::new(dest_path).exists() {
+        info!("Repo already exists at {}, opening", dest_path);
+        Repository::open(dest_path).map_err(|e| AppError::GitError(e.to_string()))?
+    } else {
+        git_clone(repo_url, dest_path)?
+    };
     git_checkout(&repo, commit_hash)?;
 
     Ok(repo)
