@@ -8,7 +8,7 @@ Another big goal is keeping state local, easily available to the daemon, and ref
 
 ## State of development
 
-This is currently in an MVP state and compiles and runs. I am in the process of testing it more thorougly. A few goals for a roadmap are:
+This is currently in an MVP state and compiles and runs on a proxmox host. A few goals for a roadmap are:
 - Nix based healthchecks with sensible built in checks that can apply to any linux machine
 - Fixing TODOs in the code, there are a few places where the program could panic
 - Adding a TUI or web GUI for deployment
@@ -18,3 +18,9 @@ This is currently in an MVP state and compiles and runs. I am in the process of 
 
 This is a daemon which runs on the proxmox platform, as such you need to install it on the proxmox host itself.
 Nix is required for installation, a Nix flake installs the software. Nixpkgs is required as a channel. 
+Run `nix build`. This builds the binary in result/bin. You have to run the binary with the following args once:
+- --init /path/to/your/definitions/config.json
+
+## Usage
+
+There are example configs in the definitions folder. The nix flake must evaluate and it must contain the qcow2 module. Otherwise it can be pretty variable.
