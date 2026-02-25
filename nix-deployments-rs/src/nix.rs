@@ -1,6 +1,7 @@
 use crate::types::{AppError, Result};
 use serde_json;
 use std::process::Command;
+use tracing::info;
 
 pub const BASE_REPO_PATH: &str = "/tmp/proxnix/repos";
 
@@ -14,9 +15,11 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
         .arg("--json")
         .output()?;
     if !nix_eval.status.success() {
+        let stderr = String::from_utf8_lossy(&nix_eval.stderr);
         return Err(AppError::CmdError(format!(
-            "Nix eval has failed with the exit code: {:?}",
-            nix_eval.status.code()
+            "Nix eval failed (exit: {:?}): {}",
+            nix_eval.status.code(),
+            stderr
         )));
     }
     let stdout_bytes = nix_eval.stdout;
@@ -27,6 +30,7 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
 }
 
 pub fn nix_build(config_name: &str, repo_path: &str, commit_hash: &str) -> Result<String> {
+    info!("Running nix build for config '{}' in {}", config_name, repo_path);
     let nix_build = Command::new("nix")
         .current_dir(repo_path)
         .arg("build")
@@ -41,12 +45,16 @@ pub fn nix_build(config_name: &str, repo_path: &str, commit_hash: &str) -> Resul
         ))
         .output()?;
     if !nix_build.status.success() {
+        let stderr = String::from_utf8_lossy(&nix_build.stderr);
         return Err(AppError::CmdError(format!(
-            "Nix build has failed with the exit code: {:?}",
-            nix_build.status.code()
+            "Nix build failed for '{}' (exit: {:?}): {}",
+            config_name,
+            nix_build.status.code(),
+            stderr
         )));
     }
     let result_path = format!("{}/{}/{}/result", repo_path, commit_hash, config_name);
+    info!("Nix build succeeded for '{}': {}", config_name, result_path);
 
     Ok(result_path)
 }

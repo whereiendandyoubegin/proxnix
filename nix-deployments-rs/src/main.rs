@@ -1,7 +1,7 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 struct AppState {
@@ -25,7 +25,7 @@ async fn webhook_handler(
     let parsed = match parsing::webhook_parse(payload) {
         Ok(p) => p,
         Err(e) => {
-            println!("Failed to parse webhook: {:?}", e);
+            error!("Failed to parse webhook: {:?}", e);
             return StatusCode::BAD_REQUEST;
         }
     };
@@ -35,25 +35,19 @@ async fn webhook_handler(
 
     let permit = match state.semaphore.try_acquire_owned() {
         Ok(permit) => permit,
-        Err(_) => return StatusCode::TOO_MANY_REQUESTS,
+        Err(_) => {
+            warn!("Pipeline already running, rejecting webhook for commit {}", current_git_commit);
+            return StatusCode::TOO_MANY_REQUESTS;
+        }
     };
 
     let config_path = state.config_path.clone();
 
     tokio::task::spawn_blocking(move || {
-        println!(
-            "Pipeline started for repo: {}, commit: {}",
-            git_repo_url, current_git_commit
-        );
+        info!("Pipeline started for repo: {}, commit: {}", git_repo_url, current_git_commit);
         match build::run_pipeline(&git_repo_url, &current_git_commit, &config_path) {
-            Ok(_) => println!(
-                "Pipeline finished for repo: {}, commit: {}",
-                git_repo_url, current_git_commit
-            ),
-            Err(e) => println!(
-                "Pipeline failed for repo: {}, commit: {}, error: {:?}",
-                git_repo_url, current_git_commit, e
-            ),
+            Ok(_) => info!("Pipeline finished for repo: {}, commit: {}", git_repo_url, current_git_commit),
+            Err(e) => error!("Pipeline failed for repo: {}, commit: {}, error: {:?}", git_repo_url, current_git_commit, e),
         }
         drop(permit);
     });
@@ -63,6 +57,8 @@ async fn webhook_handler(
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let app_state = AppState {
         semaphore: Arc::new(Semaphore::new(1)),
         config_path: "definitions/config.json".to_string(),
@@ -73,5 +69,6 @@ async fn main() {
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:6780").await.unwrap();
+    info!("Listening on 0.0.0.0:6780");
     axum::serve(listener, app).await.unwrap_or_default()
 }

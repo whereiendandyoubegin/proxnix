@@ -8,25 +8,32 @@ use crate::types::{
     AppError, DeployedVM, FieldChange, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
 use std::collections::HashMap;
+use tracing::{info, warn};
 
 pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
+    info!("Provisioning VM {} (id: {})", config.name, config.vm_id);
     qm_create(config)?;
     let disk_ref = qm_importdisk(config.vm_id, qcow2_path, &config.storage_location)?;
     qm_set_disk(config.vm_id, &disk_ref, &config.disk_slot)?;
     qm_set_agent(config.vm_id)?;
+    info!("VM {} provisioned successfully", config.name);
 
     Ok(())
 }
 
 pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<String, String>> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
+    info!("Cloning {} at commit {} to {}", repo_url, commit_hash, dest_path);
     git_ensure_commit(&repo_url, &dest_path, &commit_hash)?;
     let config_names = list_nix_configs(&dest_path)?;
+    info!("Found {} nix configs: {:?}", config_names.len(), config_names);
     configure_dirs(&commit_hash, config_names.clone(), &dest_path)?;
     let builds = config_names
         .iter()
         .map(|config_name| -> Result<(String, String)> {
+            info!("Building nix config: {}", config_name);
             let result_path = nix_build(config_name, &dest_path, commit_hash)?;
+            info!("Built {} -> {}", config_name, result_path);
             Ok((config_name.clone(), format!("{}/nixos.qcow2", result_path)))
         })
         .collect::<Result<HashMap<_, _>>>()?;
@@ -34,8 +41,16 @@ pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<St
 }
 
 pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Result<()> {
+    info!("Building all configs for commit {}", commit_hash);
     let built_configs = build_all_configs(repo_url, commit_hash)?;
+    info!("Computing diff from config at {}", config_path);
     let diff = full_diff(config_path)?;
+    info!(
+        "Diff: {} to create, {} to update, {} to delete",
+        diff.to_create.len(),
+        diff.to_update.len(),
+        diff.to_delete.len()
+    );
 
     let newly_imaged: Vec<String> = diff
         .to_create
@@ -104,7 +119,9 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
         update_deployed_state_commit(&mut deployed, name, commit_hash);
     }
 
+    info!("Saving deployed state to {}", DEPLOYED_STATE_PATH);
     save_deployed_state(&deployed, DEPLOYED_STATE_PATH)?;
+    info!("Pipeline complete for commit {}", commit_hash);
 
     Ok(())
 }
@@ -113,28 +130,37 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
     for config in diff.to_create {
         let qcow_path = built_configs
             .get(&config.image_type)
-            .ok_or(AppError::CmdError("Could not create new VM".to_string()))?;
+            .ok_or(AppError::CmdError(format!(
+                "No built image for type '{}' (vm: {})",
+                config.image_type, config.name
+            )))?;
         provision_vm(&config, qcow_path)?;
     }
     for vm in diff.to_delete {
+        info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
         qm_destroy(vm.vm_id)?;
+        info!("Deleted VM {}", vm.vm_name);
     }
     for actions in diff.to_update {
         match &actions.required_action {
             UpdateAction::InPlace => {
+                info!("Updating VM {} in place", actions.name);
                 qm_set_resources(actions.config.vm_id, &actions)?;
+                info!("Updated VM {}", actions.name);
             }
             UpdateAction::Rebuild => {
+                info!("Rebuilding VM {} (destroy + provision)", actions.name);
                 let qcow_path = built_configs
                     .get(&actions.config.image_type)
-                    .ok_or(AppError::CmdError("Could not create new VM".to_string()))?;
+                    .ok_or(AppError::CmdError(format!(
+                        "No built image for type '{}' (vm: {})",
+                        actions.config.image_type, actions.name
+                    )))?;
                 qm_destroy(actions.config.vm_id)?;
                 provision_vm(&actions.config, qcow_path)?;
             }
             UpdateAction::Protected => {
-                // TODO I need to log this properly
-                let message = format!("{} is protected! No action can be taken", actions.name);
-                println!("{}", message);
+                warn!("{} is protected, no action taken", actions.name);
             }
         }
     }
