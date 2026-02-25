@@ -171,6 +171,10 @@ pub fn ensure_vms_running() {
             return;
         }
     };
+    if deployed.vms.is_empty() {
+        info!("Periodic reconcile: no VMs in state");
+        return;
+    }
     let actual = match get_vm_statuses() {
         Ok(s) => s,
         Err(e) => {
@@ -178,22 +182,28 @@ pub fn ensure_vms_running() {
             return;
         }
     };
+    info!("Periodic reconcile: checking {} managed VMs", deployed.vms.len());
     for (name, vm) in &deployed.vms {
         match actual.get(&vm.vm_id).map(|s| s.as_str()) {
-            Some("running") => {}
-            Some(_) => {
+            Some("running") => {
+                info!("Periodic reconcile: {} (id: {}) is running", name, vm.vm_id);
+            }
+            Some(status) => {
+                info!("Periodic reconcile: {} (id: {}) is {} -> starting", name, vm.vm_id, status);
                 match qm_start(vm.vm_id) {
                     Ok(true) => {
                         info!("Periodic reconcile: started VM {}", name);
                     }
-                    Ok(false) => {}
+                    Ok(false) => {
+                        info!("Periodic reconcile: {} already running", name);
+                    }
                     Err(e) => {
                         warn!("Periodic reconcile: failed to start VM {}: {:?}", name, e);
                     }
                 }
             }
             None => {
-                warn!("Periodic reconcile: VM {} (id: {}) is in state but does not exist in Proxmox", name, vm.vm_id);
+                warn!("Periodic reconcile: {} (id: {}) is in state but does not exist in Proxmox", name, vm.vm_id);
             }
         }
     }
