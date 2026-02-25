@@ -27,12 +27,12 @@ pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<St
     git_ensure_commit(&repo_url, &dest_path, &commit_hash)?;
     let config_names = list_nix_configs(&dest_path)?;
     info!("Found {} nix configs: {:?}", config_names.len(), config_names);
-    configure_dirs(&commit_hash, config_names.clone(), &dest_path)?;
+    configure_dirs(config_names.clone(), &dest_path)?;
     let builds = config_names
         .iter()
         .map(|config_name| -> Result<(String, String)> {
             info!("Building nix config: {}", config_name);
-            let result_path = nix_build(config_name, &dest_path, commit_hash)?;
+            let result_path = nix_build(config_name, &dest_path)?;
             info!("Built {} -> {}", config_name, result_path);
             Ok((config_name.clone(), format!("{}/nixos.qcow2", result_path)))
         })

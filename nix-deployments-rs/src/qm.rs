@@ -34,6 +34,9 @@ fn parse_importdisk_output(output: &str) -> Result<String> {
     let inner = output
         .lines()
         .find_map(|line| {
+            if !line.contains("Successfully imported") {
+                return None;
+            }
             let start = line.find('\'')?;
             let end = line.rfind('\'')?;
             if start < end {
@@ -43,11 +46,12 @@ fn parse_importdisk_output(output: &str) -> Result<String> {
             }
         })
         .ok_or_else(|| {
-            AppError::CmdError("could not find disk reference in qm importdisk output".to_string())
+            AppError::CmdError(format!(
+                "could not find disk reference in qm importdisk output: {}",
+                output
+            ))
         })?;
 
-    // inner is e.g. "unused0:local-lvm:vm-100-disk-1"
-    // drop the "unusedN:" prefix to get the attachable disk reference
     let disk_ref = inner.splitn(2, ':').nth(1).ok_or_else(|| {
         AppError::CmdError(format!("unexpected importdisk output format: {}", inner))
     })?;

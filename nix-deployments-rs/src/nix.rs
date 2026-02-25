@@ -30,8 +30,9 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
     Ok(parsed)
 }
 
-pub fn nix_build(config_name: &str, repo_path: &str, commit_hash: &str) -> Result<String> {
+pub fn nix_build(config_name: &str, repo_path: &str) -> Result<String> {
     info!("Running nix build for config '{}' in {}", config_name, repo_path);
+    let result_path = format!("{}/{}/result", repo_path, config_name);
     let nix_build = Command::new("nix")
         .current_dir(repo_path)
         .arg("build")
@@ -40,10 +41,7 @@ pub fn nix_build(config_name: &str, repo_path: &str, commit_hash: &str) -> Resul
             config_name
         ))
         .arg("--out-link")
-        .arg(format!(
-            "{}/{}/{}/result",
-            repo_path, commit_hash, config_name
-        ))
+        .arg(&result_path)
         .output()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
     if !nix_build.status.success() {
@@ -55,7 +53,6 @@ pub fn nix_build(config_name: &str, repo_path: &str, commit_hash: &str) -> Resul
             stderr
         )));
     }
-    let result_path = format!("{}/{}/{}/result", repo_path, commit_hash, config_name);
     info!("Nix build succeeded for '{}': {}", config_name, result_path);
 
     Ok(result_path)
@@ -63,15 +60,12 @@ pub fn nix_build(config_name: &str, repo_path: &str, commit_hash: &str) -> Resul
 
 // TODO I need to finish up some utils to initialise this dir on setup. I will probably do a utils module.
 // I probably wil want to init the user there as well rather than in this module
-pub fn configure_dirs(commit_hash: &str, configs: Vec<String>, repo_path: &str) -> Result<()> {
+pub fn configure_dirs(configs: Vec<String>, repo_path: &str) -> Result<()> {
     let repo_base = std::path::Path::new(repo_path);
     std::fs::create_dir_all(repo_base)?;
 
-    let base = repo_base.join(commit_hash);
-
-    std::fs::create_dir_all(&base)?;
     for config in configs {
-        std::fs::create_dir_all(base.join(config))?;
+        std::fs::create_dir_all(repo_base.join(config))?;
     }
 
     Ok(())
