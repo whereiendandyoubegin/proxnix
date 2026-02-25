@@ -1,7 +1,7 @@
 use crate::git::git_ensure_commit;
 use crate::nix::{BASE_REPO_PATH, configure_dirs, list_nix_configs, nix_build};
 use crate::qm::{
-    qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources,
+    qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources, qm_start,
 };
 use crate::state::{full_diff, load_deployed_state, save_deployed_state, update_deployed_state_commit, DEPLOYED_STATE_PATH};
 use crate::types::{
@@ -16,7 +16,9 @@ pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
     let disk_ref = qm_importdisk(config.vm_id, qcow2_path, &config.storage_location)?;
     qm_set_disk(config.vm_id, &disk_ref, &config.disk_slot)?;
     qm_set_agent(config.vm_id)?;
-    info!("VM {} provisioned successfully", config.name);
+    info!("VM {} provisioned successfully, starting", config.name);
+    qm_start(config.vm_id)?;
+    info!("VM {} started", config.name);
 
     Ok(())
 }
@@ -51,6 +53,41 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
         diff.to_update.len(),
         diff.to_delete.len()
     );
+    for config in &diff.to_create {
+        info!("{}: does not exist -> will be created", config.name);
+    }
+    for vm in &diff.to_delete {
+        info!("{}: no longer in config -> will be destroyed", vm.vm_name);
+    }
+    for update in &diff.to_update {
+        let changes: Vec<String> = update.changed_fields.iter().map(|f| {
+            match f {
+                FieldChange::Memory => {
+                    format!("memory")
+                }
+                FieldChange::Cores => {
+                    format!("cores")
+                }
+                FieldChange::Sockets => {
+                    format!("sockets")
+                }
+                FieldChange::Disk => {
+                    format!("disk")
+                }
+            }
+        }).collect();
+        match &update.required_action {
+            UpdateAction::InPlace => {
+                info!("{}: {} changed -> in-place update", update.name, changes.join(", "));
+            }
+            UpdateAction::Rebuild => {
+                info!("{}: {} changed -> full rebuild", update.name, changes.join(", "));
+            }
+            UpdateAction::Protected => {
+                warn!("{}: {} changed but vm is protected -> no action", update.name, changes.join(", "));
+            }
+        }
+    }
 
     let newly_imaged: Vec<String> = diff
         .to_create
@@ -124,6 +161,27 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
     info!("Pipeline complete for commit {}", commit_hash);
 
     Ok(())
+}
+
+pub fn ensure_vms_running() {
+    let deployed = match load_deployed_state(DEPLOYED_STATE_PATH) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Periodic reconcile: failed to load state: {:?}", e);
+            return;
+        }
+    };
+    for (name, vm) in &deployed.vms {
+        match qm_start(vm.vm_id) {
+            Ok(true) => {
+                info!("Periodic reconcile: started VM {}", name);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!("Periodic reconcile: failed to start VM {}: {:?}", name, e);
+            }
+        }
+    }
 }
 
 pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Result<()> {

@@ -156,6 +156,26 @@ pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String
     Ok(output_string)
 }
 
+pub fn qm_start(vm_id: u32) -> Result<bool> {
+    let output = Command::new("qm")
+        .arg("start")
+        .arg(vm_id.to_string())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("already running") {
+            return Ok(false);
+        }
+        return Err(AppError::CmdError(format!(
+            "qm start {} failed (exit: {:?}): {}",
+            vm_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(true)
+}
+
 pub fn qm_destroy(vm_id: u32) -> Result<String> {
     let qm_destroy = Command::new("qm")
         .arg("destroy")

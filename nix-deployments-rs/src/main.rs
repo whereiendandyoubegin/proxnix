@@ -1,5 +1,6 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 use std::env;
@@ -85,6 +86,16 @@ async fn main() {
         semaphore: Arc::new(Semaphore::new(1)),
         config_path: state::CONFIG_PATH.to_string(),
     };
+
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            tokio::task::spawn_blocking(|| {
+                build::ensure_vms_running();
+            });
+        }
+    });
 
     let app = Router::new()
         .route("/whlisten", post(webhook_handler))
