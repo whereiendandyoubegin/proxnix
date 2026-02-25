@@ -190,7 +190,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
 }
 
 pub fn ensure_vms_running() {
-    let deployed = match load_deployed_state(DEPLOYED_STATE_PATH) {
+    let mut deployed = match load_deployed_state(DEPLOYED_STATE_PATH) {
         Ok(d) => d,
         Err(e) => {
             warn!("Periodic reconcile: failed to load state: {:?}", e);
