@@ -259,6 +259,12 @@ pub fn update_deployed_state_commit(deployed: &mut DeployedState, name: &str, co
     }
 }
 
+pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
+    let raw = qm_list()?;
+    let parsed = parse_qm_list(&raw)?;
+    Ok(parsed.into_iter().map(|q| (q.vm_id, q.status)).collect())
+}
+
 pub fn load_state() -> Result<DeployedState> {
     let qm_list = qm_list()?;
     let parsed_qm_list = parse_qm_list(&qm_list)?;

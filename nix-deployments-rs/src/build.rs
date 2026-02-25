@@ -3,7 +3,7 @@ use crate::nix::{BASE_REPO_PATH, configure_dirs, list_nix_configs, nix_build};
 use crate::qm::{
     qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources, qm_start,
 };
-use crate::state::{full_diff, load_deployed_state, save_deployed_state, update_deployed_state_commit, DEPLOYED_STATE_PATH};
+use crate::state::{full_diff, get_vm_statuses, load_deployed_state, save_deployed_state, update_deployed_state_commit, DEPLOYED_STATE_PATH};
 use crate::types::{
     AppError, DeployedVM, FieldChange, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
@@ -171,14 +171,29 @@ pub fn ensure_vms_running() {
             return;
         }
     };
+    let actual = match get_vm_statuses() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Periodic reconcile: failed to get VM statuses: {:?}", e);
+            return;
+        }
+    };
     for (name, vm) in &deployed.vms {
-        match qm_start(vm.vm_id) {
-            Ok(true) => {
-                info!("Periodic reconcile: started VM {}", name);
+        match actual.get(&vm.vm_id).map(|s| s.as_str()) {
+            Some("running") => {}
+            Some(_) => {
+                match qm_start(vm.vm_id) {
+                    Ok(true) => {
+                        info!("Periodic reconcile: started VM {}", name);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!("Periodic reconcile: failed to start VM {}: {:?}", name, e);
+                    }
+                }
             }
-            Ok(false) => {}
-            Err(e) => {
-                warn!("Periodic reconcile: failed to start VM {}: {:?}", name, e);
+            None => {
+                warn!("Periodic reconcile: VM {} (id: {}) is in state but does not exist in Proxmox", name, vm.vm_id);
             }
         }
     }
