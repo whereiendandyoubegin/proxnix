@@ -3,9 +3,9 @@ use crate::nix::{BASE_REPO_PATH, configure_dirs, list_nix_configs, nix_build};
 use crate::qm::{
     qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources,
 };
-use crate::state::{full_diff, load_state, save_deployed_state, update_deployed_state_commit, DEPLOYED_STATE_PATH};
+use crate::state::{full_diff, load_deployed_state, save_deployed_state, update_deployed_state_commit, DEPLOYED_STATE_PATH};
 use crate::types::{
-    AppError, RebuildStrategy, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
+    AppError, DeployedVM, FieldChange, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
 use std::collections::HashMap;
 
@@ -48,13 +48,62 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
                 .map(|u| u.name.clone()),
         )
         .collect();
+    let to_delete_ids: Vec<u32> = diff.to_delete.iter().map(|v| v.vm_id).collect();
+    let new_vms: Vec<VMConfig> = diff.to_create.clone();
+    let in_place_updates: Vec<VMUpdate> = diff
+        .to_update
+        .iter()
+        .filter(|u| matches!(u.required_action, UpdateAction::InPlace))
+        .cloned()
+        .collect();
 
     reconcile(diff, built_configs)?;
 
-    let mut deployed = load_state()?;
+    let mut deployed = load_deployed_state(DEPLOYED_STATE_PATH)?;
+
+    deployed.vms.retain(|_, v| !to_delete_ids.contains(&v.vm_id));
+
+    for config in &new_vms {
+        deployed.vms.insert(
+            config.name.clone(),
+            DeployedVM {
+                vm_id: config.vm_id,
+                vm_name: config.name.clone(),
+                commit_hash: None,
+                template_id: None,
+                mem_mb: config.memory_mb,
+                bootdisk_gb: config.disk_gb as f64,
+                status: "stopped".to_string(),
+                pid: 0,
+                cores: config.cores,
+                sockets: config.sockets,
+            },
+        );
+    }
+
+    for update in &in_place_updates {
+        if let Some(vm) = deployed.vms.get_mut(&update.name) {
+            for field in &update.changed_fields {
+                match field {
+                    FieldChange::Memory => {
+                        vm.mem_mb = update.config.memory_mb;
+                    }
+                    FieldChange::Cores => {
+                        vm.cores = update.config.cores;
+                    }
+                    FieldChange::Sockets => {
+                        vm.sockets = update.config.sockets;
+                    }
+                    FieldChange::Disk => {}
+                }
+            }
+        }
+    }
+
     for name in &newly_imaged {
         update_deployed_state_commit(&mut deployed, name, commit_hash);
     }
+
     save_deployed_state(&deployed, DEPLOYED_STATE_PATH)?;
 
     Ok(())
@@ -63,7 +112,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Res
 pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Result<()> {
     for config in diff.to_create {
         let qcow_path = built_configs
-            .get(&config.name)
+            .get(&config.image_type)
             .ok_or(AppError::CmdError("Could not create new VM".to_string()))?;
         provision_vm(&config, qcow_path)?;
     }
@@ -77,7 +126,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
             }
             UpdateAction::Rebuild => {
                 let qcow_path = built_configs
-                    .get(&actions.config.name)
+                    .get(&actions.config.image_type)
                     .ok_or(AppError::CmdError("Could not create new VM".to_string()))?;
                 qm_destroy(actions.config.vm_id)?;
                 provision_vm(&actions.config, qcow_path)?;

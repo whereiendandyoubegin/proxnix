@@ -141,7 +141,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
     let deployedvms = deployed
         .vms
         .into_iter()
-        .map(|(name, vm)| -> Result<(String, DeployedVM)> {
+        .map(|(_name, vm)| -> Result<(String, DeployedVM)> {
             let config = qm_config(vm.vm_id)?;
             let parsed = parse_qm_config(&config)?;
             Ok((
@@ -191,7 +191,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
 
 pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
     let file = File::create(path)?;
-    let write_state = serde_json::to_writer_pretty(file, state)?;
+    serde_json::to_writer_pretty(file, state)?;
 
     Ok(())
 }
@@ -235,7 +235,7 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
                 });
             }
         } else {
-            to_create.push((vmconfig.clone()))
+            to_create.push(vmconfig.clone())
         }
     }
 
@@ -267,8 +267,21 @@ pub fn load_state() -> Result<DeployedState> {
     Ok(enriched)
 }
 
+pub fn load_deployed_state(path: &str) -> Result<DeployedState> {
+    let p = Path::new(path);
+    if !p.exists() {
+        return Ok(DeployedState {
+            vms: HashMap::new(),
+        });
+    }
+    let file = File::open(p)?;
+    let reader = BufReader::new(file);
+    let state: DeployedState = serde_json::from_reader(reader)?;
+    Ok(state)
+}
+
 pub fn full_diff(config_path: &str) -> Result<StateDiff> {
-    let deployed = load_state()?;
+    let deployed = load_deployed_state(DEPLOYED_STATE_PATH)?;
     let desired = load_json(config_path)?;
     let diff = diff_state(&deployed, &desired);
 
