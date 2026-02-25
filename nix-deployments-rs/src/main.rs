@@ -2,6 +2,9 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
+use std::env;
+use std::fs;
+use std::os::unix::fs::symlink;
 
 #[derive(Clone)]
 struct AppState {
@@ -55,8 +58,27 @@ async fn webhook_handler(
     StatusCode::OK
 }
 
+fn init(config_source: &str) {
+    fs::create_dir_all("/var/lib/proxnix").expect("Failed to create /var/lib/proxnix");
+    let dest = std::path::Path::new(state::CONFIG_PATH);
+    if dest.exists() {
+        println!("Config already exists at {}", state::CONFIG_PATH);
+    } else {
+        symlink(config_source, dest).expect("Failed to create config symlink");
+        println!("Symlinked {} -> {}", config_source, state::CONFIG_PATH);
+    }
+    println!("Init complete");
+}
+
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("--init") {
+        let source = args.get(2).expect("Usage: proxnix --init <path-to-config.json>");
+        init(source);
+        return;
+    }
+
     tracing_subscriber::fmt::init();
 
     let app_state = AppState {
