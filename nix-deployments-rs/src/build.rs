@@ -212,6 +212,7 @@ pub fn ensure_vms_running() {
         "Periodic reconcile: checking {} managed VMs",
         deployed.vms.len()
     );
+    let mut missing_ids: Vec<u32> = Vec::new();
     for (name, vm) in &deployed.vms {
         match actual.get(&vm.vm_id).map(|s| s.as_str()) {
             Some("running") => {
@@ -236,10 +237,17 @@ pub fn ensure_vms_running() {
             }
             None => {
                 warn!(
-                    "Periodic reconcile: {} (id: {}) is in state but does not exist in Proxmox",
+                    "Periodic reconcile: {} (id: {}) does not exist in Proxmox, removing from state so it will be recreated on next push",
                     name, vm.vm_id
                 );
+                missing_ids.push(vm.vm_id);
             }
+        }
+    }
+    if !missing_ids.is_empty() {
+        deployed.vms.retain(|_, v| !missing_ids.contains(&v.vm_id));
+        if let Err(e) = save_deployed_state(&deployed, DEPLOYED_STATE_PATH) {
+            warn!("Periodic reconcile: failed to save updated state: {:?}", e);
         }
     }
 }
