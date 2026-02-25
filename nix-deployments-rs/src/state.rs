@@ -2,16 +2,11 @@ use crate::types::{
     AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result,
     StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
-use git2::CheckoutNotificationType;
-use serde_json::Value;
 use std::collections::HashMap;
-use std::fmt::DebugTuple;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::process::{Command, Output};
-use std::rc::Rc;
-use tokio::sync::mpsc::error::SendError;
+use std::process::Command;
 
 pub const DEPLOYED_STATE_PATH: &str = "/var/lib/proxnix/deployed_state.json";
 
@@ -119,7 +114,7 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
         .map(|line| -> Result<QMList> {
             let parts: Vec<&str> = line.split_whitespace().collect();
 
-            let mut col = |n: usize| -> crate::types::Result<&str> {
+            let col = |n: usize| -> crate::types::Result<&str> {
                 parts.get(n).copied().ok_or_else(|| {
                     AppError::ParsingModuleError(format!(
                         "qm list line has fewer columns than expected: '{}'",
