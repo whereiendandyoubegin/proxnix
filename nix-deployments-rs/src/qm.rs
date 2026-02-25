@@ -31,16 +31,16 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
 // Parses output like: "Successfully imported disk as 'unused0:local-lvm:vm-100-disk-1'"
 // Returns the disk reference: "local-lvm:vm-100-disk-1"
 fn parse_importdisk_output(output: &str) -> Result<String> {
-    let inner = output
+    let disk_ref = output
         .lines()
         .find_map(|line| {
-            if !line.contains("Successfully imported") {
+            if !line.contains("successfully imported disk") {
                 return None;
             }
             let start = line.find('\'')?;
             let end = line.rfind('\'')?;
             if start < end {
-                Some(&line[start + 1..end])
+                Some(line[start + 1..end].to_string())
             } else {
                 None
             }
@@ -52,11 +52,7 @@ fn parse_importdisk_output(output: &str) -> Result<String> {
             ))
         })?;
 
-    let disk_ref = inner.splitn(2, ':').nth(1).ok_or_else(|| {
-        AppError::CmdError(format!("unexpected importdisk output format: {}", inner))
-    })?;
-
-    Ok(disk_ref.to_string())
+    Ok(disk_ref)
 }
 
 pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<String> {
