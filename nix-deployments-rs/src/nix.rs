@@ -13,7 +13,8 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
         .arg("--apply")
         .arg("builtins.attrNames")
         .arg("--json")
-        .output()?;
+        .output()
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
     if !nix_eval.status.success() {
         let stderr = String::from_utf8_lossy(&nix_eval.stderr);
         return Err(AppError::CmdError(format!(
@@ -43,7 +44,8 @@ pub fn nix_build(config_name: &str, repo_path: &str, commit_hash: &str) -> Resul
             "{}/{}/{}/result",
             repo_path, commit_hash, config_name
         ))
-        .output()?;
+        .output()
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
     if !nix_build.status.success() {
         let stderr = String::from_utf8_lossy(&nix_build.stderr);
         return Err(AppError::CmdError(format!(

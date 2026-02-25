@@ -12,7 +12,7 @@ pub const DEPLOYED_STATE_PATH: &str = "/var/lib/proxnix/deployed_state.json";
 pub const CONFIG_PATH: &str = "/var/lib/proxnix/config.json";
 
 pub fn load_json(path: &str) -> Result<DesiredState> {
-    let file = File::open(path)?;
+    let file = File::open(path).map_err(|e| AppError::CmdError(format!("Failed to open config {}: {}", path, e)))?;
     let file_read = BufReader::new(file);
     let state: DesiredState = serde_json::from_reader(file_read)?;
 
