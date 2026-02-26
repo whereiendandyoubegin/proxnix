@@ -18,9 +18,11 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
         .arg(config.scsi_hw.to_string())
         .output()?;
     if !qm_create.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_create.stderr);
         return Err(AppError::CmdError(format!(
-            "qm create has failed with exit code: {:?}",
-            qm_create.status.code()
+            "qm create has failed with exit code: {:?}: {}",
+            qm_create.status.code(),
+            stderr
         )));
     }
     let stdout_bytes = qm_create.stdout;
@@ -64,9 +66,11 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
         .arg("--format=qcow2")
         .output()?;
     if !qm_importdisk.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_importdisk.stderr);
         return Err(AppError::CmdError(format!(
-            "qm importdisk has failed with exit code: {:?}",
-            qm_importdisk.status.code()
+            "qm importdisk has failed with exit code: {:?}: {}",
+            qm_importdisk.status.code(),
+            stderr
         )));
     }
     let output_string = String::from_utf8(qm_importdisk.stdout)?;
@@ -85,9 +89,11 @@ pub fn qm_set_disk(vm_id: u32, disk_ref: &str, disk_slot: &str) -> Result<String
         .arg(format!("order={}", disk_slot))
         .output()?;
     if !qm_set_disk.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_set_disk.stderr);
         return Err(AppError::CmdError(format!(
-            "qm set disk has failed with the exit code: {:?}",
-            qm_set_disk.status.code()
+            "qm set disk has failed with the exit code: {:?}: {}",
+            qm_set_disk.status.code(),
+            stderr
         )));
     }
     let stdout_bytes = qm_set_disk.stdout;
@@ -106,9 +112,11 @@ pub fn qm_set_agent(vm_id: u32) -> Result<String> {
         .arg("socket")
         .output()?;
     if !qm_set_agent.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_set_agent.stderr);
         return Err(AppError::CmdError(format!(
-            "qm set agent has failed with the exit code: {:?}",
-            qm_set_agent.status.code()
+            "qm set agent has failed with the exit code: {:?}: {}",
+            qm_set_agent.status.code(),
+            stderr
         )));
     }
     let stdout_bytes = qm_set_agent.stdout;
@@ -123,9 +131,11 @@ pub fn qm_template(vm_id: u32) -> Result<String> {
         .arg(vm_id.to_string())
         .output()?;
     if !qm_template.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_template.stderr);
         return Err(AppError::CmdError(format!(
-            "qm template has failed with the exit code: {:?}",
-            qm_template.status.code()
+            "qm template has failed with the exit code: {:?}: {}",
+            qm_template.status.code(),
+            stderr
         )));
     }
     let stdout_bytes = qm_template.stdout;
@@ -145,9 +155,11 @@ pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String
         .arg("0")
         .output()?;
     if !qm_clone.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_clone.stderr);
         return Err(AppError::CmdError(format!(
-            "qm clone has failed with the exit code: {:?}",
-            qm_clone.status.code()
+            "qm clone has failed with the exit code: {:?}: {}",
+            qm_clone.status.code(),
+            stderr
         )));
     }
     let stdout_bytes = qm_clone.stdout;
@@ -182,9 +194,11 @@ pub fn qm_destroy(vm_id: u32) -> Result<String> {
         .arg(vm_id.to_string())
         .output()?;
     if !qm_destroy.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_destroy.stderr);
         return Err(AppError::CmdError(format!(
-            "qm destroy has failed with the exit code: {:?}",
-            qm_destroy.status.code()
+            "qm destroy has failed with the exit code: {:?}: {}",
+            qm_destroy.status.code(),
+            stderr
         )));
     }
     let stdout_bytes = qm_destroy.stdout;
@@ -219,8 +233,15 @@ pub fn qm_set_resources(vm_id: u32, update: &VMUpdate) -> Result<String> {
         }
     }
     let output = qm_set_resources.output()?;
-    let stdout_bytes = output.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "qm set resources has failed with the exit code: {:?}: {}",
+            output.status.code(),
+            stderr
+        )));
+    }
+    let output_string = String::from_utf8(output.stdout)?;
 
     Ok(output_string)
 }

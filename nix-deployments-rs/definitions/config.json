@@ -35,6 +35,18 @@
       "storage_location": "local-lvm",
       "cloud_init": "None",
       "protected": false
+    },
+    "k3s-wrk-01": {
+      "name": "k3s-wrk-01",
+      "vm_id": 802,
+      "image_type": "build-qcow2-worker",
+      "cores": 2,
+      "sockets": 1,
+      "memory_mb": 2048,
+      "disk_gb": 10,
+      "storage_location": "local-lvm",
+      "cloud_init": "None",
+      "protected": false
     }
   }
 }
