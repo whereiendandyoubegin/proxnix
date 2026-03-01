@@ -3,11 +3,29 @@ use git2::{FetchOptions, Oid, RemoteCallbacks, Repository, build::RepoBuilder};
 use std::path::Path;
 use tracing::info;
 
+const SSH_KEY_CANDIDATES: &[&str] = &[
+    "/root/.ssh/id_ed25519",
+    "/root/.ssh/id_rsa",
+    "/root/.ssh/id_ecdsa",
+];
+
+fn find_ssh_key() -> Option<&'static str> {
+    SSH_KEY_CANDIDATES.iter().copied().find(|p| Path::new(p).exists())
+}
+
 pub fn git_clone(repo_url: &str, dest_path: &str) -> Result<Repository> {
     info!("Cloning {} to {}", repo_url, dest_path);
+    let key_path = find_ssh_key()
+        .ok_or_else(|| AppError::GitError("No SSH private key found in /root/.ssh/".to_string()))?;
+    info!("Using SSH key: {}", key_path);
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|_url, username, _allowed| {
-        git2::Cred::ssh_key_from_agent(username.unwrap_or("git"))
+    callbacks.credentials(move |_url, username, _allowed| {
+        git2::Cred::ssh_key(
+            username.unwrap_or("git"),
+            None,
+            Path::new(key_path),
+            None,
+        )
     });
     let mut fetch_opts = FetchOptions::new();
     fetch_opts.remote_callbacks(callbacks);
