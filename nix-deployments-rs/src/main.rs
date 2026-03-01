@@ -1,14 +1,15 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
 use std::env;
 use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{RwLock, Semaphore};
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 struct AppState {
     semaphore: Arc<Semaphore>,
+    last_repo: Arc<RwLock<Option<(String, String)>>>,
 }
 
 mod build;
@@ -34,20 +35,34 @@ async fn webhook_handler(
 
     let git_repo_url = parsed.repository.clone();
     let current_git_commit = parsed.hash.clone();
+    let mut guard = state.last_repo.write().await;
+    *guard = Some((git_repo_url.clone(), current_git_commit.clone()));
 
     let permit = match state.semaphore.try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            warn!("Pipeline already running, rejecting webhook for commit {}", current_git_commit);
+            warn!(
+                "Pipeline already running, rejecting webhook for commit {}",
+                current_git_commit
+            );
             return StatusCode::TOO_MANY_REQUESTS;
         }
     };
 
     tokio::task::spawn_blocking(move || {
-        info!("Pipeline started for repo: {}, commit: {}", git_repo_url, current_git_commit);
+        info!(
+            "Pipeline started for repo: {}, commit: {}",
+            git_repo_url, current_git_commit
+        );
         match build::run_pipeline(&git_repo_url, &current_git_commit) {
-            Ok(_) => info!("Pipeline finished for repo: {}, commit: {}", git_repo_url, current_git_commit),
-            Err(e) => error!("Pipeline failed for repo: {}, commit: {}, error: {:?}", git_repo_url, current_git_commit, e),
+            Ok(_) => info!(
+                "Pipeline finished for repo: {}, commit: {}",
+                git_repo_url, current_git_commit
+            ),
+            Err(e) => error!(
+                "Pipeline failed for repo: {}, commit: {}, error: {:?}",
+                git_repo_url, current_git_commit, e
+            ),
         }
         drop(permit);
     });
@@ -75,17 +90,29 @@ async fn main() {
         )
         .init();
 
+    let last_repo = Arc::new(RwLock::new(None));
     let app_state = AppState {
         semaphore: Arc::new(Semaphore::new(1)),
+        last_repo,
     };
 
-    tokio::spawn(async {
+    let periodic_state = app_state.clone();
+    tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             interval.tick().await;
-            tokio::task::spawn_blocking(|| {
-                build::ensure_vms_running();
-            });
+            let lr = periodic_state.last_repo.read().await.clone();
+            match lr {
+                None => {
+                    info!("No pipeline has run yet")
+                }
+                Some((_, commit_hash)) => {
+                    let dest_path = format!("{}/{}", nix::BASE_REPO_PATH, commit_hash);
+                    tokio::task::spawn_blocking(move || {
+                        build::ensure_vms_running(&dest_path);
+                    });
+                }
+            }
         }
     });
 

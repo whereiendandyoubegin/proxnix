@@ -3,21 +3,7 @@ use crate::types::{
     StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
 use std::process::Command;
-
-pub const DEPLOYED_STATE_PATH: &str = "/var/lib/proxnix/deployed_state.json";
-
-pub fn load_json(path: &str) -> Result<DesiredState> {
-    let file = File::open(path)
-        .map_err(|e| AppError::CmdError(format!("Failed to open config {}: {}", path, e)))?;
-    let file_read = BufReader::new(file);
-    let state: DesiredState = serde_json::from_reader(file_read)?;
-
-    Ok(state)
-}
 
 pub fn parse_vm_config(json: &str) -> Result<DesiredState> {
     let state: DesiredState = serde_json::from_str(&json)?;
@@ -195,12 +181,6 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
     DeployedState { vms: lists }
 }
 
-pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
-    let file = File::create(path)?;
-    serde_json::to_writer_pretty(file, state)?;
-
-    Ok(())
-}
 
 pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
@@ -258,11 +238,6 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
     }
 }
 
-pub fn update_deployed_state_commit(deployed: &mut DeployedState, name: &str, commit: &str) -> () {
-    if let Some(vm) = deployed.vms.get_mut(name) {
-        vm.commit_hash = Some(String::from(commit))
-    }
-}
 
 pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     let raw = qm_list()?;
@@ -279,18 +254,6 @@ pub fn load_state() -> Result<DeployedState> {
     Ok(enriched)
 }
 
-pub fn load_deployed_state(path: &str) -> Result<DeployedState> {
-    let p = Path::new(path);
-    if !p.exists() {
-        return Ok(DeployedState {
-            vms: HashMap::new(),
-        });
-    }
-    let file = File::open(p)?;
-    let reader = BufReader::new(file);
-    let state: DeployedState = serde_json::from_reader(reader)?;
-    Ok(state)
-}
 
 pub fn full_diff(desired: &DesiredState) -> Result<StateDiff> {
     let deployed = load_state()?;
