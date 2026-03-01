@@ -1,5 +1,4 @@
 use crate::types::{AppError, Result};
-use serde_json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
@@ -58,11 +57,9 @@ pub fn eval_vm_config(repo_path: &str) -> Result<String> {
             stderr
         )));
     }
-    let stdout_bytes = nix_eval.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-    let parsed: String = serde_json::from_str(&output_string)?;
+    let output_string = String::from_utf8(nix_eval.stdout)?;
 
-    Ok(parsed)
+    Ok(output_string)
 }
 
 pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
