@@ -1,11 +1,13 @@
 use crate::git::git_ensure_commit;
-use crate::nix::{BASE_REPO_PATH, configure_dirs, find_in_repo, list_nix_configs, nix_build};
+use crate::nix::{
+    BASE_REPO_PATH, configure_dirs, eval_vm_config, find_in_repo, list_nix_configs, nix_build,
+};
 use crate::qm::{
     qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources, qm_start,
 };
 use crate::state::{
-    DEPLOYED_STATE_PATH, full_diff, get_vm_statuses, load_deployed_state, save_deployed_state,
-    update_deployed_state_commit,
+    DEPLOYED_STATE_PATH, full_diff, get_vm_statuses, load_deployed_state, parse_vm_config,
+    save_deployed_state, update_deployed_state_commit,
 };
 use crate::types::{
     AppError, DeployedVM, FieldChange, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
@@ -26,7 +28,10 @@ pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<(HashMap<String, String>, String)> {
+pub fn build_all_configs(
+    repo_url: &str,
+    commit_hash: &str,
+) -> Result<(HashMap<String, String>, String)> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
     info!(
         "Cloning {} at commit {} to {}",
@@ -58,7 +63,9 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     info!("Building all configs for commit {}", commit_hash);
     let (built_configs, config_path) = build_all_configs(repo_url, commit_hash)?;
     info!("Computing diff from config at {}", config_path);
-    let diff = full_diff(&config_path)?;
+    let eval = eval_vm_config(repo_url)?;
+    let parsed = parse_vm_config(&eval)?;
+    let diff = full_diff(&parsed)?;
     info!(
         "Diff: {} to create, {} to update, {} to delete",
         diff.to_create.len(),

@@ -11,10 +11,16 @@ use std::process::Command;
 pub const DEPLOYED_STATE_PATH: &str = "/var/lib/proxnix/deployed_state.json";
 
 pub fn load_json(path: &str) -> Result<DesiredState> {
-    let file = File::open(path).map_err(|e| AppError::CmdError(format!("Failed to open config {}: {}", path, e)))?;
+    let file = File::open(path)
+        .map_err(|e| AppError::CmdError(format!("Failed to open config {}: {}", path, e)))?;
     let file_read = BufReader::new(file);
     let state: DesiredState = serde_json::from_reader(file_read)?;
 
+    Ok(state)
+}
+
+pub fn parse_vm_config(json: &str) -> Result<DesiredState> {
+    let state: DesiredState = serde_json::from_str(&json)?;
     Ok(state)
 }
 
@@ -286,9 +292,8 @@ pub fn load_deployed_state(path: &str) -> Result<DeployedState> {
     Ok(state)
 }
 
-pub fn full_diff(config_path: &str) -> Result<StateDiff> {
-    let deployed = load_deployed_state(DEPLOYED_STATE_PATH)?;
-    let desired = load_json(config_path)?;
+pub fn full_diff(desired: &DesiredState) -> Result<StateDiff> {
+    let deployed = load_state()?;
     let diff = diff_state(&deployed, &desired);
 
     Ok(diff)
