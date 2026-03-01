@@ -5,6 +5,7 @@ use crate::qm::{
 };
 use crate::state::{full_diff, get_vm_statuses, parse_vm_config};
 use crate::types::{AppError, FieldChange, Result, StateDiff, UpdateAction, VMConfig};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
@@ -36,7 +37,7 @@ pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<St
     );
     configure_dirs(config_names.clone(), &dest_path)?;
     let builds = config_names
-        .iter()
+        .par_iter()
         .map(|config_name| -> Result<(String, String)> {
             info!("Building nix config: {}", config_name);
             let result_path = nix_build(config_name, &dest_path)?;
