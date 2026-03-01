@@ -1,5 +1,5 @@
 use crate::git::git_ensure_commit;
-use crate::nix::{BASE_REPO_PATH, configure_dirs, list_nix_configs, nix_build};
+use crate::nix::{BASE_REPO_PATH, configure_dirs, find_in_repo, list_nix_configs, nix_build};
 use crate::qm::{
     qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources, qm_start,
 };
@@ -26,13 +26,15 @@ pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<String, String>> {
+pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<(HashMap<String, String>, String)> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
     info!(
         "Cloning {} at commit {} to {}",
         repo_url, commit_hash, dest_path
     );
     git_ensure_commit(&repo_url, &dest_path, &commit_hash)?;
+    let config_json_path = find_in_repo(&dest_path, "config.json")?;
+    info!("Found config.json at {}", config_json_path);
     let config_names = list_nix_configs(&dest_path)?;
     info!(
         "Found {} nix configs: {:?}",
@@ -49,14 +51,14 @@ pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<St
             Ok((config_name.clone(), format!("{}/nixos.qcow2", result_path)))
         })
         .collect::<Result<HashMap<_, _>>>()?;
-    Ok(builds)
+    Ok((builds, config_json_path))
 }
 
-pub fn run_pipeline(repo_url: &str, commit_hash: &str, config_path: &str) -> Result<()> {
+pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     info!("Building all configs for commit {}", commit_hash);
-    let built_configs = build_all_configs(repo_url, commit_hash)?;
+    let (built_configs, config_path) = build_all_configs(repo_url, commit_hash)?;
     info!("Computing diff from config at {}", config_path);
-    let diff = full_diff(config_path)?;
+    let diff = full_diff(&config_path)?;
     info!(
         "Diff: {} to create, {} to update, {} to delete",
         diff.to_create.len(),

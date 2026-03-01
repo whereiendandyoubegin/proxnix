@@ -1,13 +1,50 @@
 use crate::types::{AppError, Result};
 use serde_json;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
 
 pub const BASE_REPO_PATH: &str = "/tmp/proxnix/repos";
 
+fn walk_for_file(dir: &Path, filename: &str, results: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().map(|n| n != ".git").unwrap_or(true) {
+                walk_for_file(&path, filename, results)?;
+            }
+        } else if path.file_name().map(|n| n == filename).unwrap_or(false) {
+            results.push(path);
+        }
+    }
+    Ok(())
+}
+
+pub fn find_in_repo(repo_path: &str, filename: &str) -> Result<String> {
+    let mut results = Vec::new();
+    walk_for_file(Path::new(repo_path), filename, &mut results)?;
+    match results.len() {
+        0 => Err(AppError::CmdError(format!(
+            "'{}' not found in repo",
+            filename
+        ))),
+        1 => Ok(results.remove(0).to_string_lossy().to_string()),
+        n => Err(AppError::CmdError(format!(
+            "Found {} copies of '{}' in repo, expected exactly 1",
+            n, filename
+        ))),
+    }
+}
+
 pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
+    let flake_path = find_in_repo(repo_path, "flake.nix")?;
+    let nix_dir = Path::new(&flake_path)
+        .parent()
+        .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
+
     let nix_eval = Command::new("nix")
-        .current_dir(repo_path)
+        .current_dir(nix_dir)
         .arg("eval")
         .arg(".#nixosConfigurations")
         .arg("--apply")
@@ -31,10 +68,15 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
 }
 
 pub fn nix_build(config_name: &str, repo_path: &str) -> Result<String> {
-    info!("Running nix build for config '{}' in {}", config_name, repo_path);
+    let flake_path = find_in_repo(repo_path, "flake.nix")?;
+    let nix_dir = Path::new(&flake_path)
+        .parent()
+        .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
+
+    info!("Running nix build for config '{}' in {}", config_name, nix_dir.display());
     let result_path = format!("{}/{}/result", repo_path, config_name);
     let nix_build = Command::new("nix")
-        .current_dir(repo_path)
+        .current_dir(nix_dir)
         .arg("build")
         .arg(format!(
             ".#nixosConfigurations.{}.config.system.build.qcow2",

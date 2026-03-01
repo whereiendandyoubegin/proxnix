@@ -24,3 +24,18 @@ Run `nix build`. This builds the binary in result/bin. You have to run the binar
 ## Usage
 
 There are example configs in the definitions folder. The nix flake must evaluate and it must contain the qcow2 module. Otherwise it can be pretty variable.
+
+## Example
+
+The flow of the pipeline is as follows:
+- Webhook received and parsed
+- Repo cloned
+- Config files parsed
+- State gathered from most recent reconciliation loop
+- State diffed against configuration
+- Nix image generation starts
+- Machines deployed with qm
+- Machines added to known state
+- Reconciliation loop continues every 10 seconds to watch for possible manual changes
+
+There is an example repo here which goes into some more detail https://github.com/whereiendandyoubegin/proxnix-example

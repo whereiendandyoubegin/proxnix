@@ -9,7 +9,6 @@ use std::path::Path;
 use std::process::Command;
 
 pub const DEPLOYED_STATE_PATH: &str = "/var/lib/proxnix/deployed_state.json";
-pub const CONFIG_PATH: &str = "/var/lib/proxnix/config.json";
 
 pub fn load_json(path: &str) -> Result<DesiredState> {
     let file = File::open(path).map_err(|e| AppError::CmdError(format!("Failed to open config {}: {}", path, e)))?;

@@ -5,12 +5,10 @@ use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 use std::env;
 use std::fs;
-use std::os::unix::fs::symlink;
 
 #[derive(Clone)]
 struct AppState {
     semaphore: Arc<Semaphore>,
-    config_path: String,
 }
 
 mod build;
@@ -45,11 +43,9 @@ async fn webhook_handler(
         }
     };
 
-    let config_path = state.config_path.clone();
-
     tokio::task::spawn_blocking(move || {
         info!("Pipeline started for repo: {}, commit: {}", git_repo_url, current_git_commit);
-        match build::run_pipeline(&git_repo_url, &current_git_commit, &config_path) {
+        match build::run_pipeline(&git_repo_url, &current_git_commit) {
             Ok(_) => info!("Pipeline finished for repo: {}, commit: {}", git_repo_url, current_git_commit),
             Err(e) => error!("Pipeline failed for repo: {}, commit: {}, error: {:?}", git_repo_url, current_git_commit, e),
         }
@@ -59,15 +55,8 @@ async fn webhook_handler(
     StatusCode::OK
 }
 
-fn init(config_source: &str) {
+fn init() {
     fs::create_dir_all("/var/lib/proxnix").expect("Failed to create /var/lib/proxnix");
-    let dest = std::path::Path::new(state::CONFIG_PATH);
-    if dest.exists() {
-        println!("Config already exists at {}", state::CONFIG_PATH);
-    } else {
-        symlink(config_source, dest).expect("Failed to create config symlink");
-        println!("Symlinked {} -> {}", config_source, state::CONFIG_PATH);
-    }
     println!("Init complete");
 }
 
@@ -75,8 +64,7 @@ fn init(config_source: &str) {
 async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("--init") {
-        let source = args.get(2).expect("Usage: proxnix --init <path-to-config.json>");
-        init(source);
+        init();
         return;
     }
 
@@ -89,7 +77,6 @@ async fn main() {
 
     let app_state = AppState {
         semaphore: Arc::new(Semaphore::new(1)),
-        config_path: state::CONFIG_PATH.to_string(),
     };
 
     tokio::spawn(async {
