@@ -96,7 +96,7 @@ pub struct DeployedVM {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
 pub struct QMConfig {
     pub agent: String,
-    pub balloon: bool,
+    pub balloon: u8,
     pub boot: String,
     pub bootdisk: String,
     pub cipassword: Option<String>,
@@ -110,9 +110,9 @@ pub struct QMConfig {
     pub meta: String,
     pub name: String,
     pub networks: HashMap<String, String>,
-    pub numa: bool,
-    pub onboot: bool,
-    pub protection: bool,
+    pub numa: u8,
+    pub onboot: u8,
+    pub protection: u8,
     pub serial: HashMap<String, String>,
     pub sockets: u8,
     pub sshkeys: Option<String>,
