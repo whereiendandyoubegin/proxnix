@@ -143,12 +143,17 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
         if !is_proxnix {
             continue;
         }
+        let commit_hash = parsed.tags.as_deref().and_then(|t| {
+            t.split(';')
+                .find(|tag| tag.trim().starts_with("commit-"))
+                .map(|tag| tag.trim().trim_start_matches("commit-").to_string())
+        });
         deployedvms.insert(
             vm.vm_name.clone(),
             DeployedVM {
                 vm_id: vm.vm_id,
                 vm_name: vm.vm_name,
-                commit_hash: vm.commit_hash,
+                commit_hash,
                 template_id: vm.template_id,
                 mem_mb: vm.mem_mb,
                 bootdisk_gb: vm.bootdisk_gb,
@@ -188,7 +193,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
 }
 
 
-pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
+pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, commit_hash: &str) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
     let mut to_update: Vec<VMUpdate> = Vec::new();
     let mut to_delete: Vec<DeployedVM> = Vec::new();
@@ -201,7 +206,7 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
             if vmconfig.memory_mb != deployed_vm.mem_mb {
                 changes.push(FieldChange::Memory);
             }
-            if vmconfig.disk_gb as f64 != deployed_vm.bootdisk_gb {
+            if vmconfig.disk_gb > deployed_vm.bootdisk_gb.round() as u32 {
                 changes.push(FieldChange::Disk);
             }
             if vmconfig.cores != deployed_vm.cores {
@@ -210,10 +215,20 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
             if vmconfig.sockets != deployed_vm.sockets {
                 changes.push(FieldChange::Sockets);
             }
+            if deployed_vm
+                .commit_hash
+                .as_deref()
+                .map(|h| h != commit_hash)
+                .unwrap_or(true)
+            {
+                changes.push(FieldChange::Image);
+            }
             if !changes.is_empty() {
                 let action = if vmconfig.protected {
                     UpdateAction::Protected
-                } else if changes.contains(&FieldChange::Disk) {
+                } else if changes.contains(&FieldChange::Disk)
+                    || changes.contains(&FieldChange::Image)
+                {
                     UpdateAction::Rebuild
                 } else {
                     UpdateAction::InPlace
@@ -261,9 +276,9 @@ pub fn load_state() -> Result<DeployedState> {
 }
 
 
-pub fn full_diff(desired: &DesiredState) -> Result<StateDiff> {
+pub fn full_diff(desired: &DesiredState, commit_hash: &str) -> Result<StateDiff> {
     let deployed = load_state()?;
-    let diff = diff_state(&deployed, &desired);
+    let diff = diff_state(&deployed, &desired, commit_hash);
 
     Ok(diff)
 }

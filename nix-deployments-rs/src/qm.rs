@@ -2,7 +2,7 @@ use crate::types::{AppError, FieldChange, Result, VMConfig, VMUpdate};
 use std::process::Command;
 
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
-pub fn qm_create(config: &VMConfig) -> Result<String> {
+pub fn qm_create(config: &VMConfig, commit_hash: &str) -> Result<String> {
     let qm_create = Command::new("qm")
         .arg("create")
         .arg(config.vm_id.to_string())
@@ -17,7 +17,7 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
         .arg("--scsihw")
         .arg(config.scsi_hw.to_string())
         .arg("--tags")
-        .arg("proxnix")
+        .arg(format!("proxnix;commit-{}", commit_hash))
         .output()?;
     if !qm_create.status.success() {
         let stderr = String::from_utf8_lossy(&qm_create.stderr);
@@ -241,6 +241,25 @@ pub fn qm_destroy(vm_id: u32) -> Result<String> {
     let output_string = String::from_utf8(stdout_bytes)?;
 
     Ok(output_string)
+}
+
+pub fn qm_resize(vm_id: u32, disk_slot: &str, size_gb: u32) -> Result<String> {
+    let output = Command::new("qm")
+        .arg("disk")
+        .arg("resize")
+        .arg(vm_id.to_string())
+        .arg(disk_slot)
+        .arg(format!("{}G", size_gb))
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "qm disk resize failed (exit: {:?}): {}",
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 pub fn qm_set_resources(vm_id: u32, update: &VMUpdate) -> Result<String> {

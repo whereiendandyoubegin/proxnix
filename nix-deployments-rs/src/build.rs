@@ -1,8 +1,8 @@
 use crate::git::git_ensure_commit;
 use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_vm_config, list_nix_configs, nix_build};
 use crate::qm::{
-    qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources, qm_start,
-    qm_stop,
+    qm_create, qm_destroy, qm_importdisk, qm_resize, qm_set_agent, qm_set_disk, qm_set_resources,
+    qm_start, qm_stop,
 };
 use crate::state::{full_diff, get_vm_statuses, parse_vm_config};
 use crate::types::{AppError, FieldChange, Result, StateDiff, UpdateAction, VMConfig};
@@ -10,12 +10,13 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
-pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
+pub fn provision_vm(config: &VMConfig, qcow2_path: &str, commit_hash: &str) -> Result<()> {
     info!("Provisioning VM {} (id: {})", config.name, config.vm_id);
-    qm_create(config)?;
+    qm_create(config, commit_hash)?;
     let disk_ref = qm_importdisk(config.vm_id, qcow2_path, &config.storage_location)?;
     qm_set_disk(config.vm_id, &disk_ref, &config.disk_slot)?;
     qm_set_agent(config.vm_id)?;
+    qm_resize(config.vm_id, &config.disk_slot, config.disk_gb)?;
     info!("VM {} provisioned successfully, starting", config.name);
     qm_start(config.vm_id)?;
     info!("VM {} started", config.name);
@@ -55,7 +56,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let built_configs = build_all_configs(repo_url, commit_hash)?;
     let eval = eval_vm_config(&dest_path)?;
     let parsed = parse_vm_config(&eval)?;
-    let diff = full_diff(&parsed)?;
+    let diff = full_diff(&parsed, commit_hash)?;
     info!(
         "Diff: {} to create, {} to update, {} to delete",
         diff.to_create.len(),
@@ -77,6 +78,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
                 FieldChange::Cores => format!("cores"),
                 FieldChange::Sockets => format!("sockets"),
                 FieldChange::Disk => format!("disk"),
+                FieldChange::Image => format!("image"),
             })
             .collect();
         match &update.required_action {
@@ -104,7 +106,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
         }
     }
 
-    reconcile(diff, built_configs)?;
+    reconcile(diff, built_configs, commit_hash)?;
     info!("Pipeline complete for commit {}", commit_hash);
 
     Ok(())
@@ -172,7 +174,7 @@ pub fn ensure_vms_running(repo_path: &str) {
     }
 }
 
-pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Result<()> {
+pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>, commit_hash: &str) -> Result<()> {
     for config in diff.to_create {
         let qcow_path = built_configs
             .get(&config.image_type)
@@ -180,7 +182,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
                 "No built image for type '{}' (vm: {})",
                 config.image_type, config.name
             )))?;
-        provision_vm(&config, qcow_path)?;
+        provision_vm(&config, qcow_path, commit_hash)?;
     }
     for vm in diff.to_delete {
         info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
@@ -206,7 +208,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
                         )))?;
                 qm_stop(&actions.config.vm_id)?;
                 qm_destroy(actions.config.vm_id)?;
-                provision_vm(&actions.config, qcow_path)?;
+                provision_vm(&actions.config, qcow_path, commit_hash)?;
             }
             UpdateAction::Protected => {
                 warn!("{} is protected, no action taken", actions.name);

@@ -159,6 +159,7 @@ pub enum FieldChange {
     Cores,
     Sockets,
     Disk,
+    Image,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
