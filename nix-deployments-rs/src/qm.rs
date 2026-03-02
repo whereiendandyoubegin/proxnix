@@ -88,7 +88,7 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
         .arg(vm_id.to_string())
         .arg(qcow_path.to_string())
         .arg(storage.to_string())
-        .arg("--format=qcow2")
+        .arg("--format=raw")
         .output()?;
     if !qm_importdisk.status.success() {
         let stderr = String::from_utf8_lossy(&qm_importdisk.stderr);
@@ -99,7 +99,15 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
         )));
     }
     let output_string = String::from_utf8(qm_importdisk.stdout)?;
-    let disk_ref = parse_importdisk_output(&output_string)?;
+    let disk_id = parse_importdisk_output(&output_string)?;
+    // Some Proxmox versions omit the storage name in the output (e.g. "vm-823-disk-0")
+    // while others include it (e.g. "local-lvm:vm-823-disk-0"). Normalise to always
+    // have the storage prefix so qm_set_disk gets a valid volume ID.
+    let disk_ref = if disk_id.contains(':') {
+        disk_id
+    } else {
+        format!("{}:{}", storage, disk_id)
+    };
 
     Ok(disk_ref)
 }
