@@ -16,6 +16,8 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
         .arg(format!("virtio,bridge={}", config.network_bridge))
         .arg("--scsihw")
         .arg(config.scsi_hw.to_string())
+        .arg("--tags")
+        .arg("proxnix")
         .output()?;
     if !qm_create.status.success() {
         let stderr = String::from_utf8_lossy(&qm_create.stderr);

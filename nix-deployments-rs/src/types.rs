@@ -116,6 +116,7 @@ pub struct QMConfig {
     pub serial: HashMap<String, String>,
     pub sockets: u8,
     pub sshkeys: Option<String>,
+    pub tags: Option<String>,
     pub vga: String,
     pub vmgenid: String,
 }

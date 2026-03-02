@@ -68,6 +68,7 @@ pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
                 "protection" => accumulator.protection = value.parse().unwrap(),
                 "sockets" => accumulator.sockets = value.parse().unwrap(),
                 "sshkeys" => accumulator.sshkeys = Some(value.to_string()),
+                "tags" => accumulator.tags = Some(value.to_string()),
                 "vga" => accumulator.vga = value.parse().unwrap(),
                 "vmgenid" => accumulator.vmgenid = value.parse().unwrap(),
                 key if key.starts_with("scsi")
@@ -130,29 +131,34 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
 }
 
 pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
-    let deployedvms = deployed
-        .vms
-        .into_iter()
-        .map(|(_name, vm)| -> Result<(String, DeployedVM)> {
-            let config = qm_config(vm.vm_id)?;
-            let parsed = parse_qm_config(&config)?;
-            Ok((
-                vm.vm_name.clone(),
-                DeployedVM {
-                    vm_id: vm.vm_id,
-                    vm_name: vm.vm_name,
-                    commit_hash: vm.commit_hash,
-                    template_id: vm.template_id,
-                    mem_mb: vm.mem_mb,
-                    bootdisk_gb: vm.bootdisk_gb,
-                    status: vm.status,
-                    pid: vm.pid,
-                    cores: parsed.cores as u16,
-                    sockets: parsed.sockets,
-                },
-            ))
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
+    let mut deployedvms = HashMap::new();
+    for (_name, vm) in deployed.vms {
+        let config = qm_config(vm.vm_id)?;
+        let parsed = parse_qm_config(&config)?;
+        let is_proxnix = parsed
+            .tags
+            .as_deref()
+            .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+            .unwrap_or(false);
+        if !is_proxnix {
+            continue;
+        }
+        deployedvms.insert(
+            vm.vm_name.clone(),
+            DeployedVM {
+                vm_id: vm.vm_id,
+                vm_name: vm.vm_name,
+                commit_hash: vm.commit_hash,
+                template_id: vm.template_id,
+                mem_mb: vm.mem_mb,
+                bootdisk_gb: vm.bootdisk_gb,
+                status: vm.status,
+                pid: vm.pid,
+                cores: parsed.cores as u16,
+                sockets: parsed.sockets,
+            },
+        );
+    }
     Ok(DeployedState { vms: deployedvms })
 }
 
