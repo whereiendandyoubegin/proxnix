@@ -143,17 +143,17 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
         if !is_proxnix {
             continue;
         }
-        let commit_hash = parsed.tags.as_deref().and_then(|t| {
+        let nix_hash = parsed.tags.as_deref().and_then(|t| {
             t.split(';')
-                .find(|tag| tag.trim().starts_with("commit-"))
-                .map(|tag| tag.trim().trim_start_matches("commit-").to_string())
+                .find(|tag| tag.trim().starts_with("nix-"))
+                .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
         });
         deployedvms.insert(
             vm.vm_name.clone(),
             DeployedVM {
                 vm_id: vm.vm_id,
                 vm_name: vm.vm_name,
-                commit_hash,
+                nix_hash,
                 template_id: vm.template_id,
                 mem_mb: vm.mem_mb,
                 bootdisk_gb: vm.bootdisk_gb,
@@ -176,7 +176,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                 DeployedVM {
                     vm_id: qmlist.vm_id,
                     vm_name: qmlist.name,
-                    commit_hash: None,
+                    nix_hash: None,
                     template_id: None,
                     mem_mb: qmlist.mem_mb,
                     bootdisk_gb: qmlist.bootdisk_gb,
@@ -193,7 +193,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
 }
 
 
-pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, commit_hash: &str) -> StateDiff {
+pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, image_hashes: &HashMap<String, String>) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
     let mut to_update: Vec<VMUpdate> = Vec::new();
     let mut to_delete: Vec<DeployedVM> = Vec::new();
@@ -215,10 +215,10 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, commit_hash:
             if vmconfig.sockets != deployed_vm.sockets {
                 changes.push(FieldChange::Sockets);
             }
-            if deployed_vm
-                .commit_hash
-                .as_deref()
-                .map(|h| h != commit_hash)
+            let desired_nix_hash = image_hashes.get(&vmconfig.image_type).map(|s| s.as_str());
+            if desired_nix_hash
+                .zip(deployed_vm.nix_hash.as_deref())
+                .map(|(desired, deployed)| desired != deployed)
                 .unwrap_or(true)
             {
                 changes.push(FieldChange::Image);
@@ -276,9 +276,9 @@ pub fn load_state() -> Result<DeployedState> {
 }
 
 
-pub fn full_diff(desired: &DesiredState, commit_hash: &str) -> Result<StateDiff> {
+pub fn full_diff(desired: &DesiredState, image_hashes: &HashMap<String, String>) -> Result<StateDiff> {
     let deployed = load_state()?;
-    let diff = diff_state(&deployed, &desired, commit_hash);
+    let diff = diff_state(&deployed, &desired, image_hashes);
 
     Ok(diff)
 }

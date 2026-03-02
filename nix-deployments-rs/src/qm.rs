@@ -2,7 +2,7 @@ use crate::types::{AppError, FieldChange, Result, VMConfig, VMUpdate};
 use std::process::Command;
 
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
-pub fn qm_create(config: &VMConfig, commit_hash: &str) -> Result<String> {
+pub fn qm_create(config: &VMConfig, nix_hash: &str) -> Result<String> {
     let qm_create = Command::new("qm")
         .arg("create")
         .arg(config.vm_id.to_string())
@@ -17,7 +17,7 @@ pub fn qm_create(config: &VMConfig, commit_hash: &str) -> Result<String> {
         .arg("--scsihw")
         .arg(config.scsi_hw.to_string())
         .arg("--tags")
-        .arg(format!("proxnix;commit-{}", commit_hash))
+        .arg(format!("proxnix;nix-{}", nix_hash))
         .output()?;
     if !qm_create.status.success() {
         let stderr = String::from_utf8_lossy(&qm_create.stderr);

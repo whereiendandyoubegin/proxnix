@@ -83,7 +83,7 @@ pub struct QMList {
 pub struct DeployedVM {
     pub vm_id: u32,
     pub vm_name: String,
-    pub commit_hash: Option<String>,
+    pub nix_hash: Option<String>,
     pub template_id: Option<u32>,
     pub mem_mb: u32,
     pub bootdisk_gb: f64,

@@ -10,9 +10,18 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
-pub fn provision_vm(config: &VMConfig, qcow2_path: &str, commit_hash: &str) -> Result<()> {
+fn nix_store_hash(store_path: &str) -> Option<&str> {
+    store_path
+        .strip_prefix("/nix/store/")
+        .and_then(|s| s.split('-').next())
+}
+
+pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
+    let nix_hash = nix_store_hash(qcow2_path).ok_or_else(|| {
+        AppError::CmdError(format!("could not extract nix hash from path: {}", qcow2_path))
+    })?;
     info!("Provisioning VM {} (id: {})", config.name, config.vm_id);
-    qm_create(config, commit_hash)?;
+    qm_create(config, nix_hash)?;
     let disk_ref = qm_importdisk(config.vm_id, qcow2_path, &config.storage_location)?;
     qm_set_disk(config.vm_id, &disk_ref, &config.disk_slot)?;
     qm_set_agent(config.vm_id)?;
@@ -56,7 +65,13 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let built_configs = build_all_configs(repo_url, commit_hash)?;
     let eval = eval_vm_config(&dest_path)?;
     let parsed = parse_vm_config(&eval)?;
-    let diff = full_diff(&parsed, commit_hash)?;
+    let image_hashes: HashMap<String, String> = built_configs
+        .iter()
+        .filter_map(|(name, path)| {
+            nix_store_hash(path).map(|h| (name.clone(), h.to_string()))
+        })
+        .collect();
+    let diff = full_diff(&parsed, &image_hashes)?;
     info!(
         "Diff: {} to create, {} to update, {} to delete",
         diff.to_create.len(),
@@ -106,7 +121,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
         }
     }
 
-    reconcile(diff, built_configs, commit_hash)?;
+    reconcile(diff, built_configs)?;
     info!("Pipeline complete for commit {}", commit_hash);
 
     Ok(())
@@ -174,7 +189,7 @@ pub fn ensure_vms_running(repo_path: &str) {
     }
 }
 
-pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>, commit_hash: &str) -> Result<()> {
+pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Result<()> {
     for config in diff.to_create {
         let qcow_path = built_configs
             .get(&config.image_type)
@@ -182,7 +197,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>, commit
                 "No built image for type '{}' (vm: {})",
                 config.image_type, config.name
             )))?;
-        provision_vm(&config, qcow_path, commit_hash)?;
+        provision_vm(&config, qcow_path)?;
     }
     for vm in diff.to_delete {
         info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
@@ -208,7 +223,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>, commit
                         )))?;
                 qm_stop(&actions.config.vm_id)?;
                 qm_destroy(actions.config.vm_id)?;
-                provision_vm(&actions.config, qcow_path, commit_hash)?;
+                provision_vm(&actions.config, qcow_path)?;
             }
             UpdateAction::Protected => {
                 warn!("{} is protected, no action taken", actions.name);
