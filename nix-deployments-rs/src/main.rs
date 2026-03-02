@@ -35,8 +35,6 @@ async fn webhook_handler(
 
     let git_repo_url = parsed.repository.clone();
     let current_git_commit = parsed.hash.clone();
-    let mut guard = state.last_repo.write().await;
-    *guard = Some((git_repo_url.clone(), current_git_commit.clone()));
 
     let permit = match state.semaphore.try_acquire_owned() {
         Ok(permit) => permit,
@@ -48,6 +46,11 @@ async fn webhook_handler(
             return StatusCode::TOO_MANY_REQUESTS;
         }
     };
+
+    {
+        let mut guard = state.last_repo.write().await;
+        *guard = Some((git_repo_url.clone(), current_git_commit.clone()));
+    }
 
     tokio::task::spawn_blocking(move || {
         info!(
