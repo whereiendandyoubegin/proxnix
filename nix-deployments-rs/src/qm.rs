@@ -32,22 +32,45 @@ pub fn qm_create(config: &VMConfig) -> Result<String> {
 
     Ok(output_string)
 }
+
+pub fn qm_stop(vm_id: &u32) -> Result<String> {
+    let qm_stop = Command::new("qm")
+        .arg("stop")
+        .arg(vm_id.to_string())
+        .output()?;
+    if !qm_stop.status.success() {
+        let stderr = String::from_utf8_lossy(&qm_stop.stderr);
+        return Err(AppError::CmdError(format!(
+            "qm stop has failed with exit code: {:?}: {}",
+            qm_stop.status.code(),
+            stderr
+        )));
+    }
+    let stdout_bytes = qm_stop.stdout;
+    let output_string = String::from_utf8(stdout_bytes)?;
+
+    Ok(output_string)
+}
+
 // Parses output like: "Successfully imported disk as 'unused0:local-lvm:vm-100-disk-1'"
 // Returns the disk reference: "local-lvm:vm-100-disk-1"
 fn parse_importdisk_output(output: &str) -> Result<String> {
     let disk_ref = output
         .lines()
         .find_map(|line| {
-            if !line.contains("successfully imported disk") {
+            if !line.to_lowercase().contains("successfully imported disk") {
                 return None;
             }
             let start = line.find('\'')?;
             let end = line.rfind('\'')?;
-            if start < end {
-                Some(line[start + 1..end].to_string())
-            } else {
-                None
+            if start >= end {
+                return None;
             }
+            // Output is like: "unused0:local-lvm:vm-100-disk-0"
+            // Strip the "unusedN:" prefix to get just "local-lvm:vm-100-disk-0"
+            let full_ref = &line[start + 1..end];
+            let disk_ref = full_ref.splitn(2, ':').nth(1)?.to_string();
+            Some(disk_ref)
         })
         .ok_or_else(|| {
             AppError::CmdError(format!(

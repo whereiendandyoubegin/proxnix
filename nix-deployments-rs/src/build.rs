@@ -2,6 +2,7 @@ use crate::git::git_ensure_commit;
 use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_vm_config, list_nix_configs, nix_build};
 use crate::qm::{
     qm_create, qm_destroy, qm_importdisk, qm_set_agent, qm_set_disk, qm_set_resources, qm_start,
+    qm_stop,
 };
 use crate::state::{full_diff, get_vm_statuses, parse_vm_config};
 use crate::types::{AppError, FieldChange, Result, StateDiff, UpdateAction, VMConfig};
@@ -80,13 +81,25 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
             .collect();
         match &update.required_action {
             UpdateAction::InPlace => {
-                info!("{}: {} changed -> in-place update", update.name, changes.join(", "));
+                info!(
+                    "{}: {} changed -> in-place update",
+                    update.name,
+                    changes.join(", ")
+                );
             }
             UpdateAction::Rebuild => {
-                info!("{}: {} changed -> full rebuild", update.name, changes.join(", "));
+                info!(
+                    "{}: {} changed -> full rebuild",
+                    update.name,
+                    changes.join(", ")
+                );
             }
             UpdateAction::Protected => {
-                warn!("{}: {} changed but vm is protected -> no action", update.name, changes.join(", "));
+                warn!(
+                    "{}: {} changed but vm is protected -> no action",
+                    update.name,
+                    changes.join(", ")
+                );
             }
         }
     }
@@ -171,6 +184,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
     }
     for vm in diff.to_delete {
         info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
+        qm_stop(&vm.vm_id)?;
         qm_destroy(vm.vm_id)?;
         info!("Deleted VM {}", vm.vm_name);
     }
@@ -190,6 +204,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
                             "No built image for type '{}' (vm: {})",
                             actions.config.image_type, actions.name
                         )))?;
+                qm_stop(&actions.config.vm_id)?;
                 qm_destroy(actions.config.vm_id)?;
                 provision_vm(&actions.config, qcow_path)?;
             }
