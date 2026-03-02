@@ -40,6 +40,9 @@ pub fn qm_stop(vm_id: &u32) -> Result<String> {
         .output()?;
     if !qm_stop.status.success() {
         let stderr = String::from_utf8_lossy(&qm_stop.stderr);
+        if stderr.contains("not running") {
+            return Ok(String::new());
+        }
         return Err(AppError::CmdError(format!(
             "qm stop has failed with exit code: {:?}: {}",
             qm_stop.status.code(),

@@ -101,6 +101,13 @@ async fn main() {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             interval.tick().await;
+            let permit = match periodic_state.semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    info!("Pipeline is running, skipping periodic reconcile");
+                    continue;
+                }
+            };
             let lr = periodic_state.last_repo.read().await.clone();
             match lr {
                 None => {
@@ -110,6 +117,7 @@ async fn main() {
                     let dest_path = format!("{}/{}", nix::BASE_REPO_PATH, commit_hash);
                     tokio::task::spawn_blocking(move || {
                         build::ensure_vms_running(&dest_path);
+                        drop(permit);
                     });
                 }
             }
