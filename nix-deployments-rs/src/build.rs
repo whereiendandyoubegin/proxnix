@@ -8,12 +8,19 @@ use crate::state::{full_diff, get_vm_statuses, parse_vm_config};
 use crate::types::{AppError, FieldChange, Result, StateDiff, UpdateAction, VMConfig};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::fs;
 use tracing::{info, warn};
 
 fn nix_store_hash(store_path: &str) -> Option<&str> {
     store_path
         .strip_prefix("/nix/store/")
         .and_then(|s| s.split('-').next())
+}
+
+pub fn get_nix_hash(symlink: &str) -> Option<String> {
+    let path = fs::canonicalize(symlink).ok()?;
+    let rstring = path.into_os_string().into_string().ok()?;
+    Some(rstring.strip_prefix("/nix/store/")?.to_string())
 }
 
 pub fn provision_vm(config: &VMConfig, qcow2_path: &str, commit_hash: &str) -> Result<()> {
@@ -59,7 +66,8 @@ pub fn build_all_configs(
         .map(|config_name| -> Result<(String, (String, String))> {
             info!("Building nix config: {}", config_name);
             let result_path = nix_build(config_name, &dest_path)?;
-            let qcow2_path = format!("{}/nixos.qcow2", result_path);
+            let canonical = fs::canonicalize(&result_path)?;
+            let qcow2_path = format!("{}/nixos.qcow2", canonical.display());
             let nix_hash = nix_store_hash(&qcow2_path)
                 .ok_or_else(|| {
                     AppError::CmdError(format!(
