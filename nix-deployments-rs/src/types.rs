@@ -83,7 +83,7 @@ pub struct QMList {
 pub struct DeployedVM {
     pub vm_id: u32,
     pub vm_name: String,
-    pub commit_hash: Option<String>,
+    pub nix_hash: Option<String>,
     pub template_id: Option<u32>,
     pub mem_mb: u32,
     pub bootdisk_gb: f64,
@@ -93,10 +93,10 @@ pub struct DeployedVM {
     pub sockets: u8,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct QMConfig {
     pub agent: String,
-    pub balloon: bool,
+    pub balloon: u8,
     pub boot: String,
     pub bootdisk: String,
     pub cipassword: Option<String>,
@@ -110,14 +110,46 @@ pub struct QMConfig {
     pub meta: String,
     pub name: String,
     pub networks: HashMap<String, String>,
-    pub numa: bool,
-    pub onboot: bool,
-    pub protection: bool,
+    pub numa: u8,
+    pub onboot: u8,
+    pub protection: u8,
     pub serial: HashMap<String, String>,
     pub sockets: u8,
     pub sshkeys: Option<String>,
+    pub tags: Option<String>,
     pub vga: String,
     pub vmgenid: String,
+}
+
+impl Default for QMConfig {
+    fn default() -> Self {
+        Self {
+            sockets: 1,
+            agent: Default::default(),
+            balloon: Default::default(),
+            boot: Default::default(),
+            bootdisk: Default::default(),
+            cipassword: Default::default(),
+            ciuser: Default::default(),
+            cores: Default::default(),
+            cpu: Default::default(),
+            cpuunits: Default::default(),
+            disks: Default::default(),
+            ipconfigs: Default::default(),
+            memory: Default::default(),
+            meta: Default::default(),
+            name: Default::default(),
+            networks: Default::default(),
+            numa: Default::default(),
+            onboot: Default::default(),
+            protection: Default::default(),
+            serial: Default::default(),
+            sshkeys: Default::default(),
+            tags: Default::default(),
+            vga: Default::default(),
+            vmgenid: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -158,6 +190,7 @@ pub enum FieldChange {
     Cores,
     Sockets,
     Disk,
+    Image,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

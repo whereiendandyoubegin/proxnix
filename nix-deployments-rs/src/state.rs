@@ -3,18 +3,10 @@ use crate::types::{
     StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
 use std::process::Command;
 
-pub const DEPLOYED_STATE_PATH: &str = "/var/lib/proxnix/deployed_state.json";
-
-pub fn load_json(path: &str) -> Result<DesiredState> {
-    let file = File::open(path).map_err(|e| AppError::CmdError(format!("Failed to open config {}: {}", path, e)))?;
-    let file_read = BufReader::new(file);
-    let state: DesiredState = serde_json::from_reader(file_read)?;
-
+pub fn parse_vm_config(json: &str) -> Result<DesiredState> {
+    let state: DesiredState = serde_json::from_str(&json)?;
     Ok(state)
 }
 
@@ -76,6 +68,7 @@ pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
                 "protection" => accumulator.protection = value.parse().unwrap(),
                 "sockets" => accumulator.sockets = value.parse().unwrap(),
                 "sshkeys" => accumulator.sshkeys = Some(value.to_string()),
+                "tags" => accumulator.tags = Some(value.to_string()),
                 "vga" => accumulator.vga = value.parse().unwrap(),
                 "vmgenid" => accumulator.vmgenid = value.parse().unwrap(),
                 key if key.starts_with("scsi")
@@ -138,29 +131,39 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
 }
 
 pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
-    let deployedvms = deployed
-        .vms
-        .into_iter()
-        .map(|(_name, vm)| -> Result<(String, DeployedVM)> {
-            let config = qm_config(vm.vm_id)?;
-            let parsed = parse_qm_config(&config)?;
-            Ok((
-                vm.vm_name.clone(),
-                DeployedVM {
-                    vm_id: vm.vm_id,
-                    vm_name: vm.vm_name,
-                    commit_hash: vm.commit_hash,
-                    template_id: vm.template_id,
-                    mem_mb: vm.mem_mb,
-                    bootdisk_gb: vm.bootdisk_gb,
-                    status: vm.status,
-                    pid: vm.pid,
-                    cores: parsed.cores as u16,
-                    sockets: parsed.sockets,
-                },
-            ))
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
+    let mut deployedvms = HashMap::new();
+    for (_name, vm) in deployed.vms {
+        let config = qm_config(vm.vm_id)?;
+        let parsed = parse_qm_config(&config)?;
+        let is_proxnix = parsed
+            .tags
+            .as_deref()
+            .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+            .unwrap_or(false);
+        if !is_proxnix {
+            continue;
+        }
+        let nix_hash = parsed.tags.as_deref().and_then(|t| {
+            t.split(';')
+                .find(|tag| tag.trim().starts_with("nix-"))
+                .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+        });
+        deployedvms.insert(
+            vm.vm_name.clone(),
+            DeployedVM {
+                vm_id: vm.vm_id,
+                vm_name: vm.vm_name,
+                nix_hash,
+                template_id: vm.template_id,
+                mem_mb: vm.mem_mb,
+                bootdisk_gb: vm.bootdisk_gb,
+                status: vm.status,
+                pid: vm.pid,
+                cores: parsed.cores as u16,
+                sockets: parsed.sockets,
+            },
+        );
+    }
     Ok(DeployedState { vms: deployedvms })
 }
 
@@ -173,7 +176,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                 DeployedVM {
                     vm_id: qmlist.vm_id,
                     vm_name: qmlist.name,
-                    commit_hash: None,
+                    nix_hash: None,
                     template_id: None,
                     mem_mb: qmlist.mem_mb,
                     bootdisk_gb: qmlist.bootdisk_gb,
@@ -189,14 +192,8 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
     DeployedState { vms: lists }
 }
 
-pub fn save_deployed_state(state: &DeployedState, path: &str) -> Result<()> {
-    let file = File::create(path)?;
-    serde_json::to_writer_pretty(file, state)?;
 
-    Ok(())
-}
-
-pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff {
+pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, image_hashes: &HashMap<String, String>) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
     let mut to_update: Vec<VMUpdate> = Vec::new();
     let mut to_delete: Vec<DeployedVM> = Vec::new();
@@ -209,7 +206,7 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
             if vmconfig.memory_mb != deployed_vm.mem_mb {
                 changes.push(FieldChange::Memory);
             }
-            if vmconfig.disk_gb as f64 != deployed_vm.bootdisk_gb {
+            if vmconfig.disk_gb > deployed_vm.bootdisk_gb.round() as u32 {
                 changes.push(FieldChange::Disk);
             }
             if vmconfig.cores != deployed_vm.cores {
@@ -218,10 +215,20 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
             if vmconfig.sockets != deployed_vm.sockets {
                 changes.push(FieldChange::Sockets);
             }
+            let desired_nix_hash = image_hashes.get(&vmconfig.image_type).map(|s| s.as_str());
+            if desired_nix_hash
+                .zip(deployed_vm.nix_hash.as_deref())
+                .map(|(desired, deployed)| desired != deployed)
+                .unwrap_or(true)
+            {
+                changes.push(FieldChange::Image);
+            }
             if !changes.is_empty() {
                 let action = if vmconfig.protected {
                     UpdateAction::Protected
-                } else if changes.contains(&FieldChange::Disk) {
+                } else if changes.contains(&FieldChange::Disk)
+                    || changes.contains(&FieldChange::Image)
+                {
                     UpdateAction::Rebuild
                 } else {
                     UpdateAction::InPlace
@@ -252,11 +259,6 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState) -> StateDiff
     }
 }
 
-pub fn update_deployed_state_commit(deployed: &mut DeployedState, name: &str, commit: &str) -> () {
-    if let Some(vm) = deployed.vms.get_mut(name) {
-        vm.commit_hash = Some(String::from(commit))
-    }
-}
 
 pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     let raw = qm_list()?;
@@ -273,23 +275,10 @@ pub fn load_state() -> Result<DeployedState> {
     Ok(enriched)
 }
 
-pub fn load_deployed_state(path: &str) -> Result<DeployedState> {
-    let p = Path::new(path);
-    if !p.exists() {
-        return Ok(DeployedState {
-            vms: HashMap::new(),
-        });
-    }
-    let file = File::open(p)?;
-    let reader = BufReader::new(file);
-    let state: DeployedState = serde_json::from_reader(reader)?;
-    Ok(state)
-}
 
-pub fn full_diff(config_path: &str) -> Result<StateDiff> {
-    let deployed = load_deployed_state(DEPLOYED_STATE_PATH)?;
-    let desired = load_json(config_path)?;
-    let diff = diff_state(&deployed, &desired);
+pub fn full_diff(desired: &DesiredState, image_hashes: &HashMap<String, String>) -> Result<StateDiff> {
+    let deployed = load_state()?;
+    let diff = diff_state(&deployed, &desired, image_hashes);
 
     Ok(diff)
 }

@@ -1,5 +1,4 @@
 use crate::types::{AppError, Result};
-use serde_json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
@@ -35,6 +34,32 @@ pub fn find_in_repo(repo_path: &str, filename: &str) -> Result<String> {
             n, filename
         ))),
     }
+}
+
+pub fn eval_vm_config(repo_path: &str) -> Result<String> {
+    let flake_path = find_in_repo(repo_path, "flake.nix")?;
+    let nix_dir = Path::new(&flake_path)
+        .parent()
+        .ok_or_else(|| AppError::CmdError("Failed to get parent path".to_string()))?;
+
+    let nix_eval = Command::new("nix")
+        .current_dir(nix_dir)
+        .arg("eval")
+        .arg(".#proxnix")
+        .arg("--json")
+        .output()
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
+    if !nix_eval.status.success() {
+        let stderr = String::from_utf8_lossy(&nix_eval.stderr);
+        return Err(AppError::CmdError(format!(
+            "Nix eval failed (exit: {:?}): {}",
+            nix_eval.status.code(),
+            stderr
+        )));
+    }
+    let output_string = String::from_utf8(nix_eval.stdout)?;
+
+    Ok(output_string)
 }
 
 pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
@@ -73,7 +98,11 @@ pub fn nix_build(config_name: &str, repo_path: &str) -> Result<String> {
         .parent()
         .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
 
-    info!("Running nix build for config '{}' in {}", config_name, nix_dir.display());
+    info!(
+        "Running nix build for config '{}' in {}",
+        config_name,
+        nix_dir.display()
+    );
     let result_path = format!("{}/{}/result", repo_path, config_name);
     let nix_build = Command::new("nix")
         .current_dir(nix_dir)

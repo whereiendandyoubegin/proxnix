@@ -1,41 +1,121 @@
 # Proxnix
 
-Proxnix is a state controller written in rust for the proxmox platform. It uses nix as the build engine to ensure atomic images are created and error out ahead of attempted deployment.
-It uses GitOps principles to deploy using a json config file, a flake, a nix qcow module and an arbitrary number of user defined nix modules.
-This is born of frustration with a toolchain of Ansible, Packer, Terraform and ad hoc scripts and CI jobs. The goal is to have some user defined nix expressions and a json file with VM definitions
-and use those for a fully declarative, simple build.
-Another big goal is keeping state local, easily available to the daemon, and refreshed constantly.
+Proxnix is a GitOps state controller written in Rust for the Proxmox platform. It is similar in principle to ArgoCD but for Proxmox VMs rather than Kubernetes. Push to git and your VMs converge to match.
 
-## State of development
+It uses Nix as the build engine so images are built atomically and errors surface before any deployment is attempted. VM configuration is defined as a nix flake output so the entire thing is a nix repo with no separate config format.
 
-This is currently in an MVP state and compiles and runs on a proxmox host. A few goals for a roadmap are:
-- Nix based healthchecks with sensible built in checks that can apply to any linux machine
-- Fixing TODOs in the code, there are a few places where the program could panic
-- Adding a TUI or web GUI for deployment
-- Templating the flakes to allow for new Nix users to craft expressions for deployment a little easier
+This is born of frustration with a toolchain of Ansible, Packer, Terraform and ad hoc scripts and CI jobs. The goal is to have some user defined nix expressions and VM definitions in the same repo and use those for a fully declarative, reproducible build.
+
+State is not persisted to disk. The source of truth at all times is the nix config and live Proxmox state.
+
+## How it works
+
+The pipeline runs on every push:
+
+1. Webhook received and parsed
+2. Repo cloned at the pushed commit
+3. All `nixosConfigurations` in the flake are built as qcow2 images concurrently
+4. VM config is read from the flake via `nix eval .#proxnix --json`
+5. Live Proxmox state is queried via `qm`
+6. Desired state is diffed against live state
+7. VMs are created, updated in place, or destroyed as needed
+
+A reconciliation loop runs every 10 seconds. Any managed VM that is stopped gets started. Any managed VM that no longer exists in Proxmox is removed from state and will be recreated on the next push.
+
+Concurrent builds are handled by rayon. The webhook uses a semaphore to ensure only one pipeline runs at a time. Duplicate pushes during a running build return 429.
+
+## Requirements
+
+- Proxmox host
+- Nix installed on the Proxmox host
+- SSH key at `/root/.ssh/id_ed25519`, `/root/.ssh/id_rsa`, or `/root/.ssh/id_ecdsa` with read access to your repo
+- Git server capable of sending push webhooks
 
 ## Installation
 
-This is a daemon which runs on the proxmox platform, as such you need to install it on the proxmox host itself.
-Nix is required for installation, a Nix flake installs the software. Nixpkgs is required as a channel. 
-Run `nix build`. This builds the binary in result/bin. You have to run the binary with the following args once:
-- --init /path/to/your/definitions/config.json
+Clone this repo onto your Proxmox host and run:
 
-## Usage
+```bash
+nix build
+```
 
-There are example configs in the definitions folder. The nix flake must evaluate and it must contain the qcow2 module. Otherwise it can be pretty variable.
+This produces the binary at `result/bin/nix-deployments-rs`. Run it once with `--init` to create required directories:
 
-## Example
+```bash
+./result/bin/nix-deployments-rs --init
+```
 
-The flow of the pipeline is as follows:
-- Webhook received and parsed
-- Repo cloned
-- Config files parsed
-- State gathered from most recent reconciliation loop
-- State diffed against configuration
-- Nix image generation starts
-- Machines deployed with qm
-- Machines added to known state
-- Reconciliation loop continues every 10 seconds to watch for possible manual changes
+Then run the daemon:
 
-There is an example repo here which goes into some more detail https://github.com/whereiendandyoubegin/proxnix-example
+```bash
+./result/bin/nix-deployments-rs
+```
+
+It listens on `0.0.0.0:6780`. Point your git server's push webhook at `http://<host>:6780/whlisten`.
+
+## Repo structure
+
+Your nix repo needs two things.
+
+**`nixosConfigurations` in your flake**, one per VM image type, each using the qcow2 module:
+
+```nix
+nixosConfigurations = {
+  my-server = nixpkgs.lib.nixosSystem {
+    inherit system;
+    modules = [ ./configuration.nix ./qcow.nix ./my-server.nix ];
+  };
+};
+```
+
+**A `proxnix` flake output** defining which VMs to deploy. The cleanest way is to keep this in a separate file and import it:
+
+```nix
+proxnix = import ./proxnix.nix;
+```
+
+```nix
+# proxnix.nix
+{
+  vms = {
+    "my-server" = {
+      name = "my-server";
+      vm_id = 100;
+      image_type = "my-server";   # must match a nixosConfigurations key
+      cores = 2;
+      sockets = 1;
+      memory_mb = 4096;
+      disk_gb = 20;
+      storage_location = "local-lvm";
+      cloud_init = "None";
+      protected = false;
+    };
+  };
+}
+```
+
+`image_type` maps a VM to the nixosConfiguration that builds its disk image. Multiple VMs can share the same image type.
+
+Verify the config evaluates correctly before pushing:
+
+```bash
+nix eval .#proxnix --json | jq .
+```
+
+There is an example repo at https://github.com/whereiendandyoubegin/proxnix-example.
+
+## State of development
+
+This runs in production on a Proxmox homelab and is in active development. Known limitations:
+
+- A few unwrap calls that can panic on malformed qm output
+- No authentication on the webhook endpoint
+- Single node Proxmox only
+
+## Roadmap
+
+- Nix based healthchecks with sensible built in defaults for any linux machine
+- Webhook authentication
+- Fix remaining TODOs, there are a few places the program can panic
+- TUI or web GUI for deployment status
+- Flake templates to make it easier to get started without deep Nix knowledge
