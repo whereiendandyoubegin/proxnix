@@ -16,12 +16,15 @@ fn nix_store_hash(store_path: &str) -> Option<&str> {
         .and_then(|s| s.split('-').next())
 }
 
-pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
+pub fn provision_vm(config: &VMConfig, qcow2_path: &str, commit_hash: &str) -> Result<()> {
     let nix_hash = nix_store_hash(qcow2_path).ok_or_else(|| {
-        AppError::CmdError(format!("could not extract nix hash from path: {}", qcow2_path))
+        AppError::CmdError(format!(
+            "could not extract nix hash from path: {}",
+            qcow2_path
+        ))
     })?;
     info!("Provisioning VM {} (id: {})", config.name, config.vm_id);
-    qm_create(config, nix_hash)?;
+    qm_create(config, nix_hash, commit_hash)?;
     let disk_ref = qm_importdisk(config.vm_id, qcow2_path, &config.storage_location)?;
     qm_set_disk(config.vm_id, &disk_ref, &config.disk_slot)?;
     qm_set_agent(config.vm_id)?;
@@ -33,7 +36,11 @@ pub fn provision_vm(config: &VMConfig, qcow2_path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<String, String>> {
+
+pub fn build_all_configs(
+    repo_url: &str,
+    commit_hash: &str,
+) -> Result<HashMap<String, (String, String)>> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
     info!(
         "Cloning {} at commit {} to {}",
@@ -49,11 +56,20 @@ pub fn build_all_configs(repo_url: &str, commit_hash: &str) -> Result<HashMap<St
     configure_dirs(config_names.clone(), &dest_path)?;
     let builds = config_names
         .par_iter()
-        .map(|config_name| -> Result<(String, String)> {
+        .map(|config_name| -> Result<(String, (String, String))> {
             info!("Building nix config: {}", config_name);
             let result_path = nix_build(config_name, &dest_path)?;
-            info!("Built {} -> {}", config_name, result_path);
-            Ok((config_name.clone(), format!("{}/nixos.qcow2", result_path)))
+            let qcow2_path = format!("{}/nixos.qcow2", result_path);
+            let nix_hash = nix_store_hash(&qcow2_path)
+                .ok_or_else(|| {
+                    AppError::CmdError(format!(
+                        "could not extract nix hash from path: {}",
+                        qcow2_path
+                    ))
+                })?
+                .to_string();
+            info!("Built {} -> {} (nix hash: {})", config_name, result_path, nix_hash);
+            Ok((config_name.clone(), (qcow2_path, nix_hash)))
         })
         .collect::<Result<HashMap<_, _>>>()?;
     Ok(builds)
@@ -67,9 +83,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let parsed = parse_vm_config(&eval)?;
     let image_hashes: HashMap<String, String> = built_configs
         .iter()
-        .filter_map(|(name, path)| {
-            nix_store_hash(path).map(|h| (name.clone(), h.to_string()))
-        })
+        .map(|(name, (_, nix_hash))| (name.clone(), nix_hash.clone()))
         .collect();
     let diff = full_diff(&parsed, &image_hashes)?;
     info!(
@@ -121,7 +135,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
         }
     }
 
-    reconcile(diff, built_configs)?;
+    reconcile(diff, built_configs, commit_hash)?;
     info!("Pipeline complete for commit {}", commit_hash);
 
     Ok(())
@@ -189,15 +203,19 @@ pub fn ensure_vms_running(repo_path: &str) {
     }
 }
 
-pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Result<()> {
+pub fn reconcile(
+    diff: StateDiff,
+    built_configs: HashMap<String, (String, String)>,
+    commit_hash: &str,
+) -> Result<()> {
     for config in diff.to_create {
-        let qcow_path = built_configs
+        let (qcow_path, _) = built_configs
             .get(&config.image_type)
             .ok_or(AppError::CmdError(format!(
                 "No built image for type '{}' (vm: {})",
                 config.image_type, config.name
             )))?;
-        provision_vm(&config, qcow_path)?;
+        provision_vm(&config, qcow_path, commit_hash)?;
     }
     for vm in diff.to_delete {
         info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
@@ -214,7 +232,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
             }
             UpdateAction::Rebuild => {
                 info!("Rebuilding VM {} (destroy + provision)", actions.name);
-                let qcow_path =
+                let (qcow_path, _) =
                     built_configs
                         .get(&actions.config.image_type)
                         .ok_or(AppError::CmdError(format!(
@@ -223,7 +241,7 @@ pub fn reconcile(diff: StateDiff, built_configs: HashMap<String, String>) -> Res
                         )))?;
                 qm_stop(&actions.config.vm_id)?;
                 qm_destroy(actions.config.vm_id)?;
-                provision_vm(&actions.config, qcow_path)?;
+                provision_vm(&actions.config, qcow_path, commit_hash)?;
             }
             UpdateAction::Protected => {
                 warn!("{} is protected, no action taken", actions.name);
