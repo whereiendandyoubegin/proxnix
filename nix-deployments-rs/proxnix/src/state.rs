@@ -1,6 +1,7 @@
+use crate::pct::{pct_config, pct_list};
 use crate::types::{
-    AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result,
-    StateDiff, UpdateAction, VMConfig, VMUpdate,
+    AppError, ContainerConfig, DeployedContainer, DeployedState, DeployedVM, DesiredState,
+    FieldChange, QMConfig, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
 use std::collections::HashMap;
 use std::process::Command;
@@ -131,8 +132,9 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
 }
 
 pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
+    let DeployedState { vms, containers } = deployed;
     let mut deployedvms = HashMap::new();
-    for (_name, vm) in deployed.vms {
+    for (_name, vm) in vms {
         let config = qm_config(vm.vm_id)?;
         let parsed = parse_qm_config(&config)?;
         let is_proxnix = parsed
@@ -164,7 +166,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
             },
         );
     }
-    Ok(DeployedState { vms: deployedvms })
+    Ok(DeployedState { vms: deployedvms, containers })
 }
 
 pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
@@ -189,7 +191,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
         })
         .collect();
 
-    DeployedState { vms: lists }
+    DeployedState { vms: lists, containers: HashMap::new() }
 }
 
 
@@ -256,6 +258,8 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, image_hashes
         to_create,
         to_update,
         to_delete,
+        to_create_containers: vec![],
+        to_delete_containers: vec![],
     }
 }
 
@@ -267,20 +271,151 @@ pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
 }
 
 pub fn load_state() -> Result<DeployedState> {
-    let qm_list = qm_list()?;
-    let parsed_qm_list = parse_qm_list(&qm_list)?;
-    let deployed_vm = list_to_deployed_vm(parsed_qm_list);
-    let enriched = enrich_cpu_info(deployed_vm)?;
+    let qm_raw = qm_list()?;
+    let parsed_qm_list = parse_qm_list(&qm_raw)?;
+    let deployed_vms = list_to_deployed_vm(parsed_qm_list);
+    let mut enriched = enrich_cpu_info(deployed_vms)?;
+
+    let pct_raw = pct_list()?;
+    let pct_entries = parse_pct_list(&pct_raw)?;
+    enriched.containers = enrich_container_info(pct_entries)?;
 
     Ok(enriched)
 }
 
-
 pub fn full_diff(desired: &DesiredState, image_hashes: &HashMap<String, String>) -> Result<StateDiff> {
     let deployed = load_state()?;
-    let diff = diff_state(&deployed, &desired, image_hashes);
-
+    let mut diff = diff_state(&deployed, desired, image_hashes);
+    let (to_create_containers, to_delete_containers) = diff_container_state(&deployed.containers, desired);
+    diff.to_create_containers = to_create_containers;
+    diff.to_delete_containers = to_delete_containers;
     Ok(diff)
+}
+
+struct PctListEntry {
+    ct_id: u32,
+    status: String,
+    ct_name: String,
+}
+
+struct PctConfigData {
+    hostname: String,
+    memory_mb: u32,
+    cores: u16,
+    rootfs_gb: f64,
+    tags: Option<String>,
+}
+
+fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
+    output
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                return Err(AppError::ParsingModuleError(format!(
+                    "pct list line has fewer columns than expected: '{}'",
+                    line
+                )));
+            }
+            Ok(PctListEntry {
+                ct_id: parts[0].parse()?,
+                status: parts[1].to_string(),
+                ct_name: parts.last().unwrap().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_pct_config(output: &str) -> Result<PctConfigData> {
+    let mut hostname = String::new();
+    let mut memory_mb = 0u32;
+    let mut cores = 0u16;
+    let mut rootfs_gb = 0.0f64;
+    let mut tags: Option<String> = None;
+
+    for line in output.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            let value = value.trim();
+            match key {
+                "hostname" => hostname = value.to_string(),
+                "memory" => memory_mb = value.parse()?,
+                "cores" => cores = value.parse()?,
+                "rootfs" => {
+                    // Format: "local-lvm:vm-200-disk-0,size=8G"
+                    if let Some(size_part) = value.split(',').find(|s| s.trim().starts_with("size=")) {
+                        let size_str = size_part.trim().trim_start_matches("size=");
+                        if let Some(gb) = size_str.strip_suffix('G') {
+                            rootfs_gb = gb.parse().unwrap_or(0.0);
+                        } else if let Some(mb) = size_str.strip_suffix('M') {
+                            rootfs_gb = mb.parse::<f64>().unwrap_or(0.0) / 1024.0;
+                        }
+                    }
+                }
+                "tags" => tags = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    Ok(PctConfigData { hostname, memory_mb, cores, rootfs_gb, tags })
+}
+
+fn enrich_container_info(entries: Vec<PctListEntry>) -> Result<HashMap<String, DeployedContainer>> {
+    let mut result = HashMap::new();
+    for entry in entries {
+        let config_raw = pct_config(entry.ct_id)?;
+        let config = parse_pct_config(&config_raw)?;
+        let is_proxnix = config
+            .tags
+            .as_deref()
+            .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+            .unwrap_or(false);
+        if !is_proxnix {
+            continue;
+        }
+        let nix_hash = config.tags.as_deref().and_then(|t| {
+            t.split(';')
+                .find(|tag| tag.trim().starts_with("nix-"))
+                .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+        });
+        result.insert(
+            entry.ct_name.clone(),
+            DeployedContainer {
+                ct_id: entry.ct_id,
+                ct_name: entry.ct_name,
+                nix_hash,
+                mem_mb: config.memory_mb,
+                bootdisk_gb: config.rootfs_gb,
+                status: entry.status,
+                cores: config.cores,
+            },
+        );
+    }
+    Ok(result)
+}
+
+fn diff_container_state(
+    deployed: &HashMap<String, DeployedContainer>,
+    desired: &DesiredState,
+) -> (Vec<ContainerConfig>, Vec<DeployedContainer>) {
+    let mut to_create = Vec::new();
+    let mut to_delete = Vec::new();
+
+    for (name, config) in &desired.containers {
+        if !deployed.contains_key(name) {
+            to_create.push(config.clone());
+        }
+    }
+    for (name, container) in deployed {
+        if !desired.containers.contains_key(name) {
+            to_delete.push(container.clone());
+        }
+    }
+
+    (to_create, to_delete)
 }
 
 #[cfg(test)]

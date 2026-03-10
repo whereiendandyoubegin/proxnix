@@ -223,6 +223,8 @@ pub struct StateDiff {
     pub to_create: Vec<VMConfig>,
     pub to_update: Vec<VMUpdate>,
     pub to_delete: Vec<DeployedVM>,
+    pub to_create_containers: Vec<ContainerConfig>,
+    pub to_delete_containers: Vec<DeployedContainer>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

@@ -1,104 +1,81 @@
 use crate::git::git_ensure_commit;
-use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_vm_config, list_nix_configs, nix_build};
-use crate::qm::{
-    qm_create, qm_destroy, qm_importdisk, qm_resize, qm_set_agent, qm_set_disk, qm_set_resources,
-    qm_start, qm_stop,
-};
+use crate::materialise::Materialise;
+use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_vm_config, nix_build};
+use crate::pct::{pct_destroy, pct_stop};
+use crate::qm::{qm_destroy, qm_set_resources, qm_start, qm_stop};
 use crate::state::{full_diff, get_vm_statuses, parse_vm_config};
-use crate::types::{AppError, FieldChange, Result, StateDiff, UpdateAction, VMConfig};
+use crate::types::{AppError, FieldChange, Result, StateDiff, UpdateAction};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use tracing::{info, warn};
 
-fn nix_store_hash(store_path: &str) -> Option<&str> {
+pub fn nix_store_hash(store_path: &str) -> Option<&str> {
     store_path
         .strip_prefix("/nix/store/")
         .and_then(|s| s.split('-').next())
 }
 
-pub fn get_nix_hash(symlink: &str) -> Option<String> {
-    let path = fs::canonicalize(symlink).ok()?;
-    let rstring = path.into_os_string().into_string().ok()?;
-    Some(rstring.strip_prefix("/nix/store/")?.to_string())
-}
-
-pub fn provision_vm(config: &VMConfig, qcow2_path: &str, commit_hash: &str) -> Result<()> {
-    let nix_hash = nix_store_hash(qcow2_path).ok_or_else(|| {
-        AppError::CmdError(format!(
-            "could not extract nix hash from path: {}",
-            qcow2_path
-        ))
-    })?;
-    info!("Provisioning VM {} (id: {})", config.name, config.vm_id);
-    qm_create(config, nix_hash, commit_hash)?;
-    let disk_ref = qm_importdisk(config.vm_id, qcow2_path, &config.storage_location)?;
-    qm_set_disk(config.vm_id, &disk_ref, &config.disk_slot)?;
-    qm_set_agent(config.vm_id)?;
-    qm_resize(config.vm_id, &config.disk_slot, config.disk_gb)?;
-    info!("VM {} provisioned successfully, starting", config.name);
-    qm_start(config.vm_id)?;
-    info!("VM {} started", config.name);
-
-    Ok(())
-}
-
-
-pub fn build_all_configs(
-    repo_url: &str,
-    commit_hash: &str,
-) -> Result<HashMap<String, (String, String)>> {
-    let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
-    info!(
-        "Cloning {} at commit {} to {}",
-        repo_url, commit_hash, dest_path
-    );
-    git_ensure_commit(&repo_url, &dest_path, &commit_hash)?;
-    let config_names = list_nix_configs(&dest_path)?;
-    info!(
-        "Found {} nix configs: {:?}",
-        config_names.len(),
-        config_names
-    );
-    configure_dirs(config_names.clone(), &dest_path)?;
-    let builds = config_names
+pub fn build_image_types(
+    image_type_attrs: &HashMap<String, String>,
+    repo_path: &str,
+) -> Result<HashMap<String, String>> {
+    configure_dirs(image_type_attrs.keys().cloned().collect(), repo_path)?;
+    image_type_attrs
         .par_iter()
-        .map(|config_name| -> Result<(String, (String, String))> {
-            info!("Building nix config: {}", config_name);
-            let result_path = nix_build(config_name, &dest_path)?;
+        .map(|(image_type, build_attr)| -> Result<(String, String)> {
+            info!("Building image type '{}' ({})", image_type, build_attr);
+            let result_path = nix_build(image_type, build_attr, repo_path)?;
             let canonical = fs::canonicalize(&result_path)?;
-            let qcow2_path = format!("{}/nixos.qcow2", canonical.display());
-            let nix_hash = nix_store_hash(&qcow2_path)
-                .ok_or_else(|| {
-                    AppError::CmdError(format!(
-                        "could not extract nix hash from path: {}",
-                        qcow2_path
-                    ))
-                })?
-                .to_string();
-            info!("Built {} -> {} (nix hash: {})", config_name, result_path, nix_hash);
-            Ok((config_name.clone(), (qcow2_path, nix_hash)))
+            let store_path = canonical.to_string_lossy().to_string();
+            info!("Built '{}' -> {}", image_type, store_path);
+            Ok((image_type.clone(), store_path))
         })
-        .collect::<Result<HashMap<_, _>>>()?;
-    Ok(builds)
+        .collect::<Result<HashMap<_, _>>>()
 }
 
 pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
-    info!("Building all configs for commit {}", commit_hash);
-    let built_configs = build_all_configs(repo_url, commit_hash)?;
+    info!("Cloning {} at commit {} to {}", repo_url, commit_hash, dest_path);
+    git_ensure_commit(repo_url, &dest_path, commit_hash)?;
+
     let eval = eval_vm_config(&dest_path)?;
-    let parsed = parse_vm_config(&eval)?;
-    let image_hashes: HashMap<String, String> = built_configs
-        .iter()
-        .map(|(name, (_, nix_hash))| (name.clone(), nix_hash.clone()))
-        .collect();
-    let diff = full_diff(&parsed, &image_hashes)?;
+    let desired = parse_vm_config(&eval)?;
+
+    let mut image_type_attrs: HashMap<String, String> = HashMap::new();
+    for config in desired.vms.values() {
+        image_type_attrs
+            .entry(config.image_type.clone())
+            .or_insert_with(|| config.nix_build_attr().to_string());
+    }
+    for config in desired.containers.values() {
+        image_type_attrs
+            .entry(config.image_type.clone())
+            .or_insert_with(|| config.nix_build_attr().to_string());
+    }
+
     info!(
-        "Diff: {} to create, {} to update, {} to delete",
+        "Building {} image type(s): {:?}",
+        image_type_attrs.len(),
+        image_type_attrs.keys().collect::<Vec<_>>()
+    );
+    let built = build_image_types(&image_type_attrs, &dest_path)?;
+
+    let image_hashes: HashMap<String, String> = built
+        .iter()
+        .filter_map(|(image_type, store_path)| {
+            nix_store_hash(store_path).map(|h| (image_type.clone(), h.to_string()))
+        })
+        .collect();
+
+    let diff = full_diff(&desired, &image_hashes)?;
+    info!(
+        "Diff: {} VMs to create, {} to update, {} to delete, {} containers to create, {} to delete",
         diff.to_create.len(),
         diff.to_update.len(),
-        diff.to_delete.len()
+        diff.to_delete.len(),
+        diff.to_create_containers.len(),
+        diff.to_delete_containers.len(),
     );
     for config in &diff.to_create {
         info!("{}: does not exist -> will be created", config.name);
@@ -120,32 +97,19 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
             .collect();
         match &update.required_action {
             UpdateAction::InPlace => {
-                info!(
-                    "{}: {} changed -> in-place update",
-                    update.name,
-                    changes.join(", ")
-                );
+                info!("{}: {} changed -> in-place update", update.name, changes.join(", "));
             }
             UpdateAction::Rebuild => {
-                info!(
-                    "{}: {} changed -> full rebuild",
-                    update.name,
-                    changes.join(", ")
-                );
+                info!("{}: {} changed -> full rebuild", update.name, changes.join(", "));
             }
             UpdateAction::Protected => {
-                warn!(
-                    "{}: {} changed but vm is protected -> no action",
-                    update.name,
-                    changes.join(", ")
-                );
+                warn!("{}: {} changed but vm is protected -> no action", update.name, changes.join(", "));
             }
         }
     }
 
-    reconcile(diff, built_configs, commit_hash)?;
+    reconcile(diff, built, commit_hash)?;
     info!("Pipeline complete for commit {}", commit_hash);
-
     Ok(())
 }
 
@@ -175,10 +139,7 @@ pub fn ensure_vms_running(repo_path: &str) {
             return;
         }
     };
-    info!(
-        "Periodic reconcile: checking {} managed VMs",
-        desired.vms.len()
-    );
+    info!("Periodic reconcile: checking {} managed VMs", desired.vms.len());
     for (name, vm) in &desired.vms {
         match actual.get(&vm.vm_id).map(|s| s.as_str()) {
             Some("running") => {
@@ -213,17 +174,17 @@ pub fn ensure_vms_running(repo_path: &str) {
 
 pub fn reconcile(
     diff: StateDiff,
-    built_configs: HashMap<String, (String, String)>,
+    built: HashMap<String, String>,
     commit_hash: &str,
 ) -> Result<()> {
     for config in diff.to_create {
-        let (qcow_path, _) = built_configs
+        let store_path = built
             .get(&config.image_type)
-            .ok_or(AppError::CmdError(format!(
+            .ok_or_else(|| AppError::CmdError(format!(
                 "No built image for type '{}' (vm: {})",
                 config.image_type, config.name
             )))?;
-        provision_vm(&config, qcow_path, commit_hash)?;
+        config.provision(store_path, commit_hash)?;
     }
     for vm in diff.to_delete {
         info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
@@ -240,21 +201,35 @@ pub fn reconcile(
             }
             UpdateAction::Rebuild => {
                 info!("Rebuilding VM {} (destroy + provision)", actions.name);
-                let (qcow_path, _) =
-                    built_configs
-                        .get(&actions.config.image_type)
-                        .ok_or(AppError::CmdError(format!(
-                            "No built image for type '{}' (vm: {})",
-                            actions.config.image_type, actions.name
-                        )))?;
+                let store_path = built
+                    .get(&actions.config.image_type)
+                    .ok_or_else(|| AppError::CmdError(format!(
+                        "No built image for type '{}' (vm: {})",
+                        actions.config.image_type, actions.name
+                    )))?;
                 qm_stop(&actions.config.vm_id)?;
                 qm_destroy(actions.config.vm_id)?;
-                provision_vm(&actions.config, qcow_path, commit_hash)?;
+                actions.config.provision(store_path, commit_hash)?;
             }
             UpdateAction::Protected => {
                 warn!("{} is protected, no action taken", actions.name);
             }
         }
+    }
+    for config in diff.to_create_containers {
+        let store_path = built
+            .get(&config.image_type)
+            .ok_or_else(|| AppError::CmdError(format!(
+                "No built image for type '{}' (container: {})",
+                config.image_type, config.name
+            )))?;
+        config.provision(store_path, commit_hash)?;
+    }
+    for container in diff.to_delete_containers {
+        info!("Deleting container {} (id: {})", container.ct_name, container.ct_id);
+        pct_stop(container.ct_id)?;
+        pct_destroy(container.ct_id)?;
+        info!("Deleted container {}", container.ct_name);
     }
     Ok(())
 }

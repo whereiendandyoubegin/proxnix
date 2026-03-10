@@ -14,6 +14,7 @@ struct AppState {
 
 mod build;
 mod git;
+mod materialise;
 mod nix;
 mod parsing;
 mod pct;
