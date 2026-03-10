@@ -41,7 +41,6 @@ pub struct VMConfig {
     pub memory_mb: u32,
     pub storage_location: String,
     pub disk_gb: u32,
-    pub cloud_init: CloudInit,
     pub protected: bool,
     #[serde(default = "default_network_bridge")]
     pub network_bridge: String,
@@ -80,9 +79,21 @@ fn default_disk_slot() -> String {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum CloudInit {
-    None,
-    StorageReference(String),
+pub struct ContainerConfig {
+    pub name: String,
+    pub ct_id: u32,
+    pub image_type: String,
+    pub cores: u16,
+    pub memory_mb: u32,
+    pub storage_location: String,
+    pub disk_gb: u32,
+    pub protected: bool,
+    #[serde(default = "default_container_network_bridge")]
+    pub network_bridge: String,
+}
+
+fn default_container_network_bridge() -> String {
+    "vmbr0".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -107,6 +118,17 @@ pub struct DeployedVM {
     pub pid: u32,
     pub cores: u16,
     pub sockets: u8,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DeployedContainer {
+    pub ct_id: u32,
+    pub ct_name: String,
+    pub nix_hash: Option<String>,
+    pub mem_mb: u32,
+    pub bootdisk_gb: f64,
+    pub status: String,
+    pub cores: u16,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -171,11 +193,13 @@ impl Default for QMConfig {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DesiredState {
     pub vms: HashMap<String, VMConfig>,
+    pub containers: HashMap<String, ContainerConfig>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeployedState {
     pub vms: HashMap<String, DeployedVM>,
+    pub containers: HashMap<String, DeployedContainer>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
