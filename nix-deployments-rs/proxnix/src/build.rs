@@ -216,6 +216,12 @@ pub fn reconcile(
             }
         }
     }
+    for container in diff.to_delete_containers {
+        info!("Deleting container {} (id: {})", container.ct_name, container.ct_id);
+        pct_stop(container.ct_id)?;
+        pct_destroy(container.ct_id)?;
+        info!("Deleted container {}", container.ct_name);
+    }
     for config in diff.to_create_containers {
         let store_path = built
             .get(&config.image_type)
@@ -224,12 +230,6 @@ pub fn reconcile(
                 config.image_type, config.name
             )))?;
         config.provision(store_path, commit_hash)?;
-    }
-    for container in diff.to_delete_containers {
-        info!("Deleting container {} (id: {})", container.ct_name, container.ct_id);
-        pct_stop(container.ct_id)?;
-        pct_destroy(container.ct_id)?;
-        info!("Deleted container {}", container.ct_name);
     }
     Ok(())
 }
