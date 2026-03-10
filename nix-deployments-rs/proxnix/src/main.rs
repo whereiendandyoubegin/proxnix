@@ -16,6 +16,7 @@ mod build;
 mod git;
 mod nix;
 mod parsing;
+mod pct;
 mod qm;
 mod state;
 mod types;

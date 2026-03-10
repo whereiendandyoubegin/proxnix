@@ -92,6 +92,21 @@ pub struct ContainerConfig {
     pub network_bridge: String,
 }
 
+impl Workload for ContainerConfig {
+    fn id(&self) -> u32 {
+        self.ct_id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn memory_mb(&self) -> u32 {
+        self.memory_mb
+    }
+    fn cores(&self) -> u16 {
+        self.cores
+    }
+}
+
 fn default_container_network_bridge() -> String {
     "vmbr0".to_string()
 }
@@ -193,6 +208,7 @@ impl Default for QMConfig {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DesiredState {
     pub vms: HashMap<String, VMConfig>,
+    #[serde(default)]
     pub containers: HashMap<String, ContainerConfig>,
 }
 
