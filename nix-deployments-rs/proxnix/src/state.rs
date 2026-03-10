@@ -286,7 +286,7 @@ pub fn load_state() -> Result<DeployedState> {
 pub fn full_diff(desired: &DesiredState, image_hashes: &HashMap<String, String>) -> Result<StateDiff> {
     let deployed = load_state()?;
     let mut diff = diff_state(&deployed, desired, image_hashes);
-    let (to_create_containers, to_delete_containers) = diff_container_state(&deployed.containers, desired);
+    let (to_create_containers, to_delete_containers) = diff_container_state(&deployed.containers, desired, image_hashes);
     diff.to_create_containers = to_create_containers;
     diff.to_delete_containers = to_delete_containers;
     Ok(diff)
@@ -400,12 +400,25 @@ fn enrich_container_info(entries: Vec<PctListEntry>) -> Result<HashMap<String, D
 fn diff_container_state(
     deployed: &HashMap<String, DeployedContainer>,
     desired: &DesiredState,
+    image_hashes: &HashMap<String, String>,
 ) -> (Vec<ContainerConfig>, Vec<DeployedContainer>) {
     let mut to_create = Vec::new();
     let mut to_delete = Vec::new();
 
     for (name, config) in &desired.containers {
-        if !deployed.contains_key(name) {
+        if let Some(deployed_ct) = deployed.get(name) {
+            let desired_nix_hash = image_hashes.get(&config.image_type).map(|s| s.as_str());
+            if desired_nix_hash
+                .zip(deployed_ct.nix_hash.as_deref())
+                .map(|(desired, actual)| desired != actual)
+                .unwrap_or(true)
+            {
+                if !config.protected {
+                    to_delete.push(deployed_ct.clone());
+                    to_create.push(config.clone());
+                }
+            }
+        } else {
             to_create.push(config.clone());
         }
     }
