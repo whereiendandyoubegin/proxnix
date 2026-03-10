@@ -58,6 +58,8 @@ pub fn pct_create(
         .arg("unmanaged")
         .arg("--unprivileged")
         .arg("1")
+        .arg("--features")
+        .arg("nesting=1")
         .arg("--protection")
         .arg(if config.protected { "1" } else { "0" })
         .arg("--tags")
