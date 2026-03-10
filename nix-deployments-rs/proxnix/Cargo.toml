@@ -1,0 +1,16 @@
+[package]
+name = "proxnix"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+proxnix-core = { path = "../proxnix-core" }
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
+axum = { version = "0.8.4", features = ["macros"] }
+git2 = "0.20.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.143"
+thiserror = "2.0.17"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rayon = "1"
