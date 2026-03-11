@@ -3,6 +3,7 @@ use crate::types::{
     AppError, ContainerConfig, DeployedContainer, DeployedState, DeployedVM, DesiredState,
     FieldChange, QMConfig, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
 };
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -133,39 +134,44 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
 
 pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
     let DeployedState { vms, containers } = deployed;
-    let mut deployedvms = HashMap::new();
-    for (_name, vm) in vms {
-        let config = qm_config(vm.vm_id)?;
-        let parsed = parse_qm_config(&config)?;
-        let is_proxnix = parsed
-            .tags
-            .as_deref()
-            .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-            .unwrap_or(false);
-        if !is_proxnix {
-            continue;
-        }
-        let nix_hash = parsed.tags.as_deref().and_then(|t| {
-            t.split(';')
-                .find(|tag| tag.trim().starts_with("nix-"))
-                .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
-        });
-        deployedvms.insert(
-            vm.vm_name.clone(),
-            DeployedVM {
-                vm_id: vm.vm_id,
-                vm_name: vm.vm_name,
-                nix_hash,
-                template_id: vm.template_id,
-                mem_mb: vm.mem_mb,
-                bootdisk_gb: vm.bootdisk_gb,
-                status: vm.status,
-                pid: vm.pid,
-                cores: parsed.cores as u16,
-                sockets: parsed.sockets,
-            },
-        );
-    }
+    let deployedvms = vms
+        .into_par_iter()
+        .map(|(_name, vm)| -> Result<Option<(String, DeployedVM)>> {
+            let config = qm_config(vm.vm_id)?;
+            let parsed = parse_qm_config(&config)?;
+            let is_proxnix = parsed
+                .tags
+                .as_deref()
+                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+                .unwrap_or(false);
+            if !is_proxnix {
+                return Ok(None);
+            }
+            let nix_hash = parsed.tags.as_deref().and_then(|t| {
+                t.split(';')
+                    .find(|tag| tag.trim().starts_with("nix-"))
+                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+            });
+            Ok(Some((
+                vm.vm_name.clone(),
+                DeployedVM {
+                    vm_id: vm.vm_id,
+                    vm_name: vm.vm_name,
+                    nix_hash,
+                    template_id: vm.template_id,
+                    mem_mb: vm.mem_mb,
+                    bootdisk_gb: vm.bootdisk_gb,
+                    status: vm.status,
+                    pid: vm.pid,
+                    cores: parsed.cores as u16,
+                    sockets: parsed.sockets,
+                },
+            )))
+        })
+        .collect::<Result<Vec<Option<_>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     Ok(DeployedState { vms: deployedvms, containers })
 }
 
@@ -270,6 +276,12 @@ pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     Ok(parsed.into_iter().map(|q| (q.vm_id, q.status)).collect())
 }
 
+pub fn get_container_statuses() -> Result<HashMap<u32, String>> {
+    let raw = pct_list()?;
+    let parsed = parse_pct_list(&raw)?;
+    Ok(parsed.into_iter().map(|e| (e.ct_id, e.status)).collect())
+}
+
 pub fn load_state() -> Result<DeployedState> {
     let qm_raw = qm_list()?;
     let parsed_qm_list = parse_qm_list(&qm_raw)?;
@@ -364,36 +376,41 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
 }
 
 fn enrich_container_info(entries: Vec<PctListEntry>) -> Result<HashMap<String, DeployedContainer>> {
-    let mut result = HashMap::new();
-    for entry in entries {
-        let config_raw = pct_config(entry.ct_id)?;
-        let config = parse_pct_config(&config_raw)?;
-        let is_proxnix = config
-            .tags
-            .as_deref()
-            .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-            .unwrap_or(false);
-        if !is_proxnix {
-            continue;
-        }
-        let nix_hash = config.tags.as_deref().and_then(|t| {
-            t.split(';')
-                .find(|tag| tag.trim().starts_with("nix-"))
-                .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
-        });
-        result.insert(
-            entry.ct_name.clone(),
-            DeployedContainer {
-                ct_id: entry.ct_id,
-                ct_name: entry.ct_name,
-                nix_hash,
-                mem_mb: config.memory_mb,
-                bootdisk_gb: config.rootfs_gb,
-                status: entry.status,
-                cores: config.cores,
-            },
-        );
-    }
+    let result = entries
+        .into_par_iter()
+        .map(|entry| -> Result<Option<(String, DeployedContainer)>> {
+            let config_raw = pct_config(entry.ct_id)?;
+            let config = parse_pct_config(&config_raw)?;
+            let is_proxnix = config
+                .tags
+                .as_deref()
+                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+                .unwrap_or(false);
+            if !is_proxnix {
+                return Ok(None);
+            }
+            let nix_hash = config.tags.as_deref().and_then(|t| {
+                t.split(';')
+                    .find(|tag| tag.trim().starts_with("nix-"))
+                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+            });
+            Ok(Some((
+                entry.ct_name.clone(),
+                DeployedContainer {
+                    ct_id: entry.ct_id,
+                    ct_name: entry.ct_name,
+                    nix_hash,
+                    mem_mb: config.memory_mb,
+                    bootdisk_gb: config.rootfs_gb,
+                    status: entry.status,
+                    cores: config.cores,
+                },
+            )))
+        })
+        .collect::<Result<Vec<Option<_>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     Ok(result)
 }
 
