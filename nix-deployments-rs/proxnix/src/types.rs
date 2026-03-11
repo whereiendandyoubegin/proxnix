@@ -88,8 +88,18 @@ pub struct ContainerConfig {
     pub storage_location: String,
     pub disk_gb: u32,
     pub protected: bool,
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(default)]
+    pub bind_mounts: Vec<BindMount>,
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BindMount {
+    pub host_path: String,
+    pub container_path: String,
 }
 
 impl Workload for ContainerConfig {

@@ -8,17 +8,9 @@ pub fn copy_to_template_storage(result_path: &str) -> Result<String> {
     let tarball_dir = std::path::Path::new(result_path).join("tarball");
     let entry = std::fs::read_dir(&tarball_dir)?
         .filter_map(|e| e.ok())
-        .find(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "xz")
-                .unwrap_or(false)
-        })
+        .find(|e| e.path().extension().map(|ext| ext == "xz").unwrap_or(false))
         .ok_or_else(|| {
-            AppError::CmdError(format!(
-                "no .tar.xz found in {}",
-                tarball_dir.display()
-            ))
+            AppError::CmdError(format!("no .tar.xz found in {}", tarball_dir.display()))
         })?;
 
     let src = entry.path();
@@ -40,8 +32,8 @@ pub fn pct_create(
     nix_hash: &str,
     commit_hash: &str,
 ) -> Result<String> {
-    let output = Command::new("pct")
-        .arg("create")
+    let mut cmd = Command::new("pct");
+    cmd.arg("create")
         .arg(config.ct_id.to_string())
         .arg(ostemplate)
         .arg("--hostname")
@@ -57,14 +49,20 @@ pub fn pct_create(
         .arg("--ostype")
         .arg("unmanaged")
         .arg("--unprivileged")
-        .arg("1")
+        .arg(if config.privileged { "0" } else { "1" })
         .arg("--features")
         .arg("nesting=1")
         .arg("--protection")
         .arg(if config.protected { "1" } else { "0" })
         .arg("--tags")
-        .arg(format!("proxnix;nix-{};commit-{}", nix_hash, commit_hash))
-        .output()?;
+        .arg(format!("proxnix;nix-{};commit-{}", nix_hash, commit_hash));
+
+    for (i, mount) in config.bind_mounts.iter().enumerate() {
+        cmd.arg(format!("--mp{}", i))
+            .arg(format!("{},mp={}", mount.host_path, mount.container_path));
+    }
+
+    let output = cmd.output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppError::CmdError(format!(

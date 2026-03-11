@@ -205,21 +205,54 @@ pub fn reconcile(
     built: HashMap<String, String>,
     commit_hash: &str,
 ) -> Result<()> {
-    for config in diff.to_create {
-        let store_path = built
-            .get(&config.image_type)
-            .ok_or_else(|| AppError::CmdError(format!(
-                "No built image for type '{}' (vm: {})",
-                config.image_type, config.name
-            )))?;
-        config.provision(store_path, commit_hash)?;
-    }
-    for vm in diff.to_delete {
-        info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
-        qm_stop(&vm.vm_id)?;
-        qm_destroy(vm.vm_id)?;
-        info!("Deleted VM {}", vm.vm_name);
-    }
+    diff.to_delete
+        .into_par_iter()
+        .map(|vm| -> Result<()> {
+            info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
+            qm_stop(&vm.vm_id)?;
+            qm_destroy(vm.vm_id)?;
+            info!("Deleted VM {}", vm.vm_name);
+            Ok(())
+        })
+        .collect::<Result<Vec<()>>>()?;
+
+    diff.to_delete_containers
+        .into_par_iter()
+        .map(|container| -> Result<()> {
+            info!("Deleting container {} (id: {})", container.ct_name, container.ct_id);
+            pct_stop(container.ct_id)?;
+            pct_destroy(container.ct_id)?;
+            info!("Deleted container {}", container.ct_name);
+            Ok(())
+        })
+        .collect::<Result<Vec<()>>>()?;
+
+    diff.to_create
+        .par_iter()
+        .map(|config| -> Result<()> {
+            let store_path = built
+                .get(&config.image_type)
+                .ok_or_else(|| AppError::CmdError(format!(
+                    "No built image for type '{}' (vm: {})",
+                    config.image_type, config.name
+                )))?;
+            config.provision(store_path, commit_hash)
+        })
+        .collect::<Result<Vec<()>>>()?;
+
+    diff.to_create_containers
+        .par_iter()
+        .map(|config| -> Result<()> {
+            let store_path = built
+                .get(&config.image_type)
+                .ok_or_else(|| AppError::CmdError(format!(
+                    "No built image for type '{}' (container: {})",
+                    config.image_type, config.name
+                )))?;
+            config.provision(store_path, commit_hash)
+        })
+        .collect::<Result<Vec<()>>>()?;
+
     for actions in diff.to_update {
         match &actions.required_action {
             UpdateAction::InPlace => {
@@ -244,20 +277,6 @@ pub fn reconcile(
             }
         }
     }
-    for container in diff.to_delete_containers {
-        info!("Deleting container {} (id: {})", container.ct_name, container.ct_id);
-        pct_stop(container.ct_id)?;
-        pct_destroy(container.ct_id)?;
-        info!("Deleted container {}", container.ct_name);
-    }
-    for config in diff.to_create_containers {
-        let store_path = built
-            .get(&config.image_type)
-            .ok_or_else(|| AppError::CmdError(format!(
-                "No built image for type '{}' (container: {})",
-                config.image_type, config.name
-            )))?;
-        config.provision(store_path, commit_hash)?;
-    }
+
     Ok(())
 }
