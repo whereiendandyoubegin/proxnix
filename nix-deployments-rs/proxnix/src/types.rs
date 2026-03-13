@@ -96,7 +96,7 @@ pub struct ContainerConfig {
     pub network_bridge: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct BindMount {
     pub host_path: String,
     pub container_path: String,
@@ -154,6 +154,8 @@ pub struct DeployedContainer {
     pub bootdisk_gb: f64,
     pub status: String,
     pub cores: u16,
+    pub privileged: bool,
+    pub bind_mounts: Vec<BindMount>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -228,12 +230,30 @@ pub struct DeployedState {
     pub containers: HashMap<String, DeployedContainer>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub enum ContainerFieldChange {
+    Memory,
+    Cores,
+    Image,
+    Privileged,
+    BindMounts,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ContainerUpdate {
+    pub name: String,
+    pub config: ContainerConfig,
+    pub changed_fields: Vec<ContainerFieldChange>,
+    pub required_action: UpdateAction,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct StateDiff {
     pub to_create: Vec<VMConfig>,
     pub to_update: Vec<VMUpdate>,
     pub to_delete: Vec<DeployedVM>,
     pub to_create_containers: Vec<ContainerConfig>,
+    pub to_update_containers: Vec<ContainerUpdate>,
     pub to_delete_containers: Vec<DeployedContainer>,
 }
 

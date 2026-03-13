@@ -1,7 +1,8 @@
 use crate::pct::{pct_config, pct_list};
 use crate::types::{
-    AppError, ContainerConfig, DeployedContainer, DeployedState, DeployedVM, DesiredState,
-    FieldChange, QMConfig, QMList, Result, StateDiff, UpdateAction, VMConfig, VMUpdate,
+    AppError, BindMount, ContainerConfig, ContainerFieldChange, ContainerUpdate, DeployedContainer,
+    DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result, StateDiff,
+    UpdateAction, VMConfig, VMUpdate,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -316,6 +317,8 @@ struct PctConfigData {
     cores: u16,
     rootfs_gb: f64,
     tags: Option<String>,
+    unprivileged: bool,
+    bind_mounts: Vec<BindMount>,
 }
 
 fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
@@ -346,6 +349,8 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
     let mut cores = 0u16;
     let mut rootfs_gb = 0.0f64;
     let mut tags: Option<String> = None;
+    let mut unprivileged = false;
+    let mut bind_mounts: Vec<BindMount> = Vec::new();
 
     for line in output.lines() {
         if let Some((key, value)) = line.split_once(':') {
@@ -355,6 +360,7 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
                 "hostname" => hostname = value.to_string(),
                 "memory" => memory_mb = value.parse()?,
                 "cores" => cores = value.parse()?,
+                "unprivileged" => unprivileged = value.trim() == "1",
                 "rootfs" => {
                     // Format: "local-lvm:vm-200-disk-0,size=8G"
                     if let Some(size_part) = value.split(',').find(|s| s.trim().starts_with("size=")) {
@@ -367,12 +373,26 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
                     }
                 }
                 "tags" => tags = Some(value.to_string()),
+                k if k.starts_with("mp") && k[2..].parse::<u32>().is_ok() => {
+                    // Format: "/host/path,mp=/container/path"
+                    let parts: Vec<&str> = value.split(',').collect();
+                    if let (Some(host_path), Some(mp_part)) = (
+                        parts.first(),
+                        parts.iter().find(|p| p.trim().starts_with("mp=")),
+                    ) {
+                        let container_path = mp_part.trim().trim_start_matches("mp=");
+                        bind_mounts.push(BindMount {
+                            host_path: host_path.to_string(),
+                            container_path: container_path.to_string(),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
     }
 
-    Ok(PctConfigData { hostname, memory_mb, cores, rootfs_gb, tags })
+    Ok(PctConfigData { hostname, memory_mb, cores, rootfs_gb, tags, unprivileged, bind_mounts })
 }
 
 fn enrich_container_info(entries: Vec<PctListEntry>) -> Result<HashMap<String, DeployedContainer>> {
