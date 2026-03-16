@@ -1,4 +1,4 @@
-use crate::types::{AppError, ContainerConfig, Result};
+use crate::types::{AppError, ContainerConfig, ContainerFieldChange, Result};
 use std::process::Command;
 
 // Finds the .tar.xz inside the nix build result tarball directory,
@@ -94,7 +94,7 @@ pub fn pct_start(ct_id: u32) -> Result<bool> {
     Ok(true)
 }
 
-pub fn pct_stop(ct_id: u32) -> Result<String> {
+pub fn pct_stop(ct_id: &u32) -> Result<String> {
     let output = Command::new("pct")
         .arg("stop")
         .arg(ct_id.to_string())
@@ -152,6 +152,42 @@ pub fn pct_config(ct_id: u32) -> Result<String> {
             "pct config {} failed (exit: {:?})",
             ct_id,
             output.status.code()
+        )));
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+pub fn pct_set_resources(
+    ct_id: u32,
+    config: &ContainerConfig,
+    changes: &[ContainerFieldChange],
+) -> Result<String> {
+    let output = Command::new("pct")
+        .arg("set")
+        .arg(ct_id.to_string())
+        .args(
+            changes
+                .iter()
+                .filter_map(|field| match field {
+                    ContainerFieldChange::Memory => {
+                        Some(["--memory".to_string(), config.memory_mb.to_string()])
+                    }
+                    ContainerFieldChange::Cores => {
+                        Some(["--cores".to_string(), config.cores.to_string()])
+                    }
+                    _ => None,
+                })
+                .flatten(),
+        )
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "pct set {} failed (exit: {:?}): {}",
+            ct_id,
+            output.status.code(),
+            stderr
         )));
     }
     Ok(String::from_utf8(output.stdout)?)

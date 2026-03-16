@@ -1,6 +1,6 @@
 use crate::pct::{pct_config, pct_list};
 use crate::types::{
-    AppError, BindMount, ContainerConfig, ContainerFieldChange, ContainerUpdate, DeployedContainer,
+    AppError, BindMount, ContainerConfig, DeployedContainer,
     DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result, StateDiff,
     UpdateAction, VMConfig, VMUpdate,
 };
@@ -318,7 +318,7 @@ pub fn full_diff(
     Ok(diff)
 }
 
-struct PctListEntry {
+pub(crate) struct PctListEntry {
     ct_id: u32,
     status: String,
     ct_name: String,
@@ -334,7 +334,7 @@ struct PctConfigData {
     bind_mounts: Vec<BindMount>,
 }
 
-fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
+pub fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
     output
         .lines()
         .skip(1)
@@ -418,7 +418,9 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
     })
 }
 
-fn enrich_container_info(entries: Vec<PctListEntry>) -> Result<HashMap<String, DeployedContainer>> {
+pub fn enrich_container_info(
+    entries: Vec<PctListEntry>,
+) -> Result<HashMap<String, DeployedContainer>> {
     let result = entries
         .into_par_iter()
         .map(|entry| -> Result<Option<(String, DeployedContainer)>> {

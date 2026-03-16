@@ -251,7 +251,7 @@ pub fn reconcile(diff: StateDiff, built: HashMap<String, String>, commit_hash: &
                 "Deleting container {} (id: {})",
                 container.ct_name, container.ct_id
             );
-            pct_stop(container.ct_id)?;
+            pct_stop(&container.ct_id)?;
             pct_destroy(container.ct_id)?;
             info!("Deleted container {}", container.ct_name);
             Ok(())

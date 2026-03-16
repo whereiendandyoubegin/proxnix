@@ -238,6 +238,7 @@ pub enum ContainerFieldChange {
     Image,
     Privileged,
     BindMounts,
+    Disk,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
