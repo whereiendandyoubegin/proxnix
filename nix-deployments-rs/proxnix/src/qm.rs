@@ -1,4 +1,4 @@
-use crate::types::{AppError, FieldChange, Result, VMConfig, VMUpdate};
+use crate::types::{AppError, FieldChange, Result, VMConfig};
 use std::process::Command;
 
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
@@ -262,27 +262,27 @@ pub fn qm_resize(vm_id: u32, disk_slot: &str, size_gb: u32) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-pub fn qm_set_resources(vm_id: u32, update: &VMUpdate) -> Result<String> {
+pub fn qm_set_resources(vm_id: u32, config: &VMConfig, changes: &[FieldChange]) -> Result<String> {
     let mut qm_set_resources = Command::new("qm");
     qm_set_resources.arg("set");
     qm_set_resources.arg(vm_id.to_string());
 
-    for field in &update.changed_fields {
+    for field in changes {
         match field {
             FieldChange::Memory => {
                 qm_set_resources
                     .arg("--memory")
-                    .arg(update.config.memory_mb.to_string());
+                    .arg(config.memory_mb.to_string());
             }
             FieldChange::Cores => {
                 qm_set_resources
                     .arg("--cores")
-                    .arg(update.config.cores.to_string());
+                    .arg(config.cores.to_string());
             }
             FieldChange::Sockets => {
                 qm_set_resources
                     .arg("--sockets")
-                    .arg(update.config.sockets.to_string());
+                    .arg(config.sockets.to_string());
             }
             _ => {}
         }

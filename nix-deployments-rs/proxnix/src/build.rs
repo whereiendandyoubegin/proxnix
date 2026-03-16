@@ -36,7 +36,10 @@ pub fn build_image_types(
 
 pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
-    info!("Cloning {} at commit {} to {}", repo_url, commit_hash, dest_path);
+    info!(
+        "Cloning {} at commit {} to {}",
+        repo_url, commit_hash, dest_path
+    );
     git_ensure_commit(repo_url, &dest_path, commit_hash)?;
 
     let eval = eval_vm_config(&dest_path)?;
@@ -97,13 +100,25 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
             .collect();
         match &update.required_action {
             UpdateAction::InPlace => {
-                info!("{}: {} changed -> in-place update", update.name, changes.join(", "));
+                info!(
+                    "{}: {} changed -> in-place update",
+                    update.name,
+                    changes.join(", ")
+                );
             }
             UpdateAction::Rebuild => {
-                info!("{}: {} changed -> full rebuild", update.name, changes.join(", "));
+                info!(
+                    "{}: {} changed -> full rebuild",
+                    update.name,
+                    changes.join(", ")
+                );
             }
             UpdateAction::Protected => {
-                warn!("{}: {} changed but vm is protected -> no action", update.name, changes.join(", "));
+                warn!(
+                    "{}: {} changed but vm is protected -> no action",
+                    update.name,
+                    changes.join(", ")
+                );
             }
         }
     }
@@ -137,7 +152,10 @@ pub fn ensure_vms_running(repo_path: &str) {
                 return;
             }
         };
-        info!("Periodic reconcile: checking {} managed VMs", desired.vms.len());
+        info!(
+            "Periodic reconcile: checking {} managed VMs",
+            desired.vms.len()
+        );
         for (name, vm) in &desired.vms {
             match vm_statuses.get(&vm.vm_id).map(|s| s.as_str()) {
                 Some("running") => {
@@ -168,15 +186,24 @@ pub fn ensure_vms_running(repo_path: &str) {
         let ct_statuses = match get_container_statuses() {
             Ok(s) => s,
             Err(e) => {
-                warn!("Periodic reconcile: failed to get container statuses: {:?}", e);
+                warn!(
+                    "Periodic reconcile: failed to get container statuses: {:?}",
+                    e
+                );
                 return;
             }
         };
-        info!("Periodic reconcile: checking {} managed containers", desired.containers.len());
+        info!(
+            "Periodic reconcile: checking {} managed containers",
+            desired.containers.len()
+        );
         for (name, ct) in &desired.containers {
             match ct_statuses.get(&ct.ct_id).map(|s| s.as_str()) {
                 Some("running") => {
-                    info!("Periodic reconcile: container {} (id: {}) is running", name, ct.ct_id);
+                    info!(
+                        "Periodic reconcile: container {} (id: {}) is running",
+                        name, ct.ct_id
+                    );
                 }
                 Some(status) => {
                     info!(
@@ -185,8 +212,13 @@ pub fn ensure_vms_running(repo_path: &str) {
                     );
                     match pct_start(ct.ct_id) {
                         Ok(true) => info!("Periodic reconcile: started container {}", name),
-                        Ok(false) => info!("Periodic reconcile: container {} already running", name),
-                        Err(e) => warn!("Periodic reconcile: failed to start container {}: {:?}", name, e),
+                        Ok(false) => {
+                            info!("Periodic reconcile: container {} already running", name)
+                        }
+                        Err(e) => warn!(
+                            "Periodic reconcile: failed to start container {}: {:?}",
+                            name, e
+                        ),
                     }
                 }
                 None => {
@@ -200,11 +232,7 @@ pub fn ensure_vms_running(repo_path: &str) {
     }
 }
 
-pub fn reconcile(
-    diff: StateDiff,
-    built: HashMap<String, String>,
-    commit_hash: &str,
-) -> Result<()> {
+pub fn reconcile(diff: StateDiff, built: HashMap<String, String>, commit_hash: &str) -> Result<()> {
     diff.to_delete
         .into_par_iter()
         .map(|vm| -> Result<()> {
@@ -219,7 +247,10 @@ pub fn reconcile(
     diff.to_delete_containers
         .into_par_iter()
         .map(|container| -> Result<()> {
-            info!("Deleting container {} (id: {})", container.ct_name, container.ct_id);
+            info!(
+                "Deleting container {} (id: {})",
+                container.ct_name, container.ct_id
+            );
             pct_stop(container.ct_id)?;
             pct_destroy(container.ct_id)?;
             info!("Deleted container {}", container.ct_name);
@@ -230,12 +261,12 @@ pub fn reconcile(
     diff.to_create
         .par_iter()
         .map(|config| -> Result<()> {
-            let store_path = built
-                .get(&config.image_type)
-                .ok_or_else(|| AppError::CmdError(format!(
+            let store_path = built.get(&config.image_type).ok_or_else(|| {
+                AppError::CmdError(format!(
                     "No built image for type '{}' (vm: {})",
                     config.image_type, config.name
-                )))?;
+                ))
+            })?;
             config.provision(store_path, commit_hash)
         })
         .collect::<Result<Vec<()>>>()?;
@@ -243,12 +274,12 @@ pub fn reconcile(
     diff.to_create_containers
         .par_iter()
         .map(|config| -> Result<()> {
-            let store_path = built
-                .get(&config.image_type)
-                .ok_or_else(|| AppError::CmdError(format!(
+            let store_path = built.get(&config.image_type).ok_or_else(|| {
+                AppError::CmdError(format!(
                     "No built image for type '{}' (container: {})",
                     config.image_type, config.name
-                )))?;
+                ))
+            })?;
             config.provision(store_path, commit_hash)
         })
         .collect::<Result<Vec<()>>>()?;
@@ -257,17 +288,21 @@ pub fn reconcile(
         match &actions.required_action {
             UpdateAction::InPlace => {
                 info!("Updating VM {} in place", actions.name);
-                qm_set_resources(actions.config.vm_id, &actions)?;
+                qm_set_resources(
+                    actions.config.vm_id,
+                    &actions.config,
+                    &actions.changed_fields,
+                )?;
                 info!("Updated VM {}", actions.name);
             }
             UpdateAction::Rebuild => {
                 info!("Rebuilding VM {} (destroy + provision)", actions.name);
-                let store_path = built
-                    .get(&actions.config.image_type)
-                    .ok_or_else(|| AppError::CmdError(format!(
+                let store_path = built.get(&actions.config.image_type).ok_or_else(|| {
+                    AppError::CmdError(format!(
                         "No built image for type '{}' (vm: {})",
                         actions.config.image_type, actions.name
-                    )))?;
+                    ))
+                })?;
                 qm_stop(&actions.config.vm_id)?;
                 qm_destroy(actions.config.vm_id)?;
                 actions.config.provision(store_path, commit_hash)?;

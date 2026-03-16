@@ -15,8 +15,9 @@
         version = "0.1.0";
         src = ./nix-deployments-rs;
         cargoLock.lockFile = ./nix-deployments-rs/Cargo.lock;
-        nativeBuildInputs = [ pkgs.pkg-config ];
+        nativeBuildInputs = [ pkgs.pkg-config pkgs.clippy ];
         buildInputs = [ pkgs.openssl pkgs.libgit2 ];
+        preBuild = "cargo clippy -- -D warnings";
       };
 
       devShells.${system}.default = pkgs.mkShell {

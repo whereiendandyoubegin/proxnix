@@ -1,6 +1,7 @@
 use proxnix_core::Workload;
 use std::{collections::HashMap, string::FromUtf8Error};
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("Git has failed, error: {0}")]

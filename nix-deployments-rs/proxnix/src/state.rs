@@ -173,7 +173,10 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
         .into_iter()
         .flatten()
         .collect();
-    Ok(DeployedState { vms: deployedvms, containers })
+    Ok(DeployedState {
+        vms: deployedvms,
+        containers,
+    })
 }
 
 pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
@@ -198,11 +201,17 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
         })
         .collect();
 
-    DeployedState { vms: lists, containers: HashMap::new() }
+    DeployedState {
+        vms: lists,
+        containers: HashMap::new(),
+    }
 }
 
-
-pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, image_hashes: &HashMap<String, String>) -> StateDiff {
+pub fn diff_state(
+    deployed: &DeployedState,
+    desired: &DesiredState,
+    image_hashes: &HashMap<String, String>,
+) -> StateDiff {
     let mut to_create: Vec<VMConfig> = Vec::new();
     let mut to_update: Vec<VMUpdate> = Vec::new();
     let mut to_delete: Vec<DeployedVM> = Vec::new();
@@ -267,9 +276,9 @@ pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, image_hashes
         to_delete,
         to_create_containers: vec![],
         to_delete_containers: vec![],
+        to_update_containers: vec![],
     }
 }
-
 
 pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     let raw = qm_list()?;
@@ -296,10 +305,14 @@ pub fn load_state() -> Result<DeployedState> {
     Ok(enriched)
 }
 
-pub fn full_diff(desired: &DesiredState, image_hashes: &HashMap<String, String>) -> Result<StateDiff> {
+pub fn full_diff(
+    desired: &DesiredState,
+    image_hashes: &HashMap<String, String>,
+) -> Result<StateDiff> {
     let deployed = load_state()?;
     let mut diff = diff_state(&deployed, desired, image_hashes);
-    let (to_create_containers, to_delete_containers) = diff_container_state(&deployed.containers, desired, image_hashes);
+    let (to_create_containers, to_delete_containers) =
+        diff_container_state(&deployed.containers, desired, image_hashes);
     diff.to_create_containers = to_create_containers;
     diff.to_delete_containers = to_delete_containers;
     Ok(diff)
@@ -363,7 +376,9 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
                 "unprivileged" => unprivileged = value.trim() == "1",
                 "rootfs" => {
                     // Format: "local-lvm:vm-200-disk-0,size=8G"
-                    if let Some(size_part) = value.split(',').find(|s| s.trim().starts_with("size=")) {
+                    if let Some(size_part) =
+                        value.split(',').find(|s| s.trim().starts_with("size="))
+                    {
                         let size_str = size_part.trim().trim_start_matches("size=");
                         if let Some(gb) = size_str.strip_suffix('G') {
                             rootfs_gb = gb.parse().unwrap_or(0.0);
@@ -392,7 +407,15 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
         }
     }
 
-    Ok(PctConfigData { hostname, memory_mb, cores, rootfs_gb, tags, unprivileged, bind_mounts })
+    Ok(PctConfigData {
+        hostname,
+        memory_mb,
+        cores,
+        rootfs_gb,
+        tags,
+        unprivileged,
+        bind_mounts,
+    })
 }
 
 fn enrich_container_info(entries: Vec<PctListEntry>) -> Result<HashMap<String, DeployedContainer>> {
@@ -424,6 +447,8 @@ fn enrich_container_info(entries: Vec<PctListEntry>) -> Result<HashMap<String, D
                     bootdisk_gb: config.rootfs_gb,
                     status: entry.status,
                     cores: config.cores,
+                    bind_mounts: config.bind_mounts,
+                    privileged: !config.unprivileged,
                 },
             )))
         })
@@ -449,11 +474,10 @@ fn diff_container_state(
                 .zip(deployed_ct.nix_hash.as_deref())
                 .map(|(desired, actual)| desired != actual)
                 .unwrap_or(true)
+                && !config.protected
             {
-                if !config.protected {
-                    to_delete.push(deployed_ct.clone());
-                    to_create.push(config.clone());
-                }
+                to_delete.push(deployed_ct.clone());
+                to_create.push(config.clone());
             }
         } else {
             to_create.push(config.clone());
