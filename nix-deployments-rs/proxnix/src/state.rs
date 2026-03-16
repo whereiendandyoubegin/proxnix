@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::process::Command;
 
 pub fn parse_vm_config(json: &str) -> Result<DesiredState> {
-    let state: DesiredState = serde_json::from_str(&json)?;
+    let state: DesiredState = serde_json::from_str(json)?;
     Ok(state)
 }
 
@@ -104,7 +104,9 @@ pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
 }
 
 pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
-    let lines = output_string
+    
+
+    output_string
         .lines()
         .skip(1)
         .map(|line| -> Result<QMList> {
@@ -128,9 +130,7 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
                 pid: col(5)?.parse()?,
             })
         })
-        .collect();
-
-    lines
+        .collect()
 }
 
 pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {

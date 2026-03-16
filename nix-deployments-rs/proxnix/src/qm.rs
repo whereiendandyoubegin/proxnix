@@ -15,7 +15,7 @@ pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result
         .arg("--net0")
         .arg(format!("virtio,bridge={}", config.network_bridge))
         .arg("--scsihw")
-        .arg(config.scsi_hw.to_string())
+        .arg(&config.scsi_hw)
         .arg("--tags")
         .arg(format!("proxnix;nix-{};commit-{}", nix_hash, commit_hash))
         .output()?;
@@ -72,7 +72,7 @@ fn parse_importdisk_output(output: &str) -> Result<String> {
             // Output is like: "unused0:local-lvm:vm-100-disk-0"
             // Strip the "unusedN:" prefix to get just "local-lvm:vm-100-disk-0"
             let full_ref = &line[start + 1..end];
-            let disk_ref = full_ref.splitn(2, ':').nth(1)?.to_string();
+            let disk_ref = full_ref.split_once(':')?.1.to_string();
             Some(disk_ref)
         })
         .ok_or_else(|| {
@@ -89,8 +89,8 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
     let qm_importdisk = Command::new("qm")
         .arg("importdisk")
         .arg(vm_id.to_string())
-        .arg(qcow_path.to_string())
-        .arg(storage.to_string())
+        .arg(qcow_path)
+        .arg(storage)
         .arg("--format=raw")
         .output()?;
     if !qm_importdisk.status.success() {
@@ -186,7 +186,7 @@ pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String
         .arg(source_vm_id.to_string())
         .arg(dest_vm_id.to_string())
         .arg("--name")
-        .arg(name.to_string())
+        .arg(name)
         .arg("--full")
         .arg("0")
         .output()?;

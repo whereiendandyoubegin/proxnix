@@ -91,11 +91,11 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
             .changed_fields
             .iter()
             .map(|f| match f {
-                FieldChange::Memory => format!("memory"),
-                FieldChange::Cores => format!("cores"),
-                FieldChange::Sockets => format!("sockets"),
-                FieldChange::Disk => format!("disk"),
-                FieldChange::Image => format!("image"),
+                FieldChange::Memory => "memory".to_string(),
+                FieldChange::Cores => "cores".to_string(),
+                FieldChange::Sockets => "sockets".to_string(),
+                FieldChange::Disk => "disk".to_string(),
+                FieldChange::Image => "image".to_string(),
             })
             .collect();
         match &update.required_action {

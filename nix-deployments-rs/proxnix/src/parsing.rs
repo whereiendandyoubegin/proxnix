@@ -36,7 +36,7 @@ pub fn find_string(json: &serde_json::Value, predicate: &impl Fn(&str) -> bool) 
                     return result;
                 }
             }
-            return None;
+            None
         }
         Value::Object(map) => {
             for v in map.values() {
@@ -45,10 +45,10 @@ pub fn find_string(json: &serde_json::Value, predicate: &impl Fn(&str) -> bool) 
                     return result;
                 }
             }
-            return None;
+            None
         }
         _ => {
-            return None;
+            None
         }
     }
 }

@@ -171,7 +171,7 @@ impl Deployments for ContainerConfig {
     }
     fn requires_rebuild(changes: &[Self::FieldChange]) -> bool {
         changes
-            .into_iter()
+            .iter()
             .any(|s| matches!(s, ContainerFieldChange::Image | ContainerFieldChange::Disk))
     }
     fn id(&self) -> u32 {
