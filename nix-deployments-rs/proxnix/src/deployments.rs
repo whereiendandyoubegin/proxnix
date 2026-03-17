@@ -7,11 +7,11 @@ use crate::{
         qm_list,
     },
     types::{
-        ContainerConfig, ContainerFieldChange, DeployedContainer, DeployedVM, FieldChange, Result,
-        VMConfig,
+        ContainerConfig, ContainerFieldChange, DeployedContainer, DeployedVM, FieldChange,
+        OutcomeKind, Result, SkipReason, VMConfig,
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub trait Deployments: Materialise + Sized + Send + Sync {
     type Deployed: Send + Sync;
@@ -198,4 +198,107 @@ impl Deployments for ContainerConfig {
     fn apply_in_place(&self, changes: &[Self::FieldChange]) -> Result<String> {
         pct_set_resources(self.ct_id, self, changes)
     }
+}
+
+enum Action<'a, T: Deployments> {
+    Create {
+        config: &'a T,
+    },
+    Rebuild {
+        config: &'a T,
+        deployed_id: u32,
+        changes: Vec<T::FieldChange>,
+    },
+    UpdateInPlace {
+        config: &'a T,
+        changes: Vec<T::FieldChange>,
+    },
+    Destroy {
+        name: String,
+        id: u32,
+    },
+    Skip {
+        name: String,
+        reason: SkipReason,
+    },
+    NoOp {
+        name: String,
+    },
+}
+
+// State refresh and reconcile pipeline
+pub fn reconcile<T: Deployments>(
+    configs: &[T],
+    image_hashes: &HashMap<String, String>,
+) -> Result<Vec<Outcome>> {
+    T::load_deployed()
+        .map(|deployed| plan(configs, &deployed, image_hashes))
+        .map(execute)
+}
+
+fn plan<'a, T: Deployments>(
+    configs: &'a [T],
+    deployed: &HashMap<String, T::Deployed>,
+    image_hashes: &HashMap<String, String>,
+) -> Vec<Action<'a, T>> {
+    let desired: HashSet<&str> = configs.iter().map(|c| c.name()).collect();
+
+    configs
+        .iter()
+        .map(|c| classify(c, deployed, image_hashes))
+        .chain(
+            deployed
+                .iter()
+                .filter(|(n, _)| !desired.contains(n.as_str()))
+                .map(|(n, d)| Action::Destroy {
+                    name: n.clone(),
+                    id: T::deployed_id(d),
+                }),
+        )
+        .collect()
+}
+
+fn classify<'a, T: Deployments>(
+    config: &'a T,
+    deployed: &HashMap<String, T::Deployed>,
+    image_hashes: &HashMap<String, String>,
+) -> Action<'a, T> {
+    let Some(d) = deployed.get(config.name()) else {
+        return Action::Create { config };
+    };
+
+    let changes = config.compute_changes(d, image_hashes);
+
+    match (
+        changes.is_empty(),
+        T::requires_rebuild(&changes),
+        config.is_protected(),
+    ) {
+        (true, _, _) => Action::NoOp {
+            name: config.name().into(),
+        },
+        (_, _, true) => Action::Skip {
+            name: config.name.into(),
+            reason: SkipReason::Protected,
+        },
+        (_, true, _) => Action::Rebuild {
+            config,
+            deployed_id: T::deployed_id(d),
+            changes,
+        },
+        (_, false, _) => Action::UpdateInPlace { config, changes },
+    }
+}
+
+fn execute<T: Deployments>(actions: Vec<Action<'_, T>>) -> Vec<Outcome> {
+    actions.into_iter().map(|action| match action {
+        Action::Create { config } => {
+            Outcome::new(config.name(), OutcomeKind::Created, do_create(config))
+        }
+        Action::Rebuild {
+            config,
+            deployed_id,
+            changes,
+        } => Outcome::new(config.name(), OutcomeKind::Rebuilt, do_rebui),
+    })
 }

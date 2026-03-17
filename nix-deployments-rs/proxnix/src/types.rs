@@ -295,3 +295,35 @@ pub struct ParsedWebhook {
     pub repository: String,
     pub hash: String,
 }
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum SkipReason {
+    Protected,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum OutcomeKind {
+    Created,
+    Rebuilt,
+    Updated,
+    Destroyed,
+    Skipped(SkipReason),
+    NoOp,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Outcome {
+    pub name: String,
+    pub kind: OutcomeKind,
+    pub result: Result<()>,
+}
+
+impl Outcome {
+    pub fn new(name: &str, kind: OutcomeKind, result: Result<()>) -> Self {
+        Self {
+            name: name.to_string(),
+            kind,
+            result,
+        }
+    }
+}
