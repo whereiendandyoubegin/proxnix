@@ -315,7 +315,7 @@ pub enum OutcomeKind {
 pub struct Outcome {
     pub name: String,
     pub kind: OutcomeKind,
-    pub result: Result<()>,
+    pub error: Option<String>,
 }
 
 impl Outcome {
@@ -323,7 +323,7 @@ impl Outcome {
         Self {
             name: name.to_string(),
             kind,
-            result,
+            error: result.err().map(|e| e.to_string()),
         }
     }
 }

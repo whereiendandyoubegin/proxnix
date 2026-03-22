@@ -1,7 +1,12 @@
+use crate::nix::find_in_repo;
 use crate::pct::{copy_to_template_storage, pct_create, pct_start};
 use crate::qm::{qm_create, qm_importdisk, qm_resize, qm_set_agent, qm_set_disk, qm_start};
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::info;
+
+// --- Pure ---
 
 fn nix_store_hash(store_path: &str) -> Option<&str> {
     store_path
@@ -9,12 +14,65 @@ fn nix_store_hash(store_path: &str) -> Option<&str> {
         .and_then(|s| s.split('-').next())
 }
 
+fn flake_installable(config_name: &str, build_attr: &str) -> String {
+    format!(".#nixosConfigurations.{}.{}", config_name, build_attr)
+}
+
+fn qcow2_path(artifact_path: &str) -> String {
+    format!("{}/nixos.qcow2", artifact_path)
+}
+
+// --- Side effects ---
+
+fn find_flake_dir(repo_path: &str) -> Result<PathBuf> {
+    let flake_path = find_in_repo(repo_path, "flake.nix")?;
+    Path::new(&flake_path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))
+}
+
+fn run_nix_build(nix_dir: &Path, installable: &str, out_link: &Path) -> Result<()> {
+    info!("Running nix build '{}' in {}", installable, nix_dir.display());
+    let output = Command::new("nix")
+        .current_dir(nix_dir)
+        .arg("build")
+        .arg(installable)
+        .arg("--out-link")
+        .arg(out_link)
+        .output()
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "Nix build failed for '{}' (exit: {:?}): {}",
+            installable,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
+
+// --- Trait ---
+
 pub trait Materialise {
+    fn name(&self) -> &str;
     fn nix_build_attr(&self) -> &str;
     fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()>;
+
+    fn nix_build(&self, repo_path: &str, out_link: &Path) -> Result<()> {
+        let nix_dir = find_flake_dir(repo_path)?;
+        let installable = flake_installable(self.name(), self.nix_build_attr());
+        run_nix_build(&nix_dir, &installable, out_link)
+    }
 }
 
 impl Materialise for VMConfig {
+    fn name(&self) -> &str {
+        &self.name
+    }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.qcow2"
     }
@@ -22,22 +80,23 @@ impl Materialise for VMConfig {
         let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
             AppError::CmdError(format!("could not extract nix hash from path {}", artifact_path))
         })?;
-        let qcow2_path = format!("{}/nixos.qcow2", artifact_path);
         info!("Provisioning VM {} (id: {})", self.name, self.vm_id);
         qm_create(self, nix_hash, commit_hash)?;
-        let disk_ref = qm_importdisk(self.vm_id, &qcow2_path, &self.storage_location)?;
+        let disk_ref = qm_importdisk(self.vm_id, &qcow2_path(artifact_path), &self.storage_location)?;
         qm_set_disk(self.vm_id, &disk_ref, &self.disk_slot)?;
         qm_set_agent(self.vm_id)?;
         qm_resize(self.vm_id, &self.disk_slot, self.disk_gb)?;
         info!("VM {} provisioned successfully, starting", self.name);
         qm_start(self.vm_id)?;
         info!("VM {} started", self.name);
-
         Ok(())
     }
 }
 
 impl Materialise for ContainerConfig {
+    fn name(&self) -> &str {
+        &self.name
+    }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.tarball"
     }

@@ -94,7 +94,7 @@ pub fn pct_start(ct_id: u32) -> Result<bool> {
     Ok(true)
 }
 
-pub fn pct_stop(ct_id: &u32) -> Result<String> {
+pub fn pct_stop(ct_id: &u32) -> Result<()> {
     let output = Command::new("pct")
         .arg("stop")
         .arg(ct_id.to_string())
@@ -102,7 +102,7 @@ pub fn pct_stop(ct_id: &u32) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("not running") {
-            return Ok(String::new());
+            return Ok(());
         }
         return Err(AppError::CmdError(format!(
             "pct stop {} failed (exit: {:?}): {}",
@@ -111,10 +111,10 @@ pub fn pct_stop(ct_id: &u32) -> Result<String> {
             stderr
         )));
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(())
 }
 
-pub fn pct_destroy(ct_id: u32) -> Result<String> {
+pub fn pct_destroy(ct_id: u32) -> Result<()> {
     let output = Command::new("pct")
         .arg("destroy")
         .arg(ct_id.to_string())
@@ -128,7 +128,7 @@ pub fn pct_destroy(ct_id: u32) -> Result<String> {
             stderr
         )));
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(())
 }
 
 pub fn pct_list() -> Result<String> {
@@ -161,7 +161,7 @@ pub fn pct_set_resources(
     ct_id: u32,
     config: &ContainerConfig,
     changes: &[ContainerFieldChange],
-) -> Result<String> {
+) -> Result<()> {
     let output = Command::new("pct")
         .arg("set")
         .arg(ct_id.to_string())
@@ -190,5 +190,5 @@ pub fn pct_set_resources(
             stderr
         )));
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(())
 }

@@ -33,7 +33,7 @@ pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result
     Ok(output_string)
 }
 
-pub fn qm_stop(vm_id: &u32) -> Result<String> {
+pub fn qm_stop(vm_id: &u32) -> Result<()> {
     let qm_stop = Command::new("qm")
         .arg("stop")
         .arg(vm_id.to_string())
@@ -41,7 +41,7 @@ pub fn qm_stop(vm_id: &u32) -> Result<String> {
     if !qm_stop.status.success() {
         let stderr = String::from_utf8_lossy(&qm_stop.stderr);
         if stderr.contains("not running") {
-            return Ok(String::new());
+            return Ok(());
         }
         return Err(AppError::CmdError(format!(
             "qm stop has failed with exit code: {:?}: {}",
@@ -49,10 +49,7 @@ pub fn qm_stop(vm_id: &u32) -> Result<String> {
             stderr
         )));
     }
-    let stdout_bytes = qm_stop.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
+    Ok(())
 }
 
 // Parses output like: "Successfully imported disk as 'unused0:local-lvm:vm-100-disk-1'"
@@ -224,7 +221,7 @@ pub fn qm_start(vm_id: u32) -> Result<bool> {
     Ok(true)
 }
 
-pub fn qm_destroy(vm_id: u32) -> Result<String> {
+pub fn qm_destroy(vm_id: u32) -> Result<()> {
     let qm_destroy = Command::new("qm")
         .arg("destroy")
         .arg(vm_id.to_string())
@@ -237,10 +234,7 @@ pub fn qm_destroy(vm_id: u32) -> Result<String> {
             stderr
         )));
     }
-    let stdout_bytes = qm_destroy.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
+    Ok(())
 }
 
 pub fn qm_resize(vm_id: u32, disk_slot: &str, size_gb: u32) -> Result<String> {
@@ -262,7 +256,7 @@ pub fn qm_resize(vm_id: u32, disk_slot: &str, size_gb: u32) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-pub fn qm_set_resources(vm_id: u32, config: &VMConfig, changes: &[FieldChange]) -> Result<String> {
+pub fn qm_set_resources(vm_id: u32, config: &VMConfig, changes: &[FieldChange]) -> Result<()> {
     let mut qm_set_resources = Command::new("qm");
     qm_set_resources.arg("set");
     qm_set_resources.arg(vm_id.to_string());
@@ -296,7 +290,5 @@ pub fn qm_set_resources(vm_id: u32, config: &VMConfig, changes: &[FieldChange]) 
             stderr
         )));
     }
-    let output_string = String::from_utf8(output.stdout)?;
-
-    Ok(output_string)
+    Ok(())
 }
