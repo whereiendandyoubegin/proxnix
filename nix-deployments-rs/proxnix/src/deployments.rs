@@ -1,23 +1,75 @@
 use crate::{
-    materialise::Materialise, pct::{pct_destroy, pct_list, pct_set_resources, pct_start, pct_stop}, qm::{qm_destroy, qm_set_resources, qm_start, qm_stop}, state::{
+    materialise::Materialise,
+    pct::{pct_destroy, pct_list, pct_set_resources, pct_start, pct_stop},
+    qm::{qm_destroy, qm_set_resources, qm_start, qm_stop},
+    state::{
         enrich_container_info, enrich_cpu_info, list_to_deployed_vm, parse_pct_list, parse_qm_list,
         qm_list,
-    }, types::{
-        AppError, ContainerConfig, ContainerFieldChange, DeployedContainer, DeployedVM, FieldChange, Outcome, OutcomeKind, Result, SkipReason, VMConfig
-    }
+    },
+    types::{
+        AppError, ContainerConfig, ContainerFieldChange, DeployedContainer, DeployedVM,
+        FieldChange, Outcome, OutcomeKind, Result, SkipReason, VMConfig,
+    },
 };
-use std::{collections::{HashMap, HashSet}, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
-pub trait Deployments: Materialise + Sized + Send + Sync {
-    type Deployed: Send + Sync;
+pub trait DeployedState {
+    fn id(&self) -> u32;
+    fn name(&self) -> &str;
+    fn nix_hash(&self) -> Option<&str>;
+    fn status(&self) -> &str;
+}
+
+impl DeployedState for DeployedVM {
+    fn id(&self) -> u32 {
+        self.vm_id
+    }
+    fn name(&self) -> &str {
+        &self.vm_name
+    }
+    fn nix_hash(&self) -> Option<&str> {
+        self.nix_hash.as_deref()
+    }
+    fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+impl DeployedState for DeployedContainer {
+    fn id(&self) -> u32 {
+        self.ct_id
+    }
+    fn name(&self) -> &str {
+        &self.ct_name
+    }
+    fn nix_hash(&self) -> Option<&str> {
+        self.nix_hash.as_deref()
+    }
+    fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+pub trait Dangerous {
+    fn pre_check(&self) -> Result<()> {
+        Ok(())
+    }
+    fn post_check(&self) -> Result<()> {
+        Ok(())
+    }
+    fn health_check(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+pub trait Deployments: Dangerous + Materialise + Sized + Send + Sync {
+    type Deployed: DeployedState + Send + Sync;
     type FieldChange: PartialEq + Clone + Send + Sync;
 
     fn load_deployed() -> Result<HashMap<String, Self::Deployed>>;
-
-    fn deployed_id(d: &Self::Deployed) -> u32;
-    fn deployed_name(d: &Self::Deployed) -> &str;
-    fn deployed_nix_hash(d: &Self::Deployed) -> Option<&str>;
-    fn deployed_status(d: &Self::Deployed) -> &str;
 
     fn compute_changes(
         &self,
@@ -46,18 +98,6 @@ impl Deployments for VMConfig {
         let enriched = enrich_cpu_info(deployed_vms)?;
 
         Ok(enriched.vms)
-    }
-    fn deployed_id(d: &Self::Deployed) -> u32 {
-        d.vm_id
-    }
-    fn deployed_name(d: &Self::Deployed) -> &str {
-        &d.vm_name
-    }
-    fn deployed_nix_hash(d: &Self::Deployed) -> Option<&str> {
-        d.nix_hash.as_deref()
-    }
-    fn deployed_status(d: &Self::Deployed) -> &str {
-        &d.status
     }
     fn compute_changes(
         // The logic from what was diff_state
@@ -121,18 +161,6 @@ impl Deployments for ContainerConfig {
         let pct_raw = pct_list()?;
         let pct_entries = parse_pct_list(&pct_raw)?;
         enrich_container_info(pct_entries)
-    }
-    fn deployed_id(d: &Self::Deployed) -> u32 {
-        d.ct_id
-    }
-    fn deployed_name(d: &Self::Deployed) -> &str {
-        &d.ct_name
-    }
-    fn deployed_nix_hash(d: &Self::Deployed) -> Option<&str> {
-        d.nix_hash.as_deref()
-    }
-    fn deployed_status(d: &Self::Deployed) -> &str {
-        &d.status
     }
     fn compute_changes(
         &self,
@@ -243,7 +271,7 @@ fn plan<'a, T: Deployments>(
                 .filter(|(n, _)| !desired.contains(n.as_str()))
                 .map(|(n, d)| Action::Destroy {
                     name: n.clone(),
-                    id: T::deployed_id(d),
+                    id: d.id(),
                 }),
         )
         .collect()
@@ -274,62 +302,110 @@ fn classify<'a, T: Deployments>(
         },
         (_, true, _) => Action::Rebuild {
             config,
-            deployed_id: T::deployed_id(d),
+            deployed_id: d.id(),
             changes,
         },
         (_, false, _) => Action::UpdateInPlace { config, changes },
     }
 }
 
-fn build<T: Deployments>(actions: &[Action<'_, T>], repo_path: &str) -> Result<HashMap<String, String>> {
-    actions.iter().filter_map(|action| match action {
-        Action::Create { config } | Action::Rebuild { config, .. } => Some(config),
-        _ => None,
-    })
-    .map(|config| {
-        let out_link = Path::new(repo_path).join(config.name()).join("result");
-        let artifact_path = if out_link.exists() {
-            std::fs::canonicalize(&out_link)
-                .map_err(|e| AppError::CmdError(format!("failed to resolve store path for {}: {}", config.name(), e)))?
-        } else {
-            config.nix_build(repo_path, &out_link)?;
-            std::fs::canonicalize(&out_link)
-                .map_err(|e| AppError::CmdError(format!("failed to resolve store path for {}: {}", config.name(), e)))?
-        };
-        Ok((config.name().to_string(), artifact_path.to_string_lossy().to_string()))
-    })
-    .collect()
+fn build<T: Deployments>(
+    actions: &[Action<'_, T>],
+    repo_path: &str,
+) -> Result<HashMap<String, String>> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Create { config } | Action::Rebuild { config, .. } => Some(config),
+            _ => None,
+        })
+        .map(|config| {
+            let out_link = Path::new(repo_path).join(config.name()).join("result");
+            let artifact_path = if out_link.exists() {
+                std::fs::canonicalize(&out_link).map_err(|e| {
+                    AppError::CmdError(format!(
+                        "failed to resolve store path for {}: {}",
+                        config.name(),
+                        e
+                    ))
+                })?
+            } else {
+                config.nix_build(repo_path, &out_link)?;
+                std::fs::canonicalize(&out_link).map_err(|e| {
+                    AppError::CmdError(format!(
+                        "failed to resolve store path for {}: {}",
+                        config.name(),
+                        e
+                    ))
+                })?
+            };
+            Ok((
+                config.name().to_string(),
+                artifact_path.to_string_lossy().to_string(),
+            ))
+        })
+        .collect()
 }
 
-fn do_rebuild<T: Deployments>(config: &T, deployed_id: u32, artifact_path: &str, commit_hash: &str) -> Result<()> {
+fn do_rebuild<T: Deployments>(
+    config: &T,
+    deployed_id: u32,
+    artifact_path: &str,
+    commit_hash: &str,
+) -> Result<()> {
     T::stop(&deployed_id)?;
     T::destroy(deployed_id)?;
     config.provision(artifact_path, commit_hash)
 }
 
-fn execute<T: Deployments>(actions: Vec<Action<'_, T>>, artifacts: &HashMap<String, String>, commit_hash: &str) -> Vec<Outcome> {
-    actions.into_iter().map(|action| match action {
-        Action::Create { config } => {
-            let result = artifacts
-                .get(config.name())
-                .map(|p| config.provision(p, commit_hash))
-                .unwrap_or_else(|| Err(AppError::CmdError(format!("no artifact built for {}", config.name()))));
-            Outcome::new(config.name(), OutcomeKind::Created, result)
-        }
-        Action::Rebuild { config, deployed_id, changes: _ } => {
-            let result = artifacts
-                .get(config.name())
-                .map(|p| do_rebuild::<T>(config, deployed_id, p, commit_hash))
-                .unwrap_or_else(|| Err(AppError::CmdError(format!("no artifact built for {}", config.name()))));
-            Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
-        }
-        Action::UpdateInPlace { config, changes } => Outcome::new(
-            config.name(),
-            OutcomeKind::Updated,
-            config.apply_in_place(&changes),
-        ),
-        Action::Destroy { name, id } => Outcome::new(&name, OutcomeKind::Destroyed, T::destroy(id)),
-        Action::Skip { name, reason } => Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(())),
-        Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
-    }).collect()
+fn execute<T: Deployments>(
+    actions: Vec<Action<'_, T>>,
+    artifacts: &HashMap<String, String>,
+    commit_hash: &str,
+) -> Vec<Outcome> {
+    actions
+        .into_iter()
+        .map(|action| match action {
+            Action::Create { config } => {
+                let result = artifacts
+                    .get(config.name())
+                    .map(|p| config.provision(p, commit_hash))
+                    .unwrap_or_else(|| {
+                        Err(AppError::CmdError(format!(
+                            "no artifact built for {}",
+                            config.name()
+                        )))
+                    });
+                Outcome::new(config.name(), OutcomeKind::Created, result)
+            }
+            Action::Rebuild {
+                config,
+                deployed_id,
+                changes: _,
+            } => {
+                let result = artifacts
+                    .get(config.name())
+                    .map(|p| do_rebuild::<T>(config, deployed_id, p, commit_hash))
+                    .unwrap_or_else(|| {
+                        Err(AppError::CmdError(format!(
+                            "no artifact built for {}",
+                            config.name()
+                        )))
+                    });
+                Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
+            }
+            Action::UpdateInPlace { config, changes } => Outcome::new(
+                config.name(),
+                OutcomeKind::Updated,
+                config.apply_in_place(&changes),
+            ),
+            Action::Destroy { name, id } => {
+                Outcome::new(&name, OutcomeKind::Destroyed, T::destroy(id))
+            }
+            Action::Skip { name, reason } => {
+                Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(()))
+            }
+            Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
+        })
+        .collect()
 }
