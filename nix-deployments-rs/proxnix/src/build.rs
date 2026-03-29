@@ -1,10 +1,11 @@
+use crate::deployments;
 use crate::git::git_ensure_commit;
 use crate::materialise::Materialise;
 use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_vm_config, nix_build};
-use crate::pct::{pct_destroy, pct_start, pct_stop};
-use crate::qm::{qm_destroy, qm_set_resources, qm_start, qm_stop};
-use crate::state::{full_diff, get_container_statuses, get_vm_statuses, parse_vm_config};
-use crate::types::{AppError, FieldChange, Result, StateDiff, UpdateAction};
+use crate::pct::pct_start;
+use crate::qm::qm_start;
+use crate::state::{get_container_statuses, get_vm_statuses, parse_vm_config};
+use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
@@ -36,10 +37,7 @@ pub fn build_image_types(
 
 pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
-    info!(
-        "Cloning {} at commit {} to {}",
-        repo_url, commit_hash, dest_path
-    );
+    info!("Cloning {} at commit {} to {}", repo_url, commit_hash, dest_path);
     git_ensure_commit(repo_url, &dest_path, commit_hash)?;
 
     let eval = eval_vm_config(&dest_path)?;
@@ -71,59 +69,20 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
         })
         .collect();
 
-    let diff = full_diff(&desired, &image_hashes)?;
-    info!(
-        "Diff: {} VMs to create, {} to update, {} to delete, {} containers to create, {} to delete",
-        diff.to_create.len(),
-        diff.to_update.len(),
-        diff.to_delete.len(),
-        diff.to_create_containers.len(),
-        diff.to_delete_containers.len(),
-    );
-    for config in &diff.to_create {
-        info!("{}: does not exist -> will be created", config.name);
-    }
-    for vm in &diff.to_delete {
-        info!("{}: no longer in config -> will be destroyed", vm.vm_name);
-    }
-    for update in &diff.to_update {
-        let changes: Vec<String> = update
-            .changed_fields
-            .iter()
-            .map(|f| match f {
-                FieldChange::Memory => "memory".to_string(),
-                FieldChange::Cores => "cores".to_string(),
-                FieldChange::Sockets => "sockets".to_string(),
-                FieldChange::Disk => "disk".to_string(),
-                FieldChange::Image => "image".to_string(),
-            })
-            .collect();
-        match &update.required_action {
-            UpdateAction::InPlace => {
-                info!(
-                    "{}: {} changed -> in-place update",
-                    update.name,
-                    changes.join(", ")
-                );
-            }
-            UpdateAction::Rebuild => {
-                info!(
-                    "{}: {} changed -> full rebuild",
-                    update.name,
-                    changes.join(", ")
-                );
-            }
-            UpdateAction::Protected => {
-                warn!(
-                    "{}: {} changed but vm is protected -> no action",
-                    update.name,
-                    changes.join(", ")
-                );
-            }
+    let vms: Vec<VMConfig> = desired.vms.into_values().collect();
+    let containers: Vec<ContainerConfig> = desired.containers.into_values().collect();
+
+    let vm_outcomes = deployments::reconcile(&vms, &image_hashes, &dest_path, commit_hash)?;
+    let ct_outcomes =
+        deployments::reconcile(&containers, &image_hashes, &dest_path, commit_hash)?;
+
+    for outcome in vm_outcomes.iter().chain(ct_outcomes.iter()) {
+        match &outcome.error {
+            Some(e) => warn!("{}: {:?} failed: {}", outcome.name, outcome.kind, e),
+            None => info!("{}: {:?}", outcome.name, outcome.kind),
         }
     }
 
-    reconcile(diff, built, commit_hash)?;
     info!("Pipeline complete for commit {}", commit_hash);
     Ok(())
 }
@@ -230,88 +189,4 @@ pub fn ensure_vms_running(repo_path: &str) {
             }
         }
     }
-}
-
-pub fn reconcile(diff: StateDiff, built: HashMap<String, String>, commit_hash: &str) -> Result<()> {
-    diff.to_delete
-        .into_par_iter()
-        .map(|vm| -> Result<()> {
-            info!("Deleting VM {} (id: {})", vm.vm_name, vm.vm_id);
-            qm_stop(&vm.vm_id)?;
-            qm_destroy(vm.vm_id)?;
-            info!("Deleted VM {}", vm.vm_name);
-            Ok(())
-        })
-        .collect::<Result<Vec<()>>>()?;
-
-    diff.to_delete_containers
-        .into_par_iter()
-        .map(|container| -> Result<()> {
-            info!(
-                "Deleting container {} (id: {})",
-                container.ct_name, container.ct_id
-            );
-            pct_stop(&container.ct_id)?;
-            pct_destroy(container.ct_id)?;
-            info!("Deleted container {}", container.ct_name);
-            Ok(())
-        })
-        .collect::<Result<Vec<()>>>()?;
-
-    diff.to_create
-        .par_iter()
-        .map(|config| -> Result<()> {
-            let store_path = built.get(&config.image_type).ok_or_else(|| {
-                AppError::CmdError(format!(
-                    "No built image for type '{}' (vm: {})",
-                    config.image_type, config.name
-                ))
-            })?;
-            config.provision(store_path, commit_hash)
-        })
-        .collect::<Result<Vec<()>>>()?;
-
-    diff.to_create_containers
-        .par_iter()
-        .map(|config| -> Result<()> {
-            let store_path = built.get(&config.image_type).ok_or_else(|| {
-                AppError::CmdError(format!(
-                    "No built image for type '{}' (container: {})",
-                    config.image_type, config.name
-                ))
-            })?;
-            config.provision(store_path, commit_hash)
-        })
-        .collect::<Result<Vec<()>>>()?;
-
-    for actions in diff.to_update {
-        match &actions.required_action {
-            UpdateAction::InPlace => {
-                info!("Updating VM {} in place", actions.name);
-                qm_set_resources(
-                    actions.config.vm_id,
-                    &actions.config,
-                    &actions.changed_fields,
-                )?;
-                info!("Updated VM {}", actions.name);
-            }
-            UpdateAction::Rebuild => {
-                info!("Rebuilding VM {} (destroy + provision)", actions.name);
-                let store_path = built.get(&actions.config.image_type).ok_or_else(|| {
-                    AppError::CmdError(format!(
-                        "No built image for type '{}' (vm: {})",
-                        actions.config.image_type, actions.name
-                    ))
-                })?;
-                qm_stop(&actions.config.vm_id)?;
-                qm_destroy(actions.config.vm_id)?;
-                actions.config.provision(store_path, commit_hash)?;
-            }
-            UpdateAction::Protected => {
-                warn!("{} is protected, no action taken", actions.name);
-            }
-        }
-    }
-
-    Ok(())
 }

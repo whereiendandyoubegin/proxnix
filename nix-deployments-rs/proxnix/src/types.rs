@@ -241,38 +241,6 @@ pub enum ContainerFieldChange {
     Disk,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct ContainerUpdate {
-    pub name: String,
-    pub config: ContainerConfig,
-    pub changed_fields: Vec<ContainerFieldChange>,
-    pub required_action: UpdateAction,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct StateDiff {
-    pub to_create: Vec<VMConfig>,
-    pub to_update: Vec<VMUpdate>,
-    pub to_delete: Vec<DeployedVM>,
-    pub to_create_containers: Vec<ContainerConfig>,
-    pub to_update_containers: Vec<ContainerUpdate>,
-    pub to_delete_containers: Vec<DeployedContainer>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct VMUpdate {
-    pub name: String,
-    pub config: VMConfig,
-    pub changed_fields: Vec<FieldChange>,
-    pub required_action: UpdateAction,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum UpdateAction {
-    InPlace,
-    Rebuild,
-    Protected,
-}
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub enum FieldChange {
@@ -283,12 +251,6 @@ pub enum FieldChange {
     Image,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum RebuildStrategy {
-    Rebuild,
-    InPlace,
-    Protected,
-}
 
 #[derive(Debug)]
 pub struct ParsedWebhook {
@@ -309,6 +271,13 @@ pub enum OutcomeKind {
     Destroyed,
     Skipped(SkipReason),
     NoOp,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum RebuildStrategy {
+    Rebuild,
+    InPlace,
+    Protected,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

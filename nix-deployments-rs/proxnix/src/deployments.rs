@@ -65,6 +65,11 @@ pub trait Dangerous {
     }
 }
 
+// VMConfig and ContainerConfig don't need this, this is for when I add storage and network support
+impl Dangerous for VMConfig {}
+
+impl Dangerous for ContainerConfig {}
+
 pub trait Deployments: Dangerous + Materialise + Sized + Send + Sync {
     type Deployed: DeployedState + Send + Sync;
     type FieldChange: PartialEq + Clone + Send + Sync;
@@ -367,15 +372,20 @@ fn execute<T: Deployments>(
         .into_iter()
         .map(|action| match action {
             Action::Create { config } => {
-                let result = artifacts
-                    .get(config.name())
-                    .map(|p| config.provision(p, commit_hash))
-                    .unwrap_or_else(|| {
-                        Err(AppError::CmdError(format!(
-                            "no artifact built for {}",
-                            config.name()
-                        )))
-                    });
+                let result = config.pre_check()
+                    .and_then(|_| {
+                        artifacts
+                            .get(config.name())
+                            .map(|p| config.provision(p, commit_hash))
+                            .unwrap_or_else(|| {
+                                Err(AppError::CmdError(format!(
+                                    "no artifact built for {}",
+                                    config.name()
+                                )))
+                            })
+                    })
+                    .and_then(|_| config.post_check())
+                    .and_then(|_| config.health_check());
                 Outcome::new(config.name(), OutcomeKind::Created, result)
             }
             Action::Rebuild {
@@ -383,22 +393,29 @@ fn execute<T: Deployments>(
                 deployed_id,
                 changes: _,
             } => {
-                let result = artifacts
-                    .get(config.name())
-                    .map(|p| do_rebuild::<T>(config, deployed_id, p, commit_hash))
-                    .unwrap_or_else(|| {
-                        Err(AppError::CmdError(format!(
-                            "no artifact built for {}",
-                            config.name()
-                        )))
-                    });
+                let result = config.pre_check()
+                    .and_then(|_| {
+                        artifacts
+                            .get(config.name())
+                            .map(|p| do_rebuild::<T>(config, deployed_id, p, commit_hash))
+                            .unwrap_or_else(|| {
+                                Err(AppError::CmdError(format!(
+                                    "no artifact built for {}",
+                                    config.name()
+                                )))
+                            })
+                    })
+                    .and_then(|_| config.post_check())
+                    .and_then(|_| config.health_check());
                 Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
             }
-            Action::UpdateInPlace { config, changes } => Outcome::new(
-                config.name(),
-                OutcomeKind::Updated,
-                config.apply_in_place(&changes),
-            ),
+            Action::UpdateInPlace { config, changes } => {
+                let result = config.pre_check()
+                    .and_then(|_| config.apply_in_place(&changes))
+                    .and_then(|_| config.post_check())
+                    .and_then(|_| config.health_check());
+                Outcome::new(config.name(), OutcomeKind::Updated, result)
+            }
             Action::Destroy { name, id } => {
                 Outcome::new(&name, OutcomeKind::Destroyed, T::destroy(id))
             }

@@ -1,8 +1,7 @@
 use crate::pct::{pct_config, pct_list};
 use crate::types::{
-    AppError, BindMount, ContainerConfig, DeployedContainer,
-    DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result, StateDiff,
-    UpdateAction, VMConfig, VMUpdate,
+    AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState, QMConfig,
+    QMList, Result,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -207,78 +206,6 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
     }
 }
 
-pub fn diff_state(
-    deployed: &DeployedState,
-    desired: &DesiredState,
-    image_hashes: &HashMap<String, String>,
-) -> StateDiff {
-    let mut to_create: Vec<VMConfig> = Vec::new();
-    let mut to_update: Vec<VMUpdate> = Vec::new();
-    let mut to_delete: Vec<DeployedVM> = Vec::new();
-
-    for (name, vmconfig) in &desired.vms {
-        let mut changes = Vec::new();
-
-        if deployed.vms.contains_key(name) {
-            let deployed_vm = deployed.vms.get(name).unwrap();
-            if vmconfig.memory_mb != deployed_vm.mem_mb {
-                changes.push(FieldChange::Memory);
-            }
-            if vmconfig.disk_gb > deployed_vm.bootdisk_gb.round() as u32 {
-                changes.push(FieldChange::Disk);
-            }
-            if vmconfig.cores != deployed_vm.cores {
-                changes.push(FieldChange::Cores);
-            }
-            if vmconfig.sockets != deployed_vm.sockets {
-                changes.push(FieldChange::Sockets);
-            }
-            let desired_nix_hash = image_hashes.get(&vmconfig.image_type).map(|s| s.as_str());
-            if desired_nix_hash
-                .zip(deployed_vm.nix_hash.as_deref())
-                .map(|(desired, deployed)| desired != deployed)
-                .unwrap_or(true)
-            {
-                changes.push(FieldChange::Image);
-            }
-            if !changes.is_empty() {
-                let action = if vmconfig.protected {
-                    UpdateAction::Protected
-                } else if changes.contains(&FieldChange::Disk)
-                    || changes.contains(&FieldChange::Image)
-                {
-                    UpdateAction::Rebuild
-                } else {
-                    UpdateAction::InPlace
-                };
-
-                to_update.push(VMUpdate {
-                    name: name.clone(),
-                    config: vmconfig.clone(),
-                    changed_fields: changes,
-                    required_action: action,
-                });
-            }
-        } else {
-            to_create.push(vmconfig.clone())
-        }
-    }
-
-    for (name, deployed_vm) in &deployed.vms {
-        if !desired.vms.contains_key(name) {
-            to_delete.push(deployed_vm.clone())
-        }
-    }
-
-    StateDiff {
-        to_create,
-        to_update,
-        to_delete,
-        to_create_containers: vec![],
-        to_delete_containers: vec![],
-        to_update_containers: vec![],
-    }
-}
 
 pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     let raw = qm_list()?;
@@ -292,31 +219,6 @@ pub fn get_container_statuses() -> Result<HashMap<u32, String>> {
     Ok(parsed.into_iter().map(|e| (e.ct_id, e.status)).collect())
 }
 
-pub fn load_state() -> Result<DeployedState> {
-    let qm_raw = qm_list()?;
-    let parsed_qm_list = parse_qm_list(&qm_raw)?;
-    let deployed_vms = list_to_deployed_vm(parsed_qm_list);
-    let mut enriched = enrich_cpu_info(deployed_vms)?;
-
-    let pct_raw = pct_list()?;
-    let pct_entries = parse_pct_list(&pct_raw)?;
-    enriched.containers = enrich_container_info(pct_entries)?;
-
-    Ok(enriched)
-}
-
-pub fn full_diff(
-    desired: &DesiredState,
-    image_hashes: &HashMap<String, String>,
-) -> Result<StateDiff> {
-    let deployed = load_state()?;
-    let mut diff = diff_state(&deployed, desired, image_hashes);
-    let (to_create_containers, to_delete_containers) =
-        diff_container_state(&deployed.containers, desired, image_hashes);
-    diff.to_create_containers = to_create_containers;
-    diff.to_delete_containers = to_delete_containers;
-    Ok(diff)
-}
 
 pub(crate) struct PctListEntry {
     ct_id: u32,
@@ -461,38 +363,6 @@ pub fn enrich_container_info(
     Ok(result)
 }
 
-fn diff_container_state(
-    deployed: &HashMap<String, DeployedContainer>,
-    desired: &DesiredState,
-    image_hashes: &HashMap<String, String>,
-) -> (Vec<ContainerConfig>, Vec<DeployedContainer>) {
-    let mut to_create = Vec::new();
-    let mut to_delete = Vec::new();
-
-    for (name, config) in &desired.containers {
-        if let Some(deployed_ct) = deployed.get(name) {
-            let desired_nix_hash = image_hashes.get(&config.image_type).map(|s| s.as_str());
-            if desired_nix_hash
-                .zip(deployed_ct.nix_hash.as_deref())
-                .map(|(desired, actual)| desired != actual)
-                .unwrap_or(true)
-                && !config.protected
-            {
-                to_delete.push(deployed_ct.clone());
-                to_create.push(config.clone());
-            }
-        } else {
-            to_create.push(config.clone());
-        }
-    }
-    for (name, container) in deployed {
-        if !desired.containers.contains_key(name) {
-            to_delete.push(container.clone());
-        }
-    }
-
-    (to_create, to_delete)
-}
 
 #[cfg(test)]
 mod tests {
