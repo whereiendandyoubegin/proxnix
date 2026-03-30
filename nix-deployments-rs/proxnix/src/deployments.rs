@@ -418,7 +418,7 @@ fn execute<T: Deployments>(
                 Outcome::new(config.name(), OutcomeKind::Updated, result)
             }
             Action::Destroy { name, id } => {
-                Outcome::new(&name, OutcomeKind::Destroyed, T::destroy(id))
+                Outcome::new(&name, OutcomeKind::Destroyed, T::stop(&id).and_then(|_| T::destroy(id)))
             }
             Action::Skip { name, reason } => {
                 Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(()))
