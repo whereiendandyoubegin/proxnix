@@ -326,24 +326,25 @@ fn build<T: Deployments>(
         })
         .map(|config| {
             let out_link = Path::new(repo_path).join(config.name()).join("result");
-            let artifact_path = if out_link.exists() {
-                std::fs::canonicalize(&out_link).map_err(|e| {
+            let image_type_link = Path::new(repo_path).join(config.image_type()).join("result");
+            let resolve = |p: &Path| {
+                std::fs::canonicalize(p).map_err(|e| {
                     AppError::CmdError(format!(
                         "failed to resolve store path for {}: {}",
                         config.name(),
                         e
                     ))
-                })?
-            } else {
-                config.nix_build(repo_path, &out_link)?;
-                std::fs::canonicalize(&out_link).map_err(|e| {
-                    AppError::CmdError(format!(
-                        "failed to resolve store path for {}: {}",
-                        config.name(),
-                        e
-                    ))
-                })?
+                })
             };
+            let artifact_path = [&out_link, &image_type_link]
+                .into_iter()
+                .find(|p| p.exists())
+                .map(|p| resolve(p))
+                .unwrap_or_else(|| {
+                    config
+                        .nix_build(repo_path, &out_link)
+                        .and_then(|_| resolve(&out_link))
+                })?;
             Ok((
                 config.name().to_string(),
                 artifact_path.to_string_lossy().to_string(),
