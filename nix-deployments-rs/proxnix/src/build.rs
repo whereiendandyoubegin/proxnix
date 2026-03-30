@@ -72,9 +72,23 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let vms: Vec<VMConfig> = desired.vms.into_values().collect();
     let containers: Vec<ContainerConfig> = desired.containers.into_values().collect();
 
-    let vm_outcomes = deployments::reconcile(&vms, &image_hashes, &dest_path, commit_hash)?;
-    let ct_outcomes =
-        deployments::reconcile(&containers, &image_hashes, &dest_path, commit_hash)?;
+    let vm_result = deployments::reconcile(&vms, &image_hashes, &dest_path, commit_hash);
+    let ct_result = deployments::reconcile(&containers, &image_hashes, &dest_path, commit_hash);
+
+    let vm_outcomes = match vm_result {
+        Ok(outcomes) => outcomes,
+        Err(e) => {
+            warn!("VM reconcile failed: {}", e);
+            vec![]
+        }
+    };
+    let ct_outcomes = match ct_result {
+        Ok(outcomes) => outcomes,
+        Err(e) => {
+            warn!("Container reconcile failed: {}", e);
+            vec![]
+        }
+    };
 
     for outcome in vm_outcomes.iter().chain(ct_outcomes.iter()) {
         match &outcome.error {
