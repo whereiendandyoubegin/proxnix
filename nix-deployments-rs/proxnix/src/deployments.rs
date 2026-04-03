@@ -11,6 +11,7 @@ use crate::{
         FieldChange, Outcome, OutcomeKind, Result, SkipReason, VMConfig,
     },
 };
+use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -319,7 +320,7 @@ fn build<T: Deployments>(
     repo_path: &str,
 ) -> Result<HashMap<String, String>> {
     actions
-        .iter()
+        .par_iter()
         .filter_map(|action| match action {
             Action::Create { config } | Action::Rebuild { config, .. } => Some(config),
             _ => None,
@@ -370,7 +371,7 @@ fn execute<T: Deployments>(
     commit_hash: &str,
 ) -> Vec<Outcome> {
     actions
-        .into_iter()
+        .into_par_iter()
         .map(|action| match action {
             Action::Create { config } => {
                 let result = config.pre_check()
