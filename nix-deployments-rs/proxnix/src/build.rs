@@ -1,11 +1,8 @@
-use crate::deployments;
-use crate::git::git_ensure_commit;
-use crate::materialise::Materialise;
-use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_config, nix_build};
+use crate::nix::{configure_dirs, eval_config, nix_build};
 use crate::pct::pct_start;
 use crate::qm::qm_start;
 use crate::state::{get_container_statuses, get_vm_statuses, parse_config};
-use crate::types::{AppError, ContainerConfig, Result, VMConfig};
+use crate::types::Result;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
