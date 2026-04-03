@@ -1,6 +1,7 @@
 use std::{clone, collections::HashMap};
+use tracing::{info, warn};
 
-use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
     build::{build_image_types, nix_store_hash},
@@ -8,13 +9,16 @@ use crate::{
     git::git_ensure_commit,
     nix::{BASE_REPO_PATH, eval_config},
     state::parse_config,
-    types::Outcome,
+    types::{AppError, Outcome},
 };
 
 pub struct WorkloadGroup {
     pub image_type_attrs: HashMap<String, String>,
-    reconcile_fn:
-        Box<dyn Fn(&HashMap<String, String>, &str, &str) -> Result<Vec<Outcome>> + Send + Sync>,
+    reconcile_fn: Box<
+        dyn Fn(&HashMap<String, String>, &str, &str) -> Result<Vec<Outcome>, AppError>
+            + Send
+            + Sync,
+    >,
 }
 
 impl WorkloadGroup {
@@ -36,12 +40,12 @@ impl WorkloadGroup {
         hashes: &HashMap<String, String>,
         repo_path: &str,
         commit_hash: &str,
-    ) -> Result<Vec<Outcome>> {
+    ) -> Result<Vec<Outcome>, AppError> {
         (self.reconcile_fn)(hashes, repo_path, commit_hash)
     }
 }
 
-pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
+pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<(), AppError> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
     info!(
         "Cloning {} at commit {} to {}",
@@ -61,7 +65,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let outcomes: Vec<Outcome> = groups
         .par_iter()
         .flat_map(
-            |g| match g.reconcile(&image_hashes, &dest_path, commit_hash) {
+            |g: &WorkloadGroup| match g.reconcile(&image_hashes, &dest_path, commit_hash) {
                 Ok(o) => o,
                 Err(e) => {
                     warn!("Reconcile failed: {}", e);

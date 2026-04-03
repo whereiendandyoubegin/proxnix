@@ -13,7 +13,6 @@ struct AppState {
 }
 
 mod build;
-mod config;
 mod deployments;
 mod git;
 mod materialise;
@@ -62,7 +61,7 @@ async fn webhook_handler(
             "Pipeline started for repo: {}, commit: {}",
             git_repo_url, current_git_commit
         );
-        match build::run_pipeline(&git_repo_url, &current_git_commit) {
+        match pipeline::run_pipeline(&git_repo_url, &current_git_commit) {
             Ok(_) => info!(
                 "Pipeline finished for repo: {}, commit: {}",
                 git_repo_url, current_git_commit

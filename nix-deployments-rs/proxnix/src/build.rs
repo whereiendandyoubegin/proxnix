@@ -1,10 +1,10 @@
 use crate::deployments;
 use crate::git::git_ensure_commit;
 use crate::materialise::Materialise;
-use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_vm_config, nix_build};
+use crate::nix::{BASE_REPO_PATH, configure_dirs, eval_config, nix_build};
 use crate::pct::pct_start;
 use crate::qm::qm_start;
-use crate::state::{get_container_statuses, get_vm_statuses, parse_vm_config};
+use crate::state::{get_container_statuses, get_vm_statuses, parse_config};
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -35,84 +35,15 @@ pub fn build_image_types(
         .collect::<Result<HashMap<_, _>>>()
 }
 
-pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
-    let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
-    info!(
-        "Cloning {} at commit {} to {}",
-        repo_url, commit_hash, dest_path
-    );
-    git_ensure_commit(repo_url, &dest_path, commit_hash)?;
-
-    let eval = eval_config(&dest_path)?;
-    let desired = parse_config(&eval)?;
-
-    let mut image_type_attrs: HashMap<String, String> = HashMap::new();
-    for config in desired.vms.values() {
-        image_type_attrs
-            .entry(config.image_type.clone())
-            .or_insert_with(|| config.nix_build_attr().to_string());
-    }
-    for config in desired.containers.values() {
-        image_type_attrs
-            .entry(config.image_type.clone())
-            .or_insert_with(|| config.nix_build_attr().to_string());
-    }
-
-    info!(
-        "Building {} image type(s): {:?}",
-        image_type_attrs.len(),
-        image_type_attrs.keys().collect::<Vec<_>>()
-    );
-    let built = build_image_types(&image_type_attrs, &dest_path)?;
-
-    let image_hashes: HashMap<String, String> = built
-        .iter()
-        .filter_map(|(image_type, store_path)| {
-            nix_store_hash(store_path).map(|h| (image_type.clone(), h.to_string()))
-        })
-        .collect();
-
-    let vms: Vec<VMConfig> = desired.vms.into_values().collect();
-    let containers: Vec<ContainerConfig> = desired.containers.into_values().collect();
-
-    let vm_result = deployments::reconcile(&vms, &image_hashes, &dest_path, commit_hash);
-    let ct_result = deployments::reconcile(&containers, &image_hashes, &dest_path, commit_hash);
-
-    let vm_outcomes = match vm_result {
-        Ok(outcomes) => outcomes,
-        Err(e) => {
-            warn!("VM reconcile failed: {}", e);
-            vec![]
-        }
-    };
-    let ct_outcomes = match ct_result {
-        Ok(outcomes) => outcomes,
-        Err(e) => {
-            warn!("Container reconcile failed: {}", e);
-            vec![]
-        }
-    };
-
-    for outcome in vm_outcomes.iter().chain(ct_outcomes.iter()) {
-        match &outcome.error {
-            Some(e) => warn!("{}: {:?} failed: {}", outcome.name, outcome.kind, e),
-            None => info!("{}: {:?}", outcome.name, outcome.kind),
-        }
-    }
-
-    info!("Pipeline complete for commit {}", commit_hash);
-    Ok(())
-}
-
 pub fn ensure_vms_running(repo_path: &str) {
-    let raw = match eval_vm_config(repo_path) {
+    let raw = match eval_config(repo_path) {
         Ok(r) => r,
         Err(e) => {
             warn!("Periodic reconcile: failed to eval vm config: {:?}", e);
             return;
         }
     };
-    let desired = match parse_vm_config(&raw) {
+    let desired = match parse_config(&raw) {
         Ok(d) => d,
         Err(e) => {
             warn!("Periodic reconcile: failed to parse vm config: {:?}", e);
