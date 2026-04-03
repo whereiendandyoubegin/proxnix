@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::process::Command;
 
-pub fn parse_vm_config(json: &str) -> Result<DesiredState> {
+pub fn parse_config(json: &str) -> Result<DesiredState> {
     let state: DesiredState = serde_json::from_str(json)?;
     Ok(state)
 }
@@ -103,8 +103,6 @@ pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
 }
 
 pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
-    
-
     output_string
         .lines()
         .skip(1)
@@ -206,7 +204,6 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
     }
 }
 
-
 pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     let raw = qm_list()?;
     let parsed = parse_qm_list(&raw)?;
@@ -218,7 +215,6 @@ pub fn get_container_statuses() -> Result<HashMap<u32, String>> {
     let parsed = parse_pct_list(&raw)?;
     Ok(parsed.into_iter().map(|e| (e.ct_id, e.status)).collect())
 }
-
 
 pub(crate) struct PctListEntry {
     ct_id: u32,
@@ -362,7 +358,6 @@ pub fn enrich_container_info(
         .collect();
     Ok(result)
 }
-
 
 #[cfg(test)]
 mod tests {

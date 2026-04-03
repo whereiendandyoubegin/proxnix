@@ -13,12 +13,14 @@ struct AppState {
 }
 
 mod build;
+mod config;
 mod deployments;
 mod git;
 mod materialise;
 mod nix;
 mod parsing;
 mod pct;
+mod pipeline;
 mod qm;
 mod state;
 mod types;

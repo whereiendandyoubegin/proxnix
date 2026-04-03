@@ -37,11 +37,14 @@ pub fn build_image_types(
 
 pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
-    info!("Cloning {} at commit {} to {}", repo_url, commit_hash, dest_path);
+    info!(
+        "Cloning {} at commit {} to {}",
+        repo_url, commit_hash, dest_path
+    );
     git_ensure_commit(repo_url, &dest_path, commit_hash)?;
 
-    let eval = eval_vm_config(&dest_path)?;
-    let desired = parse_vm_config(&eval)?;
+    let eval = eval_config(&dest_path)?;
+    let desired = parse_config(&eval)?;
 
     let mut image_type_attrs: HashMap<String, String> = HashMap::new();
     for config in desired.vms.values() {

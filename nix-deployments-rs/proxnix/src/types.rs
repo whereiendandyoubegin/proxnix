@@ -1,6 +1,8 @@
 use proxnix_core::Workload;
 use std::{collections::HashMap, string::FromUtf8Error};
 
+use crate::pipeline::WorkloadGroup;
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -225,6 +227,15 @@ pub struct DesiredState {
     pub containers: HashMap<String, ContainerConfig>,
 }
 
+impl DesiredState {
+    pub fn into_workload_groups(self) -> Vec<WorkloadGroup> {
+        vec![
+            WorkloadGroup::new(self.vms.into_values().collect()),
+            WorkloadGroup::new(self.containers.into_values().collect()),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeployedState {
     pub vms: HashMap<String, DeployedVM>,
@@ -241,7 +252,6 @@ pub enum ContainerFieldChange {
     Disk,
 }
 
-
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub enum FieldChange {
     Memory,
@@ -250,7 +260,6 @@ pub enum FieldChange {
     Disk,
     Image,
 }
-
 
 #[derive(Debug)]
 pub struct ParsedWebhook {
