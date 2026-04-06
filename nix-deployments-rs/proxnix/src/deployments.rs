@@ -249,13 +249,14 @@ enum Action<'a, T: Deployments> {
 pub fn reconcile<T: Deployments>(
     configs: &[T],
     image_hashes: &HashMap<String, String>,
+    pre_built: &HashMap<String, String>,
     repo_path: &str,
     commit_hash: &str,
 ) -> Result<Vec<Outcome>> {
     let deployed = T::load_deployed()?;
     let actions = plan(configs, &deployed, image_hashes);
-    let artifacts = build(&actions, repo_path)?;
-    Ok(execute(actions, &artifacts, commit_hash))
+    let (artifacts, build_errors) = build(&actions, pre_built, repo_path);
+    Ok(execute(actions, &artifacts, &build_errors, commit_hash))
 }
 
 fn plan<'a, T: Deployments>(
@@ -314,19 +315,32 @@ fn classify<'a, T: Deployments>(
 
 fn build<T: Deployments>(
     actions: &[Action<'_, T>],
+    pre_built: &HashMap<String, String>,
     repo_path: &str,
-) -> Result<HashMap<String, String>> {
-    actions
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let results: HashMap<String, Result<String>> = actions
         .par_iter()
         .filter_map(|action| match action {
             Action::Create { config } | Action::Rebuild { config, .. } => Some(config),
             _ => None,
         })
         .map(|config| {
-            let store_path = config.nix_build(repo_path)?;
-            Ok((config.name().to_string(), store_path))
+            let result = match pre_built.get(config.image_type()) {
+                Some(path) => Ok(path.clone()),
+                None => config.nix_build(repo_path),
+            };
+            (config.name().to_string(), result)
         })
-        .collect()
+        .collect();
+
+    let artifacts = results.iter()
+        .filter_map(|(k, v)| v.as_ref().ok().map(|p| (k.clone(), p.clone())))
+        .collect();
+    let errors = results.iter()
+        .filter_map(|(k, v)| v.as_ref().err().map(|e| (k.clone(), e.to_string())))
+        .collect();
+
+    (artifacts, errors)
 }
 
 fn do_rebuild<T: Deployments>(
@@ -343,6 +357,7 @@ fn do_rebuild<T: Deployments>(
 fn execute<T: Deployments>(
     actions: Vec<Action<'_, T>>,
     artifacts: &HashMap<String, String>,
+    build_errors: &HashMap<String, String>,
     commit_hash: &str,
 ) -> Vec<Outcome> {
     actions
@@ -351,6 +366,9 @@ fn execute<T: Deployments>(
             Action::Create { config } => {
                 let result = config.pre_check()
                     .and_then(|_| {
+                        if let Some(e) = build_errors.get(config.name()) {
+                            return Err(AppError::CmdError(e.clone()));
+                        }
                         artifacts
                             .get(config.name())
                             .map(|p| config.provision(p, commit_hash))
@@ -372,6 +390,9 @@ fn execute<T: Deployments>(
             } => {
                 let result = config.pre_check()
                     .and_then(|_| {
+                        if let Some(e) = build_errors.get(config.name()) {
+                            return Err(AppError::CmdError(e.clone()));
+                        }
                         artifacts
                             .get(config.name())
                             .map(|p| do_rebuild::<T>(config, deployed_id, p, commit_hash))

@@ -9,16 +9,18 @@ use crate::{
     git::git_ensure_commit,
     nix::{BASE_REPO_PATH, eval_config},
     state::parse_config,
-    types::{AppError, Outcome},
+    types::{Outcome, Result},
 };
+
+type ReconcileFn = Box<
+    dyn Fn(&HashMap<String, String>, &HashMap<String, String>, &str, &str) -> Result<Vec<Outcome>>
+        + Send
+        + Sync,
+>;
 
 pub struct WorkloadGroup {
     pub image_type_attrs: HashMap<String, String>,
-    reconcile_fn: Box<
-        dyn Fn(&HashMap<String, String>, &str, &str) -> Result<Vec<Outcome>, AppError>
-            + Send
-            + Sync,
-    >,
+    reconcile_fn: ReconcileFn,
 }
 
 impl WorkloadGroup {
@@ -29,8 +31,8 @@ impl WorkloadGroup {
             .collect();
         Self {
             image_type_attrs,
-            reconcile_fn: Box::new(move |hashes, repo_path, commit_hash| {
-                deployments::reconcile(&configs, hashes, repo_path, commit_hash)
+            reconcile_fn: Box::new(move |hashes, pre_built, repo_path, commit_hash| {
+                deployments::reconcile(&configs, hashes, pre_built, repo_path, commit_hash)
             }),
         }
     }
@@ -38,14 +40,15 @@ impl WorkloadGroup {
     pub fn reconcile(
         &self,
         hashes: &HashMap<String, String>,
+        pre_built: &HashMap<String, String>,
         repo_path: &str,
         commit_hash: &str,
-    ) -> Result<Vec<Outcome>, AppError> {
-        (self.reconcile_fn)(hashes, repo_path, commit_hash)
+    ) -> Result<Vec<Outcome>> {
+        (self.reconcile_fn)(hashes, pre_built, repo_path, commit_hash)
     }
 }
 
-pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<(), AppError> {
+pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
     info!(
         "Cloning {} at commit {} to {}",
@@ -65,7 +68,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<(), AppError> {
     let outcomes: Vec<Outcome> = groups
         .par_iter()
         .flat_map(
-            |g: &WorkloadGroup| match g.reconcile(&image_hashes, &dest_path, commit_hash) {
+            |g: &WorkloadGroup| match g.reconcile(&image_hashes, &built, &dest_path, commit_hash) {
                 Ok(o) => o,
                 Err(e) => {
                     warn!("Reconcile failed: {}", e);
