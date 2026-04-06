@@ -1,11 +1,10 @@
-use crate::nix::{configure_dirs, eval_config, nix_build};
+use crate::nix::{eval_config, nix_build};
 use crate::pct::pct_start;
 use crate::qm::qm_start;
 use crate::state::{get_container_statuses, get_vm_statuses, parse_config};
 use crate::types::Result;
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::fs;
 use tracing::{info, warn};
 
 pub fn nix_store_hash(store_path: &str) -> Option<&str> {
@@ -18,14 +17,11 @@ pub fn build_image_types(
     image_type_attrs: &HashMap<String, String>,
     repo_path: &str,
 ) -> Result<HashMap<String, String>> {
-    configure_dirs(image_type_attrs.keys().cloned().collect(), repo_path)?;
     image_type_attrs
         .par_iter()
         .map(|(image_type, build_attr)| -> Result<(String, String)> {
             info!("Building image type '{}' ({})", image_type, build_attr);
-            let result_path = nix_build(image_type, build_attr, repo_path)?;
-            let canonical = fs::canonicalize(&result_path)?;
-            let store_path = canonical.to_string_lossy().to_string();
+            let store_path = nix_build(image_type, build_attr, repo_path)?;
             info!("Built '{}' -> {}", image_type, store_path);
             Ok((image_type.clone(), store_path))
         })

@@ -32,14 +32,14 @@ fn find_flake_dir(repo_path: &str) -> Result<PathBuf> {
         .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))
 }
 
-fn run_nix_build(nix_dir: &Path, installable: &str, out_link: &Path) -> Result<()> {
+fn run_nix_build(nix_dir: &Path, installable: &str) -> Result<String> {
     info!("Running nix build '{}' in {}", installable, nix_dir.display());
     let output = Command::new("nix")
         .current_dir(nix_dir)
         .arg("build")
         .arg(installable)
-        .arg("--out-link")
-        .arg(out_link)
+        .arg("--print-out-paths")
+        .arg("--no-link")
         .output()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
 
@@ -52,7 +52,7 @@ fn run_nix_build(nix_dir: &Path, installable: &str, out_link: &Path) -> Result<(
             stderr
         )));
     }
-    Ok(())
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 // --- Trait ---
@@ -62,10 +62,10 @@ pub trait Materialise {
     fn nix_build_attr(&self) -> &str;
     fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()>;
 
-    fn nix_build(&self, repo_path: &str, out_link: &Path) -> Result<()> {
+    fn nix_build(&self, repo_path: &str) -> Result<String> {
         let nix_dir = find_flake_dir(repo_path)?;
         let installable = flake_installable(self.name(), self.nix_build_attr());
-        run_nix_build(&nix_dir, &installable, out_link)
+        run_nix_build(&nix_dir, &installable)
     }
 }
 

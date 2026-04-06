@@ -12,10 +12,7 @@ use crate::{
     },
 };
 use rayon::prelude::*;
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::collections::{HashMap, HashSet};
 
 pub trait DeployedState {
     fn id(&self) -> u32;
@@ -326,30 +323,8 @@ fn build<T: Deployments>(
             _ => None,
         })
         .map(|config| {
-            let out_link = Path::new(repo_path).join(config.name()).join("result");
-            let image_type_link = Path::new(repo_path).join(config.image_type()).join("result");
-            let resolve = |p: &Path| {
-                std::fs::canonicalize(p).map_err(|e| {
-                    AppError::CmdError(format!(
-                        "failed to resolve store path for {}: {}",
-                        config.name(),
-                        e
-                    ))
-                })
-            };
-            let artifact_path = [&out_link, &image_type_link]
-                .into_iter()
-                .find(|p| p.exists())
-                .map(|p| resolve(p))
-                .unwrap_or_else(|| {
-                    config
-                        .nix_build(repo_path, &out_link)
-                        .and_then(|_| resolve(&out_link))
-                })?;
-            Ok((
-                config.name().to_string(),
-                artifact_path.to_string_lossy().to_string(),
-            ))
+            let store_path = config.nix_build(repo_path)?;
+            Ok((config.name().to_string(), store_path))
         })
         .collect()
 }

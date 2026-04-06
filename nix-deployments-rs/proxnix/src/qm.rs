@@ -158,48 +158,6 @@ pub fn qm_set_agent(vm_id: u32) -> Result<String> {
     Ok(output_string)
 }
 
-pub fn qm_template(vm_id: u32) -> Result<String> {
-    let qm_template = Command::new("qm")
-        .arg("template")
-        .arg(vm_id.to_string())
-        .output()?;
-    if !qm_template.status.success() {
-        let stderr = String::from_utf8_lossy(&qm_template.stderr);
-        return Err(AppError::CmdError(format!(
-            "qm template has failed with the exit code: {:?}: {}",
-            qm_template.status.code(),
-            stderr
-        )));
-    }
-    let stdout_bytes = qm_template.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
-}
-
-pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String> {
-    let qm_clone = Command::new("qm")
-        .arg("clone")
-        .arg(source_vm_id.to_string())
-        .arg(dest_vm_id.to_string())
-        .arg("--name")
-        .arg(name)
-        .arg("--full")
-        .arg("0")
-        .output()?;
-    if !qm_clone.status.success() {
-        let stderr = String::from_utf8_lossy(&qm_clone.stderr);
-        return Err(AppError::CmdError(format!(
-            "qm clone has failed with the exit code: {:?}: {}",
-            qm_clone.status.code(),
-            stderr
-        )));
-    }
-    let stdout_bytes = qm_clone.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
-}
 
 pub fn qm_start(vm_id: u32) -> Result<bool> {
     let output = Command::new("qm")

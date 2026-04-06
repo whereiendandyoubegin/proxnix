@@ -104,7 +104,6 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
         build_attr,
         nix_dir.display()
     );
-    let result_path = format!("{}/{}/result", repo_path, config_name);
     let nix_build = Command::new("nix")
         .current_dir(nix_dir)
         .arg("build")
@@ -112,8 +111,8 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
             ".#nixosConfigurations.{}.{}",
             config_name, build_attr
         ))
-        .arg("--out-link")
-        .arg(&result_path)
+        .arg("--print-out-paths")
+        .arg("--no-link")
         .output()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
     if !nix_build.status.success() {
@@ -125,9 +124,10 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
             stderr
         )));
     }
-    info!("Nix build succeeded for '{}': {}", config_name, result_path);
+    let store_path = String::from_utf8(nix_build.stdout)?.trim().to_string();
+    info!("Nix build succeeded for '{}': {}", config_name, store_path);
 
-    Ok(result_path)
+    Ok(store_path)
 }
 
 // TODO I need to finish up some utils to initialise this dir on setup. I will probably do a utils module.
