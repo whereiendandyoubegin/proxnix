@@ -104,27 +104,44 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
         build_attr,
         nix_dir.display()
     );
-    let nix_build = Command::new("nix")
+    let installable = format!(".#nixosConfigurations.{}.{}", config_name, build_attr);
+    let build_output = Command::new("nix")
         .current_dir(nix_dir)
         .arg("build")
-        .arg(format!(
-            ".#nixosConfigurations.{}.{}",
-            config_name, build_attr
-        ))
-        .arg("--print-out-paths")
+        .arg(&installable)
         .arg("--no-link")
         .output()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
-    if !nix_build.status.success() {
-        let stderr = String::from_utf8_lossy(&nix_build.stderr);
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
         return Err(AppError::CmdError(format!(
             "Nix build failed for '{}' (exit: {:?}): {}",
             config_name,
-            nix_build.status.code(),
+            build_output.status.code(),
             stderr
         )));
     }
-    let store_path = String::from_utf8(nix_build.stdout)?.trim().to_string();
+
+    let path_output = Command::new("nix")
+        .current_dir(nix_dir)
+        .arg("path-info")
+        .arg(&installable)
+        .output()
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {}", e)))?;
+    if !path_output.status.success() {
+        let stderr = String::from_utf8_lossy(&path_output.stderr);
+        return Err(AppError::CmdError(format!(
+            "nix path-info failed for '{}' (exit: {:?}): {}",
+            config_name,
+            path_output.status.code(),
+            stderr
+        )));
+    }
+    let stdout = String::from_utf8(path_output.stdout)?;
+    let store_path = stdout.lines().find(|l| !l.trim().is_empty())
+        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{}'", config_name)))?
+        .trim()
+        .to_string();
     info!("Nix build succeeded for '{}': {}", config_name, store_path);
 
     Ok(store_path)

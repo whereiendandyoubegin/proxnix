@@ -16,16 +16,28 @@ pub fn nix_store_hash(store_path: &str) -> Option<&str> {
 pub fn build_image_types(
     image_type_attrs: &HashMap<String, String>,
     repo_path: &str,
-) -> Result<HashMap<String, String>> {
-    image_type_attrs
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let results: Vec<(String, Result<String>)> = image_type_attrs
         .par_iter()
-        .map(|(image_type, build_attr)| -> Result<(String, String)> {
+        .map(|(image_type, build_attr)| {
             info!("Building image type '{}' ({})", image_type, build_attr);
-            let store_path = nix_build(image_type, build_attr, repo_path)?;
-            info!("Built '{}' -> {}", image_type, store_path);
-            Ok((image_type.clone(), store_path))
+            let result = nix_build(image_type, build_attr, repo_path);
+            match &result {
+                Ok(path) => info!("Built '{}' -> {}", image_type, path),
+                Err(e) => warn!("Failed to build image type '{}': {}", image_type, e),
+            }
+            (image_type.clone(), result)
         })
-        .collect::<Result<HashMap<_, _>>>()
+        .collect();
+
+    let built = results.iter()
+        .filter_map(|(k, v)| v.as_ref().ok().map(|p| (k.clone(), p.clone())))
+        .collect();
+    let errors = results.iter()
+        .filter_map(|(k, v)| v.as_ref().err().map(|e| (k.clone(), e.to_string())))
+        .collect();
+
+    (built, errors)
 }
 
 pub fn ensure_vms_running(repo_path: &str) {

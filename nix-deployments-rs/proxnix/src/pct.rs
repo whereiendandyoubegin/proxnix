@@ -6,7 +6,8 @@ use std::process::Command;
 // for use with pct create (e.g. "local:vztmpl/nixos-image-lxc-....tar.xz")
 pub fn copy_to_template_storage(result_path: &str) -> Result<String> {
     let tarball_dir = std::path::Path::new(result_path).join("tarball");
-    let entry = std::fs::read_dir(&tarball_dir)?
+    let entry = std::fs::read_dir(&tarball_dir)
+        .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", tarball_dir.display(), e)))?
         .filter_map(|e| e.ok())
         .find(|e| e.path().extension().map(|ext| ext == "xz").unwrap_or(false))
         .ok_or_else(|| {
@@ -21,7 +22,8 @@ pub fn copy_to_template_storage(result_path: &str) -> Result<String> {
         .to_string();
 
     let dest = format!("/var/lib/vz/template/cache/{}", filename);
-    std::fs::copy(&src, &dest)?;
+    std::fs::copy(&src, &dest)
+        .map_err(|e| AppError::CmdError(format!("failed to copy {} to {}: {}", src.display(), dest, e)))?;
 
     Ok(format!("local:vztmpl/{}", filename))
 }

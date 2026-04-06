@@ -250,12 +250,13 @@ pub fn reconcile<T: Deployments>(
     configs: &[T],
     image_hashes: &HashMap<String, String>,
     pre_built: &HashMap<String, String>,
+    image_type_errors: &HashMap<String, String>,
     repo_path: &str,
     commit_hash: &str,
 ) -> Result<Vec<Outcome>> {
     let deployed = T::load_deployed()?;
     let actions = plan(configs, &deployed, image_hashes);
-    let (artifacts, build_errors) = build(&actions, pre_built, repo_path);
+    let (artifacts, build_errors) = build(&actions, pre_built, image_type_errors, repo_path);
     Ok(execute(actions, &artifacts, &build_errors, commit_hash))
 }
 
@@ -316,6 +317,7 @@ fn classify<'a, T: Deployments>(
 fn build<T: Deployments>(
     actions: &[Action<'_, T>],
     pre_built: &HashMap<String, String>,
+    image_type_errors: &HashMap<String, String>,
     repo_path: &str,
 ) -> (HashMap<String, String>, HashMap<String, String>) {
     let results: HashMap<String, Result<String>> = actions
@@ -327,7 +329,14 @@ fn build<T: Deployments>(
         .map(|config| {
             let result = match pre_built.get(config.image_type()) {
                 Some(path) => Ok(path.clone()),
-                None => config.nix_build(repo_path),
+                None => match image_type_errors.get(config.image_type()) {
+                    Some(err) => Err(AppError::CmdError(format!(
+                        "image type '{}' failed to build: {}",
+                        config.image_type(),
+                        err
+                    ))),
+                    None => config.nix_build(repo_path),
+                },
             };
             (config.name().to_string(), result)
         })
