@@ -27,6 +27,7 @@ impl WorkloadGroup {
     pub fn new<T: Deployments + 'static>(configs: Vec<T>) -> Self {
         let image_type_attrs = configs
             .iter()
+            .filter(|c| !c.impure())
             .map(|c| (c.image_type().to_string(), c.nix_build_attr().to_string()))
             .collect();
         Self {

@@ -51,6 +51,7 @@ pub struct VMConfig {
     pub scsi_hw: String,
     #[serde(default = "default_disk_slot")]
     pub disk_slot: String,
+    pub impure: bool,
 }
 
 impl Workload for VMConfig {
@@ -97,6 +98,7 @@ pub struct ContainerConfig {
     pub bind_mounts: Vec<BindMount>,
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
+    pub impure: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]

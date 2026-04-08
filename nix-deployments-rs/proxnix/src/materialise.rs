@@ -32,13 +32,17 @@ fn find_flake_dir(repo_path: &str) -> Result<PathBuf> {
         .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))
 }
 
-fn run_nix_build(nix_dir: &Path, installable: &str) -> Result<String> {
+fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<String> {
     info!("Running nix build '{}' in {}", installable, nix_dir.display());
-    let build_output = Command::new("nix")
-        .current_dir(nix_dir)
+    let mut cmd = Command::new("nix");
+    cmd.current_dir(nix_dir)
         .arg("build")
         .arg(installable)
-        .arg("--no-link")
+        .arg("--no-link");
+    if impure {
+        cmd.arg("--impure");
+    }
+    let build_output = cmd
         .output()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
 
@@ -52,10 +56,12 @@ fn run_nix_build(nix_dir: &Path, installable: &str) -> Result<String> {
         )));
     }
 
-    let path_output = Command::new("nix")
-        .current_dir(nix_dir)
-        .arg("path-info")
-        .arg(installable)
+    let mut path_cmd = Command::new("nix");
+    path_cmd.current_dir(nix_dir).arg("path-info").arg(installable);
+    if impure {
+        path_cmd.arg("--impure");
+    }
+    let path_output = path_cmd
         .output()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {}", e)))?;
     if !path_output.status.success() {
@@ -80,12 +86,13 @@ fn run_nix_build(nix_dir: &Path, installable: &str) -> Result<String> {
 pub trait Materialise {
     fn name(&self) -> &str;
     fn nix_build_attr(&self) -> &str;
+    fn impure(&self) -> bool;
     fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()>;
 
     fn nix_build(&self, repo_path: &str) -> Result<String> {
         let nix_dir = find_flake_dir(repo_path)?;
         let installable = flake_installable(self.name(), self.nix_build_attr());
-        run_nix_build(&nix_dir, &installable)
+        run_nix_build(&nix_dir, &installable, self.impure())
     }
 }
 
@@ -95,6 +102,9 @@ impl Materialise for VMConfig {
     }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.qcow2"
+    }
+    fn impure(&self) -> bool {
+        self.impure
     }
     fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()> {
         let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
@@ -119,6 +129,9 @@ impl Materialise for ContainerConfig {
     }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.tarball"
+    }
+    fn impure(&self) -> bool {
+        self.impure
     }
     fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()> {
         let ostemplate = copy_to_template_storage(artifact_path)?;

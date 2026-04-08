@@ -256,8 +256,55 @@ pub fn reconcile<T: Deployments>(
 ) -> Result<Vec<Outcome>> {
     let deployed = T::load_deployed()?;
     let actions = plan(configs, &deployed, image_hashes);
-    let (artifacts, build_errors) = build(&actions, pre_built, image_type_errors, repo_path);
-    Ok(execute(actions, &artifacts, &build_errors, commit_hash))
+    Ok(actions.into_par_iter().map(|action| match action {
+        Action::Create { config } => {
+            let result = config.pre_check()
+                .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
+                .and_then(|p| config.provision(&p, commit_hash))
+                .and_then(|_| config.post_check())
+                .and_then(|_| config.health_check());
+            Outcome::new(config.name(), OutcomeKind::Created, result)
+        }
+        Action::Rebuild { config, deployed_id, .. } => {
+            let result = config.pre_check()
+                .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
+                .and_then(|p| do_rebuild::<T>(config, deployed_id, &p, commit_hash))
+                .and_then(|_| config.post_check())
+                .and_then(|_| config.health_check());
+            Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
+        }
+        Action::UpdateInPlace { config, changes } => {
+            let result = config.pre_check()
+                .and_then(|_| config.apply_in_place(&changes))
+                .and_then(|_| config.post_check())
+                .and_then(|_| config.health_check());
+            Outcome::new(config.name(), OutcomeKind::Updated, result)
+        }
+        Action::Destroy { name, id } => {
+            Outcome::new(&name, OutcomeKind::Destroyed, T::stop(&id).and_then(|_| T::destroy(id)))
+        }
+        Action::Skip { name, reason } => Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(())),
+        Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
+    }).collect())
+}
+
+fn get_artifact<T: Deployments>(
+    config: &T,
+    pre_built: &HashMap<String, String>,
+    image_type_errors: &HashMap<String, String>,
+    repo_path: &str,
+) -> Result<String> {
+    match pre_built.get(config.image_type()) {
+        Some(path) => Ok(path.clone()),
+        None => match image_type_errors.get(config.image_type()) {
+            Some(err) => Err(AppError::CmdError(format!(
+                "image type '{}' failed to build: {}",
+                config.image_type(),
+                err
+            ))),
+            None => config.nix_build(repo_path),
+        },
+    }
 }
 
 fn plan<'a, T: Deployments>(
@@ -314,44 +361,6 @@ fn classify<'a, T: Deployments>(
     }
 }
 
-fn build<T: Deployments>(
-    actions: &[Action<'_, T>],
-    pre_built: &HashMap<String, String>,
-    image_type_errors: &HashMap<String, String>,
-    repo_path: &str,
-) -> (HashMap<String, String>, HashMap<String, String>) {
-    let results: HashMap<String, Result<String>> = actions
-        .par_iter()
-        .filter_map(|action| match action {
-            Action::Create { config } | Action::Rebuild { config, .. } => Some(config),
-            _ => None,
-        })
-        .map(|config| {
-            let result = match pre_built.get(config.image_type()) {
-                Some(path) => Ok(path.clone()),
-                None => match image_type_errors.get(config.image_type()) {
-                    Some(err) => Err(AppError::CmdError(format!(
-                        "image type '{}' failed to build: {}",
-                        config.image_type(),
-                        err
-                    ))),
-                    None => config.nix_build(repo_path),
-                },
-            };
-            (config.name().to_string(), result)
-        })
-        .collect();
-
-    let artifacts = results.iter()
-        .filter_map(|(k, v)| v.as_ref().ok().map(|p| (k.clone(), p.clone())))
-        .collect();
-    let errors = results.iter()
-        .filter_map(|(k, v)| v.as_ref().err().map(|e| (k.clone(), e.to_string())))
-        .collect();
-
-    (artifacts, errors)
-}
-
 fn do_rebuild<T: Deployments>(
     config: &T,
     deployed_id: u32,
@@ -363,73 +372,3 @@ fn do_rebuild<T: Deployments>(
     config.provision(artifact_path, commit_hash)
 }
 
-fn execute<T: Deployments>(
-    actions: Vec<Action<'_, T>>,
-    artifacts: &HashMap<String, String>,
-    build_errors: &HashMap<String, String>,
-    commit_hash: &str,
-) -> Vec<Outcome> {
-    actions
-        .into_par_iter()
-        .map(|action| match action {
-            Action::Create { config } => {
-                let result = config.pre_check()
-                    .and_then(|_| {
-                        if let Some(e) = build_errors.get(config.name()) {
-                            return Err(AppError::CmdError(e.clone()));
-                        }
-                        artifacts
-                            .get(config.name())
-                            .map(|p| config.provision(p, commit_hash))
-                            .unwrap_or_else(|| {
-                                Err(AppError::CmdError(format!(
-                                    "no artifact built for {}",
-                                    config.name()
-                                )))
-                            })
-                    })
-                    .and_then(|_| config.post_check())
-                    .and_then(|_| config.health_check());
-                Outcome::new(config.name(), OutcomeKind::Created, result)
-            }
-            Action::Rebuild {
-                config,
-                deployed_id,
-                changes: _,
-            } => {
-                let result = config.pre_check()
-                    .and_then(|_| {
-                        if let Some(e) = build_errors.get(config.name()) {
-                            return Err(AppError::CmdError(e.clone()));
-                        }
-                        artifacts
-                            .get(config.name())
-                            .map(|p| do_rebuild::<T>(config, deployed_id, p, commit_hash))
-                            .unwrap_or_else(|| {
-                                Err(AppError::CmdError(format!(
-                                    "no artifact built for {}",
-                                    config.name()
-                                )))
-                            })
-                    })
-                    .and_then(|_| config.post_check())
-                    .and_then(|_| config.health_check());
-                Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
-            }
-            Action::UpdateInPlace { config, changes } => {
-                let result = config.pre_check()
-                    .and_then(|_| config.apply_in_place(&changes))
-                    .and_then(|_| config.post_check())
-                    .and_then(|_| config.health_check());
-                Outcome::new(config.name(), OutcomeKind::Updated, result)
-            }
-            Action::Destroy { name, id } => {
-                Outcome::new(&name, OutcomeKind::Destroyed, T::stop(&id).and_then(|_| T::destroy(id)))
-            }
-            Action::Skip { name, reason } => {
-                Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(()))
-            }
-            Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
-        })
-        .collect()
-}
