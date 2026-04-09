@@ -530,21 +530,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix-deployments-rs"
-version = "0.1.0"
-dependencies = [
- "axum",
- "git2",
- "rayon",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -617,6 +602,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proxnix"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "git2",
+ "proxnix-core",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "proxnix-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

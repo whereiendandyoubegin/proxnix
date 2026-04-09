@@ -1,4 +1,4 @@
-use crate::types::{AppError, FieldChange, Result, VMConfig, VMUpdate};
+use crate::types::{AppError, FieldChange, Result, VMConfig};
 use std::process::Command;
 
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
@@ -15,7 +15,7 @@ pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result
         .arg("--net0")
         .arg(format!("virtio,bridge={}", config.network_bridge))
         .arg("--scsihw")
-        .arg(config.scsi_hw.to_string())
+        .arg(&config.scsi_hw)
         .arg("--tags")
         .arg(format!("proxnix;nix-{};commit-{}", nix_hash, commit_hash))
         .output()?;
@@ -33,7 +33,7 @@ pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result
     Ok(output_string)
 }
 
-pub fn qm_stop(vm_id: &u32) -> Result<String> {
+pub fn qm_stop(vm_id: &u32) -> Result<()> {
     let qm_stop = Command::new("qm")
         .arg("stop")
         .arg(vm_id.to_string())
@@ -41,7 +41,7 @@ pub fn qm_stop(vm_id: &u32) -> Result<String> {
     if !qm_stop.status.success() {
         let stderr = String::from_utf8_lossy(&qm_stop.stderr);
         if stderr.contains("not running") {
-            return Ok(String::new());
+            return Ok(());
         }
         return Err(AppError::CmdError(format!(
             "qm stop has failed with exit code: {:?}: {}",
@@ -49,10 +49,7 @@ pub fn qm_stop(vm_id: &u32) -> Result<String> {
             stderr
         )));
     }
-    let stdout_bytes = qm_stop.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
+    Ok(())
 }
 
 // Parses output like: "Successfully imported disk as 'unused0:local-lvm:vm-100-disk-1'"
@@ -72,7 +69,7 @@ fn parse_importdisk_output(output: &str) -> Result<String> {
             // Output is like: "unused0:local-lvm:vm-100-disk-0"
             // Strip the "unusedN:" prefix to get just "local-lvm:vm-100-disk-0"
             let full_ref = &line[start + 1..end];
-            let disk_ref = full_ref.splitn(2, ':').nth(1)?.to_string();
+            let disk_ref = full_ref.split_once(':')?.1.to_string();
             Some(disk_ref)
         })
         .ok_or_else(|| {
@@ -89,8 +86,8 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
     let qm_importdisk = Command::new("qm")
         .arg("importdisk")
         .arg(vm_id.to_string())
-        .arg(qcow_path.to_string())
-        .arg(storage.to_string())
+        .arg(qcow_path)
+        .arg(storage)
         .arg("--format=raw")
         .output()?;
     if !qm_importdisk.status.success() {
@@ -161,48 +158,6 @@ pub fn qm_set_agent(vm_id: u32) -> Result<String> {
     Ok(output_string)
 }
 
-pub fn qm_template(vm_id: u32) -> Result<String> {
-    let qm_template = Command::new("qm")
-        .arg("template")
-        .arg(vm_id.to_string())
-        .output()?;
-    if !qm_template.status.success() {
-        let stderr = String::from_utf8_lossy(&qm_template.stderr);
-        return Err(AppError::CmdError(format!(
-            "qm template has failed with the exit code: {:?}: {}",
-            qm_template.status.code(),
-            stderr
-        )));
-    }
-    let stdout_bytes = qm_template.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
-}
-
-pub fn qm_clone(source_vm_id: u32, dest_vm_id: u32, name: &str) -> Result<String> {
-    let qm_clone = Command::new("qm")
-        .arg("clone")
-        .arg(source_vm_id.to_string())
-        .arg(dest_vm_id.to_string())
-        .arg("--name")
-        .arg(name.to_string())
-        .arg("--full")
-        .arg("0")
-        .output()?;
-    if !qm_clone.status.success() {
-        let stderr = String::from_utf8_lossy(&qm_clone.stderr);
-        return Err(AppError::CmdError(format!(
-            "qm clone has failed with the exit code: {:?}: {}",
-            qm_clone.status.code(),
-            stderr
-        )));
-    }
-    let stdout_bytes = qm_clone.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
-}
 
 pub fn qm_start(vm_id: u32) -> Result<bool> {
     let output = Command::new("qm")
@@ -224,7 +179,7 @@ pub fn qm_start(vm_id: u32) -> Result<bool> {
     Ok(true)
 }
 
-pub fn qm_destroy(vm_id: u32) -> Result<String> {
+pub fn qm_destroy(vm_id: u32) -> Result<()> {
     let qm_destroy = Command::new("qm")
         .arg("destroy")
         .arg(vm_id.to_string())
@@ -237,10 +192,7 @@ pub fn qm_destroy(vm_id: u32) -> Result<String> {
             stderr
         )));
     }
-    let stdout_bytes = qm_destroy.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
+    Ok(())
 }
 
 pub fn qm_resize(vm_id: u32, disk_slot: &str, size_gb: u32) -> Result<String> {
@@ -262,27 +214,27 @@ pub fn qm_resize(vm_id: u32, disk_slot: &str, size_gb: u32) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-pub fn qm_set_resources(vm_id: u32, update: &VMUpdate) -> Result<String> {
+pub fn qm_set_resources(vm_id: u32, config: &VMConfig, changes: &[FieldChange]) -> Result<()> {
     let mut qm_set_resources = Command::new("qm");
     qm_set_resources.arg("set");
     qm_set_resources.arg(vm_id.to_string());
 
-    for field in &update.changed_fields {
+    for field in changes {
         match field {
             FieldChange::Memory => {
                 qm_set_resources
                     .arg("--memory")
-                    .arg(update.config.memory_mb.to_string());
+                    .arg(config.memory_mb.to_string());
             }
             FieldChange::Cores => {
                 qm_set_resources
                     .arg("--cores")
-                    .arg(update.config.cores.to_string());
+                    .arg(config.cores.to_string());
             }
             FieldChange::Sockets => {
                 qm_set_resources
                     .arg("--sockets")
-                    .arg(update.config.sockets.to_string());
+                    .arg(config.sockets.to_string());
             }
             _ => {}
         }
@@ -296,7 +248,5 @@ pub fn qm_set_resources(vm_id: u32, update: &VMUpdate) -> Result<String> {
             stderr
         )));
     }
-    let output_string = String::from_utf8(output.stdout)?;
-
-    Ok(output_string)
+    Ok(())
 }

@@ -1,5 +1,9 @@
+use proxnix_core::Workload;
 use std::{collections::HashMap, string::FromUtf8Error};
 
+use crate::pipeline::WorkloadGroup;
+
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("Git has failed, error: {0}")]
@@ -40,7 +44,6 @@ pub struct VMConfig {
     pub memory_mb: u32,
     pub storage_location: String,
     pub disk_gb: u32,
-    pub cloud_init: CloudInit,
     pub protected: bool,
     #[serde(default = "default_network_bridge")]
     pub network_bridge: String,
@@ -48,6 +51,22 @@ pub struct VMConfig {
     pub scsi_hw: String,
     #[serde(default = "default_disk_slot")]
     pub disk_slot: String,
+    pub impure: bool,
+}
+
+impl Workload for VMConfig {
+    fn id(&self) -> u32 {
+        self.vm_id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn memory_mb(&self) -> u32 {
+        self.memory_mb
+    }
+    fn cores(&self) -> u16 {
+        self.cores
+    }
 }
 
 // Defaults for VMConfig
@@ -64,9 +83,47 @@ fn default_disk_slot() -> String {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum CloudInit {
-    None,
-    StorageReference(String),
+pub struct ContainerConfig {
+    pub name: String,
+    pub ct_id: u32,
+    pub image_type: String,
+    pub cores: u16,
+    pub memory_mb: u32,
+    pub storage_location: String,
+    pub disk_gb: u32,
+    pub protected: bool,
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(default)]
+    pub bind_mounts: Vec<BindMount>,
+    #[serde(default = "default_container_network_bridge")]
+    pub network_bridge: String,
+    pub impure: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub struct BindMount {
+    pub host_path: String,
+    pub container_path: String,
+}
+
+impl Workload for ContainerConfig {
+    fn id(&self) -> u32 {
+        self.ct_id
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn memory_mb(&self) -> u32 {
+        self.memory_mb
+    }
+    fn cores(&self) -> u16 {
+        self.cores
+    }
+}
+
+fn default_container_network_bridge() -> String {
+    "vmbr0".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -91,6 +148,19 @@ pub struct DeployedVM {
     pub pid: u32,
     pub cores: u16,
     pub sockets: u8,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DeployedContainer {
+    pub ct_id: u32,
+    pub ct_name: String,
+    pub nix_hash: Option<String>,
+    pub mem_mb: u32,
+    pub bootdisk_gb: f64,
+    pub status: String,
+    pub cores: u16,
+    pub privileged: bool,
+    pub bind_mounts: Vec<BindMount>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -155,33 +225,33 @@ impl Default for QMConfig {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DesiredState {
     pub vms: HashMap<String, VMConfig>,
+    #[serde(default)]
+    pub containers: HashMap<String, ContainerConfig>,
+}
+
+impl DesiredState {
+    pub fn into_workload_groups(self) -> Vec<WorkloadGroup> {
+        vec![
+            WorkloadGroup::new(self.vms.into_values().collect()),
+            WorkloadGroup::new(self.containers.into_values().collect()),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeployedState {
     pub vms: HashMap<String, DeployedVM>,
+    pub containers: HashMap<String, DeployedContainer>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct StateDiff {
-    pub to_create: Vec<VMConfig>,
-    pub to_update: Vec<VMUpdate>,
-    pub to_delete: Vec<DeployedVM>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct VMUpdate {
-    pub name: String,
-    pub config: VMConfig,
-    pub changed_fields: Vec<FieldChange>,
-    pub required_action: UpdateAction,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum UpdateAction {
-    InPlace,
-    Rebuild,
-    Protected,
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub enum ContainerFieldChange {
+    Memory,
+    Cores,
+    Image,
+    Privileged,
+    BindMounts,
+    Disk,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -193,6 +263,27 @@ pub enum FieldChange {
     Image,
 }
 
+#[derive(Debug)]
+pub struct ParsedWebhook {
+    pub repository: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum SkipReason {
+    Protected,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub enum OutcomeKind {
+    Created,
+    Rebuilt,
+    Updated,
+    Destroyed,
+    Skipped(SkipReason),
+    NoOp,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum RebuildStrategy {
     Rebuild,
@@ -200,9 +291,19 @@ pub enum RebuildStrategy {
     Protected,
 }
 
-#[derive(Debug)]
-pub struct ParsedWebhook {
-    pub repository: String,
-    pub hash: String,
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Outcome {
+    pub name: String,
+    pub kind: OutcomeKind,
+    pub error: Option<String>,
 }
 
+impl Outcome {
+    pub fn new(name: &str, kind: OutcomeKind, result: Result<()>) -> Self {
+        Self {
+            name: name.to_string(),
+            kind,
+            error: result.err().map(|e| e.to_string()),
+        }
+    }
+}

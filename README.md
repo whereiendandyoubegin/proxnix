@@ -1,4 +1,5 @@
 # Proxnix
+## A function taking a git repo as an argument, returning a fully managed proxmox cluster
 
 Proxnix is a GitOps state controller written in Rust for the Proxmox platform. It is similar in principle to ArgoCD but for Proxmox VMs rather than Kubernetes. Push to git and your VMs converge to match.
 

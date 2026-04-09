@@ -1,0 +1,2 @@
+error: unrecognised flag '-100'
+Try '/run/current-system/sw/bin/nix --help' for more information.

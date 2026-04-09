@@ -1,12 +1,14 @@
+use crate::pct::{pct_config, pct_list};
 use crate::types::{
-    AppError, DeployedState, DeployedVM, DesiredState, FieldChange, QMConfig, QMList, Result,
-    StateDiff, UpdateAction, VMConfig, VMUpdate,
+    AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState, QMConfig,
+    QMList, Result,
 };
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::process::Command;
 
-pub fn parse_vm_config(json: &str) -> Result<DesiredState> {
-    let state: DesiredState = serde_json::from_str(&json)?;
+pub fn parse_config(json: &str) -> Result<DesiredState> {
+    let state: DesiredState = serde_json::from_str(json)?;
     Ok(state)
 }
 
@@ -101,7 +103,7 @@ pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
 }
 
 pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
-    let lines = output_string
+    output_string
         .lines()
         .skip(1)
         .map(|line| -> Result<QMList> {
@@ -125,46 +127,53 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
                 pid: col(5)?.parse()?,
             })
         })
-        .collect();
-
-    lines
+        .collect()
 }
 
 pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
-    let mut deployedvms = HashMap::new();
-    for (_name, vm) in deployed.vms {
-        let config = qm_config(vm.vm_id)?;
-        let parsed = parse_qm_config(&config)?;
-        let is_proxnix = parsed
-            .tags
-            .as_deref()
-            .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-            .unwrap_or(false);
-        if !is_proxnix {
-            continue;
-        }
-        let nix_hash = parsed.tags.as_deref().and_then(|t| {
-            t.split(';')
-                .find(|tag| tag.trim().starts_with("nix-"))
-                .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
-        });
-        deployedvms.insert(
-            vm.vm_name.clone(),
-            DeployedVM {
-                vm_id: vm.vm_id,
-                vm_name: vm.vm_name,
-                nix_hash,
-                template_id: vm.template_id,
-                mem_mb: vm.mem_mb,
-                bootdisk_gb: vm.bootdisk_gb,
-                status: vm.status,
-                pid: vm.pid,
-                cores: parsed.cores as u16,
-                sockets: parsed.sockets,
-            },
-        );
-    }
-    Ok(DeployedState { vms: deployedvms })
+    let DeployedState { vms, containers } = deployed;
+    let deployedvms = vms
+        .into_par_iter()
+        .map(|(_name, vm)| -> Result<Option<(String, DeployedVM)>> {
+            let config = qm_config(vm.vm_id)?;
+            let parsed = parse_qm_config(&config)?;
+            let is_proxnix = parsed
+                .tags
+                .as_deref()
+                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+                .unwrap_or(false);
+            if !is_proxnix {
+                return Ok(None);
+            }
+            let nix_hash = parsed.tags.as_deref().and_then(|t| {
+                t.split(';')
+                    .find(|tag| tag.trim().starts_with("nix-"))
+                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+            });
+            Ok(Some((
+                vm.vm_name.clone(),
+                DeployedVM {
+                    vm_id: vm.vm_id,
+                    vm_name: vm.vm_name,
+                    nix_hash,
+                    template_id: vm.template_id,
+                    mem_mb: vm.mem_mb,
+                    bootdisk_gb: vm.bootdisk_gb,
+                    status: vm.status,
+                    pid: vm.pid,
+                    cores: parsed.cores as u16,
+                    sockets: parsed.sockets,
+                },
+            )))
+        })
+        .collect::<Result<Vec<Option<_>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(DeployedState {
+        vms: deployedvms,
+        containers,
+    })
 }
 
 pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
@@ -189,76 +198,11 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
         })
         .collect();
 
-    DeployedState { vms: lists }
-}
-
-
-pub fn diff_state(deployed: &DeployedState, desired: &DesiredState, image_hashes: &HashMap<String, String>) -> StateDiff {
-    let mut to_create: Vec<VMConfig> = Vec::new();
-    let mut to_update: Vec<VMUpdate> = Vec::new();
-    let mut to_delete: Vec<DeployedVM> = Vec::new();
-
-    for (name, vmconfig) in &desired.vms {
-        let mut changes = Vec::new();
-
-        if deployed.vms.contains_key(name) {
-            let deployed_vm = deployed.vms.get(name).unwrap();
-            if vmconfig.memory_mb != deployed_vm.mem_mb {
-                changes.push(FieldChange::Memory);
-            }
-            if vmconfig.disk_gb > deployed_vm.bootdisk_gb.round() as u32 {
-                changes.push(FieldChange::Disk);
-            }
-            if vmconfig.cores != deployed_vm.cores {
-                changes.push(FieldChange::Cores);
-            }
-            if vmconfig.sockets != deployed_vm.sockets {
-                changes.push(FieldChange::Sockets);
-            }
-            let desired_nix_hash = image_hashes.get(&vmconfig.image_type).map(|s| s.as_str());
-            if desired_nix_hash
-                .zip(deployed_vm.nix_hash.as_deref())
-                .map(|(desired, deployed)| desired != deployed)
-                .unwrap_or(true)
-            {
-                changes.push(FieldChange::Image);
-            }
-            if !changes.is_empty() {
-                let action = if vmconfig.protected {
-                    UpdateAction::Protected
-                } else if changes.contains(&FieldChange::Disk)
-                    || changes.contains(&FieldChange::Image)
-                {
-                    UpdateAction::Rebuild
-                } else {
-                    UpdateAction::InPlace
-                };
-
-                to_update.push(VMUpdate {
-                    name: name.clone(),
-                    config: vmconfig.clone(),
-                    changed_fields: changes,
-                    required_action: action,
-                });
-            }
-        } else {
-            to_create.push(vmconfig.clone())
-        }
-    }
-
-    for (name, deployed_vm) in &deployed.vms {
-        if !desired.vms.contains_key(name) {
-            to_delete.push(deployed_vm.clone())
-        }
-    }
-
-    StateDiff {
-        to_create,
-        to_update,
-        to_delete,
+    DeployedState {
+        vms: lists,
+        containers: HashMap::new(),
     }
 }
-
 
 pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     let raw = qm_list()?;
@@ -266,21 +210,153 @@ pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
     Ok(parsed.into_iter().map(|q| (q.vm_id, q.status)).collect())
 }
 
-pub fn load_state() -> Result<DeployedState> {
-    let qm_list = qm_list()?;
-    let parsed_qm_list = parse_qm_list(&qm_list)?;
-    let deployed_vm = list_to_deployed_vm(parsed_qm_list);
-    let enriched = enrich_cpu_info(deployed_vm)?;
-
-    Ok(enriched)
+pub fn get_container_statuses() -> Result<HashMap<u32, String>> {
+    let raw = pct_list()?;
+    let parsed = parse_pct_list(&raw)?;
+    Ok(parsed.into_iter().map(|e| (e.ct_id, e.status)).collect())
 }
 
+pub(crate) struct PctListEntry {
+    ct_id: u32,
+    status: String,
+    ct_name: String,
+}
 
-pub fn full_diff(desired: &DesiredState, image_hashes: &HashMap<String, String>) -> Result<StateDiff> {
-    let deployed = load_state()?;
-    let diff = diff_state(&deployed, &desired, image_hashes);
+struct PctConfigData {
+    hostname: String,
+    memory_mb: u32,
+    cores: u16,
+    rootfs_gb: f64,
+    tags: Option<String>,
+    unprivileged: bool,
+    bind_mounts: Vec<BindMount>,
+}
 
-    Ok(diff)
+pub fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
+    output
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                return Err(AppError::ParsingModuleError(format!(
+                    "pct list line has fewer columns than expected: '{}'",
+                    line
+                )));
+            }
+            Ok(PctListEntry {
+                ct_id: parts[0].parse()?,
+                status: parts[1].to_string(),
+                ct_name: parts.last().unwrap().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_pct_config(output: &str) -> Result<PctConfigData> {
+    let mut hostname = String::new();
+    let mut memory_mb = 0u32;
+    let mut cores = 0u16;
+    let mut rootfs_gb = 0.0f64;
+    let mut tags: Option<String> = None;
+    let mut unprivileged = false;
+    let mut bind_mounts: Vec<BindMount> = Vec::new();
+
+    for line in output.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            let value = value.trim();
+            match key {
+                "hostname" => hostname = value.to_string(),
+                "memory" => memory_mb = value.parse()?,
+                "cores" => cores = value.parse()?,
+                "unprivileged" => unprivileged = value.trim() == "1",
+                "rootfs" => {
+                    // Format: "local-lvm:vm-200-disk-0,size=8G"
+                    if let Some(size_part) =
+                        value.split(',').find(|s| s.trim().starts_with("size="))
+                    {
+                        let size_str = size_part.trim().trim_start_matches("size=");
+                        if let Some(gb) = size_str.strip_suffix('G') {
+                            rootfs_gb = gb.parse().unwrap_or(0.0);
+                        } else if let Some(mb) = size_str.strip_suffix('M') {
+                            rootfs_gb = mb.parse::<f64>().unwrap_or(0.0) / 1024.0;
+                        }
+                    }
+                }
+                "tags" => tags = Some(value.to_string()),
+                k if k.starts_with("mp") && k[2..].parse::<u32>().is_ok() => {
+                    // Format: "/host/path,mp=/container/path"
+                    let parts: Vec<&str> = value.split(',').collect();
+                    if let (Some(host_path), Some(mp_part)) = (
+                        parts.first(),
+                        parts.iter().find(|p| p.trim().starts_with("mp=")),
+                    ) {
+                        let container_path = mp_part.trim().trim_start_matches("mp=");
+                        bind_mounts.push(BindMount {
+                            host_path: host_path.to_string(),
+                            container_path: container_path.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(PctConfigData {
+        hostname,
+        memory_mb,
+        cores,
+        rootfs_gb,
+        tags,
+        unprivileged,
+        bind_mounts,
+    })
+}
+
+pub fn enrich_container_info(
+    entries: Vec<PctListEntry>,
+) -> Result<HashMap<String, DeployedContainer>> {
+    let result = entries
+        .into_par_iter()
+        .map(|entry| -> Result<Option<(String, DeployedContainer)>> {
+            let config_raw = pct_config(entry.ct_id)?;
+            let config = parse_pct_config(&config_raw)?;
+            let is_proxnix = config
+                .tags
+                .as_deref()
+                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+                .unwrap_or(false);
+            if !is_proxnix {
+                return Ok(None);
+            }
+            let nix_hash = config.tags.as_deref().and_then(|t| {
+                t.split(';')
+                    .find(|tag| tag.trim().starts_with("nix-"))
+                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+            });
+            Ok(Some((
+                entry.ct_name.clone(),
+                DeployedContainer {
+                    ct_id: entry.ct_id,
+                    ct_name: entry.ct_name,
+                    nix_hash,
+                    mem_mb: config.memory_mb,
+                    bootdisk_gb: config.rootfs_gb,
+                    status: entry.status,
+                    cores: config.cores,
+                    bind_mounts: config.bind_mounts,
+                    privileged: !config.unprivileged,
+                },
+            )))
+        })
+        .collect::<Result<Vec<Option<_>>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(result)
 }
 
 #[cfg(test)]

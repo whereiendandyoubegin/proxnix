@@ -36,7 +36,7 @@ pub fn find_in_repo(repo_path: &str, filename: &str) -> Result<String> {
     }
 }
 
-pub fn eval_vm_config(repo_path: &str) -> Result<String> {
+pub fn eval_config(repo_path: &str) -> Result<String> {
     let flake_path = find_in_repo(repo_path, "flake.nix")?;
     let nix_dir = Path::new(&flake_path)
         .parent()
@@ -92,41 +92,59 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
     Ok(parsed)
 }
 
-pub fn nix_build(config_name: &str, repo_path: &str) -> Result<String> {
+pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result<String> {
     let flake_path = find_in_repo(repo_path, "flake.nix")?;
     let nix_dir = Path::new(&flake_path)
         .parent()
         .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
 
     info!(
-        "Running nix build for config '{}' in {}",
+        "Running nix build for config '{}' ({}) in {}",
         config_name,
+        build_attr,
         nix_dir.display()
     );
-    let result_path = format!("{}/{}/result", repo_path, config_name);
-    let nix_build = Command::new("nix")
+    let installable = format!(".#nixosConfigurations.{}.{}", config_name, build_attr);
+    let build_output = Command::new("nix")
         .current_dir(nix_dir)
         .arg("build")
-        .arg(format!(
-            ".#nixosConfigurations.{}.config.system.build.qcow2",
-            config_name
-        ))
-        .arg("--out-link")
-        .arg(&result_path)
+        .arg(&installable)
+        .arg("--no-link")
         .output()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
-    if !nix_build.status.success() {
-        let stderr = String::from_utf8_lossy(&nix_build.stderr);
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
         return Err(AppError::CmdError(format!(
             "Nix build failed for '{}' (exit: {:?}): {}",
             config_name,
-            nix_build.status.code(),
+            build_output.status.code(),
             stderr
         )));
     }
-    info!("Nix build succeeded for '{}': {}", config_name, result_path);
 
-    Ok(result_path)
+    let path_output = Command::new("nix")
+        .current_dir(nix_dir)
+        .arg("path-info")
+        .arg(&installable)
+        .output()
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {}", e)))?;
+    if !path_output.status.success() {
+        let stderr = String::from_utf8_lossy(&path_output.stderr);
+        return Err(AppError::CmdError(format!(
+            "nix path-info failed for '{}' (exit: {:?}): {}",
+            config_name,
+            path_output.status.code(),
+            stderr
+        )));
+    }
+    let stdout = String::from_utf8(path_output.stdout)?;
+    let store_path = stdout.lines().find(|l| !l.trim().is_empty())
+        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{}'", config_name)))?
+        .trim()
+        .to_string();
+    info!("Nix build succeeded for '{}': {}", config_name, store_path);
+
+    Ok(store_path)
 }
 
 // TODO I need to finish up some utils to initialise this dir on setup. I will probably do a utils module.
