@@ -21,6 +21,7 @@ mod parsing;
 mod pct;
 mod pipeline;
 mod qm;
+mod sozu;
 mod state;
 mod types;
 

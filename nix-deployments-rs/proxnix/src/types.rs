@@ -38,6 +38,8 @@ pub type Result<T> = std::result::Result<T, AppError>;
 pub struct VMConfig {
     pub name: String,
     pub vm_id: u32,
+    pub ip: String,
+    pub proxy_port: u32,
     pub image_type: String,
     pub cores: u16,
     pub sockets: u8,
@@ -85,6 +87,9 @@ fn default_disk_slot() -> String {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ContainerConfig {
     pub name: String,
+    pub ip: String,
+    pub proxy_port: u32,
+    pub hostname: String,
     pub ct_id: u32,
     pub image_type: String,
     pub cores: u16,
