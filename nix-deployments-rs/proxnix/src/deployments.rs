@@ -256,36 +256,50 @@ pub fn reconcile<T: Deployments>(
 ) -> Result<Vec<Outcome>> {
     let deployed = T::load_deployed()?;
     let actions = plan(configs, &deployed, image_hashes);
-    Ok(actions.into_par_iter().map(|action| match action {
-        Action::Create { config } => {
-            let result = config.pre_check()
-                .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
-                .and_then(|p| config.provision(&p, commit_hash))
-                .and_then(|_| config.post_check())
-                .and_then(|_| config.health_check());
-            Outcome::new(config.name(), OutcomeKind::Created, result)
-        }
-        Action::Rebuild { config, deployed_id, .. } => {
-            let result = config.pre_check()
-                .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
-                .and_then(|p| do_rebuild::<T>(config, deployed_id, &p, commit_hash))
-                .and_then(|_| config.post_check())
-                .and_then(|_| config.health_check());
-            Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
-        }
-        Action::UpdateInPlace { config, changes } => {
-            let result = config.pre_check()
-                .and_then(|_| config.apply_in_place(&changes))
-                .and_then(|_| config.post_check())
-                .and_then(|_| config.health_check());
-            Outcome::new(config.name(), OutcomeKind::Updated, result)
-        }
-        Action::Destroy { name, id } => {
-            Outcome::new(&name, OutcomeKind::Destroyed, T::stop(&id).and_then(|_| T::destroy(id)))
-        }
-        Action::Skip { name, reason } => Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(())),
-        Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
-    }).collect())
+    Ok(actions
+        .into_par_iter()
+        .map(|action| match action {
+            Action::Create { config } => {
+                let result = config
+                    .pre_check()
+                    .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
+                    .and_then(|p| config.provision(&p, commit_hash))
+                    .and_then(|_| config.post_check())
+                    .and_then(|_| config.health_check());
+                Outcome::new(config.name(), OutcomeKind::Created, result)
+            }
+            Action::Rebuild {
+                config,
+                deployed_id,
+                ..
+            } => {
+                let result = config
+                    .pre_check()
+                    .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
+                    .and_then(|p| do_rebuild::<T>(config, deployed_id, &p, commit_hash))
+                    .and_then(|_| config.post_check())
+                    .and_then(|_| config.health_check());
+                Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
+            }
+            Action::UpdateInPlace { config, changes } => {
+                let result = config
+                    .pre_check()
+                    .and_then(|_| config.apply_in_place(&changes))
+                    .and_then(|_| config.post_check())
+                    .and_then(|_| config.health_check());
+                Outcome::new(config.name(), OutcomeKind::Updated, result)
+            }
+            Action::Destroy { name, id } => Outcome::new(
+                &name,
+                OutcomeKind::Destroyed,
+                T::stop(&id).and_then(|_| T::destroy(id)),
+            ),
+            Action::Skip { name, reason } => {
+                Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(()))
+            }
+            Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
+        })
+        .collect())
 }
 
 fn get_artifact<T: Deployments>(
@@ -371,4 +385,3 @@ fn do_rebuild<T: Deployments>(
     T::destroy(deployed_id)?;
     config.provision(artifact_path, commit_hash)
 }
-

@@ -30,6 +30,12 @@ pub enum AppError {
     Git2Error(#[from] git2::Error),
     #[error("Parsing module error: {0}")]
     ParsingModuleError(String),
+    #[error("Sozu error: {0}")]
+    SozuError(String),
+    #[error("Sozu channel error: {0}")]
+    ChannelError(#[from] sozu_command_lib::channel::ChannelError),
+    #[error("Error parsing addr: {0}")]
+    AddrParseErr(#[from] std::net::AddrParseError),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
