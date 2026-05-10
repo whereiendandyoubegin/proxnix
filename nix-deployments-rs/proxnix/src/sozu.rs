@@ -1,15 +1,16 @@
 use std::net::Ipv4Addr;
 
+use axum::extract::RawQuery;
 use sozu_command_lib::{
     channel::{Channel, ChannelError},
     proto::command::{
         AddBackend, Cluster, IpAddress, RemoveBackend, Request, RequestHttpFrontend, Response,
-        SocketAddress, request::RequestType,
+        ResponseStatus, SocketAddress, request::RequestType,
     },
     response::Backend,
 };
 
-use crate::types::{ContainerConfig, Result, VMConfig};
+use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 
 pub trait Proxied {
     fn ip(&self) -> Result<IpAddress>;
@@ -75,7 +76,7 @@ impl SozuClient {
         Ok(Self { channel })
     }
 
-    pub fn ensure_cluster<T: Proxied>(&mut self, config: T) -> Result<()> {
+    pub fn ensure_cluster<T: Proxied>(&mut self, config: &T) -> Result<()> {
         self.channel.write_message(
             &RequestType::AddCluster(Cluster {
                 cluster_id: config.cluster_id().to_string(),
@@ -122,5 +123,18 @@ impl SozuClient {
         )?;
         let response = self.channel.read_message()?;
         Ok(())
+    }
+    pub fn check_sozu_cluster<T: Proxied>(&mut self, config: &T) -> Result<()> {
+        self.channel.write_message(
+            &RequestType::QueryClusterById(config.cluster_id().to_string()).into(),
+        )?;
+        let response = self.channel.read_message()?;
+        let parsed = ResponseStatus::from_i32(response.status)
+            .ok_or(AppError::SozuError("invalid status".to_string()))?;
+        match parsed {
+            ResponseStatus::Ok => Ok(()),
+            ResponseStatus::Failure => self.ensure_cluster(config),
+            _ => { None }.ok_or(AppError::SozuError("invalid_status".to_string()))?,
+        }
     }
 }

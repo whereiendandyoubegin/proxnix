@@ -2,6 +2,7 @@ use crate::{
     materialise::Materialise,
     pct::{pct_destroy, pct_list, pct_set_resources, pct_start, pct_stop},
     qm::{qm_destroy, qm_set_resources, qm_start, qm_stop},
+    sozu::{Proxied, SozuClient},
     state::{
         enrich_container_info, enrich_cpu_info, list_to_deployed_vm, parse_pct_list, parse_qm_list,
         qm_list,
