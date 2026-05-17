@@ -4,7 +4,6 @@ use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{error, info, warn};
 
-use crate::nix::eval_appconfig;
 use crate::state::parse_appconfig;
 use crate::types::AppConfig;
 
@@ -91,9 +90,8 @@ async fn main() {
         )
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let nixos_config_path = args.get(1).expect("Usage: proxnix <nixos-config-path>");
-    let appconfig_json = eval_appconfig(nixos_config_path).expect("Failed to eval appconfig");
+    let appconfig_json = std::fs::read_to_string("/etc/proxnix/config.json")
+        .expect("Failed to read /etc/proxnix/config.json");
     let appconfig = parse_appconfig(&appconfig_json).expect("Failed to parse appconfig");
     let server_address = appconfig.server_address;
 
