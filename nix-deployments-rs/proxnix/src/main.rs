@@ -1,15 +1,18 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-use std::env;
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{error, info, warn};
 
+use crate::nix::eval_appconfig;
+use crate::state::parse_appconfig;
+use crate::types::AppConfig;
+
 #[derive(Clone)]
 struct AppState {
     semaphore: Arc<Semaphore>,
     last_repo: Arc<RwLock<Option<(String, String)>>>,
+    appconfig: AppConfig,
 }
 
 mod build;
@@ -57,12 +60,13 @@ async fn webhook_handler(
         *guard = Some((git_repo_url.clone(), current_git_commit.clone()));
     }
 
+    let appconfig = state.appconfig.clone();
     tokio::task::spawn_blocking(move || {
         info!(
             "Pipeline started for repo: {}, commit: {}",
             git_repo_url, current_git_commit
         );
-        match pipeline::run_pipeline(&git_repo_url, &current_git_commit) {
+        match pipeline::run_pipeline(&git_repo_url, &current_git_commit, &appconfig) {
             Ok(_) => info!(
                 "Pipeline finished for repo: {}, commit: {}",
                 git_repo_url, current_git_commit
@@ -78,19 +82,8 @@ async fn webhook_handler(
     StatusCode::OK
 }
 
-fn init() {
-    fs::create_dir_all("/var/lib/proxnix").expect("Failed to create /var/lib/proxnix");
-    println!("Init complete");
-}
-
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.get(1).map(|s| s.as_str()) == Some("--init") {
-        init();
-        return;
-    }
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -98,10 +91,17 @@ async fn main() {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().collect();
+    let nixos_config_path = args.get(1).expect("Usage: proxnix <nixos-config-path>");
+    let appconfig_json = eval_appconfig(nixos_config_path).expect("Failed to eval appconfig");
+    let appconfig = parse_appconfig(&appconfig_json).expect("Failed to parse appconfig");
+    let server_address = appconfig.server_address;
+
     let last_repo = Arc::new(RwLock::new(None));
     let app_state = AppState {
         semaphore: Arc::new(Semaphore::new(1)),
         last_repo,
+        appconfig,
     };
 
     let periodic_state = app_state.clone();
@@ -136,7 +136,7 @@ async fn main() {
         .route("/whlisten", post(webhook_handler))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:6780").await.unwrap();
-    info!("Listening on 0.0.0.0:6780");
+    let listener = tokio::net::TcpListener::bind(server_address).await.unwrap();
+    info!("Listening on {}", server_address);
     axum::serve(listener, app).await.unwrap_or_default()
 }

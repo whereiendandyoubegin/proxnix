@@ -4,7 +4,7 @@ use std::process::Command;
 // Finds the .tar.xz inside the nix build result tarball directory,
 // copies it to Proxmox template storage, and returns the storage reference
 // for use with pct create (e.g. "local:vztmpl/nixos-image-lxc-....tar.xz")
-pub fn copy_to_template_storage(result_path: &str) -> Result<String> {
+pub fn copy_to_template_storage(result_path: &str, template_cache_path: &str) -> Result<String> {
     let tarball_dir = std::path::Path::new(result_path).join("tarball");
     let entry = std::fs::read_dir(&tarball_dir)
         .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", tarball_dir.display(), e)))?
@@ -21,7 +21,7 @@ pub fn copy_to_template_storage(result_path: &str) -> Result<String> {
         .to_string_lossy()
         .to_string();
 
-    let dest = format!("/var/lib/vz/template/cache/{}", filename);
+    let dest = format!("{}{}", template_cache_path, filename);
     std::fs::copy(&src, &dest)
         .map_err(|e| AppError::CmdError(format!("failed to copy {} to {}: {}", src.display(), dest, e)))?;
 

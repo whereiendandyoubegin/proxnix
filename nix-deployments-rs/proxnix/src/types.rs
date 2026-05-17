@@ -45,6 +45,7 @@ pub struct VMConfig {
     pub name: String,
     pub vm_id: u32,
     pub ip: String,
+    pub hostname: String,
     pub proxy_port: u32,
     pub image_type: String,
     pub cores: u16,
@@ -174,6 +175,7 @@ pub struct DeployedContainer {
     pub bind_mounts: Vec<BindMount>,
 }
 
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct QMConfig {
     pub agent: String,
@@ -231,6 +233,25 @@ impl Default for QMConfig {
             vmgenid: Default::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AppConfig {
+    #[serde(default = "default_sozu_socket_path")]
+    pub sozu_socket_path: String,
+    #[serde(default)]
+    pub ssh_key_candidates: Vec<String>,
+    #[serde(default = "default_template_cache_path")]
+    pub template_cache_path: String,
+    pub server_address: std::net::SocketAddr,
+}
+
+fn default_sozu_socket_path() -> String {
+    "/run/sozu/command.sock".to_string()
+}
+
+fn default_template_cache_path() -> String {
+    "/var/lib/vz/template/cache/".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

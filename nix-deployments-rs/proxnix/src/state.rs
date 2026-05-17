@@ -1,7 +1,7 @@
 use crate::pct::{pct_config, pct_list};
 use crate::types::{
-    AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState, QMConfig,
-    QMList, Result,
+    AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
+    QMConfig, QMList, Result,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -10,6 +10,11 @@ use std::process::Command;
 pub fn parse_config(json: &str) -> Result<DesiredState> {
     let state: DesiredState = serde_json::from_str(json)?;
     Ok(state)
+}
+
+pub fn parse_appconfig(json: &str) -> Result<AppConfig> {
+    let appconfig: AppConfig = serde_json::from_str(json)?;
+    Ok(appconfig)
 }
 
 pub fn qm_list() -> Result<String> {

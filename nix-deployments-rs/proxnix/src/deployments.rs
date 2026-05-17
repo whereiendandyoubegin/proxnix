@@ -1,4 +1,5 @@
 use crate::{
+    build::nix_store_hash,
     materialise::Materialise,
     pct::{pct_destroy, pct_list, pct_set_resources, pct_start, pct_stop},
     qm::{qm_destroy, qm_set_resources, qm_start, qm_stop},
@@ -69,7 +70,7 @@ impl Dangerous for VMConfig {}
 
 impl Dangerous for ContainerConfig {}
 
-pub trait Deployments: Dangerous + Materialise + Sized + Send + Sync {
+pub trait Deployments: Dangerous + Materialise + Sized + Send + Sync + Proxied {
     type Deployed: DeployedState + Send + Sync;
     type FieldChange: PartialEq + Clone + Send + Sync;
 
@@ -228,6 +229,7 @@ enum Action<'a, T: Deployments> {
         config: &'a T,
         deployed_id: u32,
         changes: Vec<T::FieldChange>,
+        old_nix_hash: Option<&'a str>,
     },
     UpdateInPlace {
         config: &'a T,
@@ -246,7 +248,6 @@ enum Action<'a, T: Deployments> {
     },
 }
 
-// State refresh and reconcile pipeline
 pub fn reconcile<T: Deployments>(
     configs: &[T],
     image_hashes: &HashMap<String, String>,
@@ -254,6 +255,8 @@ pub fn reconcile<T: Deployments>(
     image_type_errors: &HashMap<String, String>,
     repo_path: &str,
     commit_hash: &str,
+    template_cache_path: &str,
+    sozu_socket_path: &str,
 ) -> Result<Vec<Outcome>> {
     let deployed = T::load_deployed()?;
     let actions = plan(configs, &deployed, image_hashes);
@@ -261,25 +264,44 @@ pub fn reconcile<T: Deployments>(
         .into_par_iter()
         .map(|action| match action {
             Action::Create { config } => {
-                let result = config
-                    .pre_check()
-                    .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
-                    .and_then(|p| config.provision(&p, commit_hash))
-                    .and_then(|_| config.post_check())
-                    .and_then(|_| config.health_check());
+                let result = (|| -> Result<()> {
+                    config.pre_check()?;
+                    let p = get_artifact(config, pre_built, image_type_errors, repo_path)?;
+                    let nix_hash = nix_store_hash(&p)
+                        .ok_or_else(|| AppError::CmdError("could not get nix hash".to_string()))?;
+                    let backend_id = format!("{}-{}", config.name(), nix_hash);
+                    config.provision(&p, commit_hash, template_cache_path)?;
+                    config.post_check()?;
+                    config.health_check()?;
+                    let mut sozu = SozuClient::connect(sozu_socket_path)?;
+                    sozu.check_sozu_cluster(config)?.register_backend(config, &backend_id)?;
+                    Ok(())
+                })();
                 Outcome::new(config.name(), OutcomeKind::Created, result)
             }
             Action::Rebuild {
                 config,
                 deployed_id,
+                old_nix_hash,
                 ..
             } => {
-                let result = config
-                    .pre_check()
-                    .and_then(|_| get_artifact(config, pre_built, image_type_errors, repo_path))
-                    .and_then(|p| do_rebuild::<T>(config, deployed_id, &p, commit_hash))
-                    .and_then(|_| config.post_check())
-                    .and_then(|_| config.health_check());
+                let result = (|| -> Result<()> {
+                    config.pre_check()?;
+                    let p = get_artifact(config, pre_built, image_type_errors, repo_path)?;
+                    let new_hash = nix_store_hash(&p)
+                        .ok_or_else(|| AppError::CmdError("could not get nix hash".to_string()))?;
+                    let new_backend_id = format!("{}-{}", config.name(), new_hash);
+                    do_rebuild::<T>(config, deployed_id, &p, commit_hash, template_cache_path)?;
+                    config.post_check()?;
+                    config.health_check()?;
+                    let mut sozu = SozuClient::connect(sozu_socket_path)?;
+                    sozu.register_backend(config, &new_backend_id)?;
+                    if let Some(old_hash) = old_nix_hash {
+                        let old_backend_id = format!("{}-{}", config.name(), old_hash);
+                        sozu.remove_backend(config, &old_backend_id)?;
+                    }
+                    Ok(())
+                })();
                 Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
             }
             Action::UpdateInPlace { config, changes } => {
@@ -290,11 +312,14 @@ pub fn reconcile<T: Deployments>(
                     .and_then(|_| config.health_check());
                 Outcome::new(config.name(), OutcomeKind::Updated, result)
             }
-            Action::Destroy { name, id } => Outcome::new(
-                &name,
-                OutcomeKind::Destroyed,
-                T::stop(&id).and_then(|_| T::destroy(id)),
-            ),
+            Action::Destroy { name, id } => {
+                let result = (|| -> Result<()> {
+                    SozuClient::connect(sozu_socket_path)?.remove_cluster(&name)?;
+                    T::stop(&id)?;
+                    T::destroy(id)
+                })();
+                Outcome::new(&name, OutcomeKind::Destroyed, result)
+            }
             Action::Skip { name, reason } => {
                 Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(()))
             }
@@ -324,7 +349,7 @@ fn get_artifact<T: Deployments>(
 
 fn plan<'a, T: Deployments>(
     configs: &'a [T],
-    deployed: &HashMap<String, T::Deployed>,
+    deployed: &'a HashMap<String, T::Deployed>,
     image_hashes: &HashMap<String, String>,
 ) -> Vec<Action<'a, T>> {
     let desired: HashSet<&str> = configs.iter().map(|c| c.name()).collect();
@@ -346,7 +371,7 @@ fn plan<'a, T: Deployments>(
 
 fn classify<'a, T: Deployments>(
     config: &'a T,
-    deployed: &HashMap<String, T::Deployed>,
+    deployed: &'a HashMap<String, T::Deployed>,
     image_hashes: &HashMap<String, String>,
 ) -> Action<'a, T> {
     let Some(d) = deployed.get(config.name()) else {
@@ -371,6 +396,7 @@ fn classify<'a, T: Deployments>(
             config,
             deployed_id: d.id(),
             changes,
+            old_nix_hash: d.nix_hash(),
         },
         (_, false, _) => Action::UpdateInPlace { config, changes },
     }
@@ -381,8 +407,9 @@ fn do_rebuild<T: Deployments>(
     deployed_id: u32,
     artifact_path: &str,
     commit_hash: &str,
+    template_cache_path: &str,
 ) -> Result<()> {
     T::stop(&deployed_id)?;
     T::destroy(deployed_id)?;
-    config.provision(artifact_path, commit_hash)
+    config.provision(artifact_path, commit_hash, template_cache_path)
 }

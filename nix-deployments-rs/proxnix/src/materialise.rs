@@ -87,7 +87,7 @@ pub trait Materialise {
     fn name(&self) -> &str;
     fn nix_build_attr(&self) -> &str;
     fn impure(&self) -> bool;
-    fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()>;
+    fn provision(&self, artifact_path: &str, commit_hash: &str, template_cache_path: &str) -> Result<()>;
 
     fn nix_build(&self, repo_path: &str) -> Result<String> {
         let nix_dir = find_flake_dir(repo_path)?;
@@ -106,7 +106,7 @@ impl Materialise for VMConfig {
     fn impure(&self) -> bool {
         self.impure
     }
-    fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()> {
+    fn provision(&self, artifact_path: &str, commit_hash: &str, _template_cache_path: &str) -> Result<()> {
         let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
             AppError::CmdError(format!("could not extract nix hash from path {}", artifact_path))
         })?;
@@ -133,8 +133,8 @@ impl Materialise for ContainerConfig {
     fn impure(&self) -> bool {
         self.impure
     }
-    fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()> {
-        let ostemplate = copy_to_template_storage(artifact_path)?;
+    fn provision(&self, artifact_path: &str, commit_hash: &str, template_cache_path: &str) -> Result<()> {
+        let ostemplate = copy_to_template_storage(artifact_path, template_cache_path)?;
         let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
             AppError::CmdError(format!("could not extract nix hash from path {}", artifact_path))
         })?;

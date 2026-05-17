@@ -9,11 +9,11 @@ use crate::{
     git::git_ensure_commit,
     nix::{BASE_REPO_PATH, eval_config},
     state::parse_config,
-    types::{Outcome, Result},
+    types::{AppConfig, Outcome, Result},
 };
 
 type ReconcileFn = Box<
-    dyn Fn(&HashMap<String, String>, &HashMap<String, String>, &HashMap<String, String>, &str, &str) -> Result<Vec<Outcome>>
+    dyn Fn(&HashMap<String, String>, &HashMap<String, String>, &HashMap<String, String>, &str, &str, &str, &str) -> Result<Vec<Outcome>>
         + Send
         + Sync,
 >;
@@ -32,8 +32,8 @@ impl WorkloadGroup {
             .collect();
         Self {
             image_type_attrs,
-            reconcile_fn: Box::new(move |hashes, pre_built, image_type_errors, repo_path, commit_hash| {
-                deployments::reconcile(&configs, hashes, pre_built, image_type_errors, repo_path, commit_hash)
+            reconcile_fn: Box::new(move |hashes, pre_built, image_type_errors, repo_path, commit_hash, template_cache_path, sozu_socket_path| {
+                deployments::reconcile(&configs, hashes, pre_built, image_type_errors, repo_path, commit_hash, template_cache_path, sozu_socket_path)
             }),
         }
     }
@@ -45,18 +45,20 @@ impl WorkloadGroup {
         image_type_errors: &HashMap<String, String>,
         repo_path: &str,
         commit_hash: &str,
+        template_cache_path: &str,
+        sozu_socket_path: &str,
     ) -> Result<Vec<Outcome>> {
-        (self.reconcile_fn)(hashes, pre_built, image_type_errors, repo_path, commit_hash)
+        (self.reconcile_fn)(hashes, pre_built, image_type_errors, repo_path, commit_hash, template_cache_path, sozu_socket_path)
     }
 }
 
-pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
+pub fn run_pipeline(repo_url: &str, commit_hash: &str, app_config: &AppConfig) -> Result<()> {
     let dest_path = format!("{}/{}", BASE_REPO_PATH, commit_hash);
     info!(
         "Cloning {} at commit {} to {}",
         repo_url, commit_hash, dest_path
     );
-    git_ensure_commit(repo_url, &dest_path, commit_hash)?;
+    git_ensure_commit(repo_url, &dest_path, commit_hash, &app_config.ssh_key_candidates)?;
     let groups = parse_config(&eval_config(&dest_path)?)?.into_workload_groups();
     let image_type_attrs: HashMap<String, String> = groups
         .iter()
@@ -70,7 +72,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str) -> Result<()> {
     let outcomes: Vec<Outcome> = groups
         .par_iter()
         .flat_map(
-            |g: &WorkloadGroup| match g.reconcile(&image_hashes, &built, &image_type_errors, &dest_path, commit_hash) {
+            |g: &WorkloadGroup| match g.reconcile(&image_hashes, &built, &image_type_errors, &dest_path, commit_hash, &app_config.template_cache_path, &app_config.sozu_socket_path) {
                 Ok(o) => o,
                 Err(e) => {
                     warn!("Reconcile failed: {}", e);
