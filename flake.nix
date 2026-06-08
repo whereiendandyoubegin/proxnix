@@ -3,9 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixology.url = "git+ssh://git@ssh.dan-gilmour.com:2222/dan/nixology.git";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, nixology }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -16,6 +17,7 @@
         cargoLock.lockFile = ./nix-deployments-rs/Cargo.lock;
         nativeBuildInputs = [ pkgs.pkg-config ];
         buildInputs = [ pkgs.openssl pkgs.libgit2 ];
+        PROXNIX_NIXOLOGY_PATH = "${nixology}";
       };
       proxnixPkg = pkgs.rustPlatform.buildRustPackage commonAttrs;
 
@@ -56,7 +58,7 @@
 
         [Service]
         Type=simple
-        ExecStartPre=${proxnixPkg}/bin/proxnix --init
+        Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
         ExecStart=${proxnixPkg}/bin/proxnix
         Restart=always
         RestartSec=5
@@ -71,9 +73,9 @@
           echo "Installing proxnix and sozu..."
 
           mkdir -p /etc/sozu
-          cp ${sozuConfig} /etc/sozu/config.toml
-          cp ${sozuUnit}   /etc/systemd/system/sozu.service
-          cp ${proxnixUnit} /etc/systemd/system/proxnix.service
+          cp ${sozuConfig}  /etc/sozu/config.toml
+          cp ${sozuUnit}    /etc/systemd/system/sozu.service
+          cp ${proxnixUnit}  /etc/systemd/system/proxnix.service
 
           systemctl daemon-reload
           systemctl enable --now sozu
