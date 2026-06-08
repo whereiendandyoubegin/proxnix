@@ -90,8 +90,8 @@ async fn main() {
         )
         .init();
 
-    let appconfig_json = std::fs::read_to_string("/etc/proxnix/config.json")
-        .expect("Failed to read /etc/proxnix/config.json");
+    let nixology_path = option_env!("PROXNIX_NIXOLOGY_PATH").unwrap_or("/root/nixology");
+    let appconfig_json = nix::eval_appconfig(nixology_path).expect("Failed to eval appconfig");
     let appconfig = parse_appconfig(&appconfig_json).expect("Failed to parse appconfig");
     let server_address = appconfig.server_address;
 

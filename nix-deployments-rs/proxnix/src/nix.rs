@@ -36,6 +36,25 @@ pub fn find_in_repo(repo_path: &str, filename: &str) -> Result<String> {
     }
 }
 
+pub fn eval_appconfig(nixology_path: &str) -> Result<String> {
+    let installable = format!("{}#proxnixcfg", nixology_path);
+    let nix_eval = Command::new("nix")
+        .arg("eval")
+        .arg(&installable)
+        .arg("--json")
+        .output()
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
+    if !nix_eval.status.success() {
+        let stderr = String::from_utf8_lossy(&nix_eval.stderr);
+        return Err(AppError::CmdError(format!(
+            "Nix eval failed (exit: {:?}): {}",
+            nix_eval.status.code(),
+            stderr
+        )));
+    }
+    Ok(String::from_utf8(nix_eval.stdout)?)
+}
+
 pub fn eval_config(repo_path: &str) -> Result<String> {
     let flake_path = find_in_repo(repo_path, "flake.nix")?;
     let nix_dir = Path::new(&flake_path)
