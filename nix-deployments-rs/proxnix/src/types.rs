@@ -61,6 +61,9 @@ pub struct VMConfig {
     #[serde(default = "default_disk_slot")]
     pub disk_slot: String,
     pub impure: bool,
+    pub blue_ip: String,
+    pub green_ip: String,
+    pub active_slot: proxnix_core::Slot,
 }
 
 impl Workload for VMConfig {
@@ -75,6 +78,12 @@ impl Workload for VMConfig {
     }
     fn cores(&self) -> u16 {
         self.cores
+    }
+    fn ip_for_slot(&self, s: proxnix_core::Slot) -> &str {
+        match s {
+            proxnix_core::Slot::Blue => &self.blue_ip,
+            proxnix_core::Slot::Green => &self.green_ip,
+        }
     }
 }
 
@@ -111,6 +120,9 @@ pub struct ContainerConfig {
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
     pub impure: bool,
+    pub blue_ip: String,
+    pub green_ip: String,
+    pub active_slot: proxnix_core::Slot,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -132,6 +144,12 @@ impl Workload for ContainerConfig {
     fn cores(&self) -> u16 {
         self.cores
     }
+    fn ip_for_slot(&self, s: proxnix_core::Slot) -> &str {
+        match s {
+            proxnix_core::Slot::Blue => &self.blue_ip,
+            proxnix_core::Slot::Green => &self.green_ip,
+        }
+    }
 }
 
 fn default_container_network_bridge() -> String {
@@ -148,6 +166,10 @@ pub struct QMList {
     pub pid: u32,
 }
 
+fn default_slot() -> proxnix_core::Slot {
+    proxnix_core::Slot::Blue
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeployedVM {
     pub vm_id: u32,
@@ -160,6 +182,8 @@ pub struct DeployedVM {
     pub pid: u32,
     pub cores: u16,
     pub sockets: u8,
+    #[serde(default = "default_slot")]
+    pub active_slot: proxnix_core::Slot,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -173,8 +197,9 @@ pub struct DeployedContainer {
     pub cores: u16,
     pub privileged: bool,
     pub bind_mounts: Vec<BindMount>,
+    #[serde(default = "default_slot")]
+    pub active_slot: proxnix_core::Slot,
 }
-
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct QMConfig {

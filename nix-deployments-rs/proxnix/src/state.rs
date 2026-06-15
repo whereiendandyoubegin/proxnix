@@ -3,6 +3,7 @@ use crate::types::{
     AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
     QMConfig, QMList, Result,
 };
+use proxnix_core::Slot;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::process::Command;
@@ -168,6 +169,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
                     pid: vm.pid,
                     cores: parsed.cores as u16,
                     sockets: parsed.sockets,
+                    active_slot: vm.active_slot,
                 },
             )))
         })
@@ -198,6 +200,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                     pid: qmlist.pid,
                     cores: 0,   //placeholder
                     sockets: 0, //placeholder
+                    active_slot: Slot::Blue,
                 },
             )
         })
@@ -354,6 +357,7 @@ pub fn enrich_container_info(
                     cores: config.cores,
                     bind_mounts: config.bind_mounts,
                     privileged: !config.unprivileged,
+                    active_slot: Slot::Blue,
                 },
             )))
         })

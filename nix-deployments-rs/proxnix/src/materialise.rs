@@ -1,4 +1,5 @@
 use crate::nix::find_in_repo;
+use proxnix_core::Workload;
 use crate::pct::{copy_to_template_storage, pct_create, pct_start};
 use crate::qm::{qm_create, qm_importdisk, qm_resize, qm_set_agent, qm_set_disk, qm_start};
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
@@ -83,11 +84,11 @@ fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<Stri
 
 // --- Trait ---
 
-pub trait Materialise {
-    fn name(&self) -> &str;
+pub trait Materialise: Workload {
     fn nix_build_attr(&self) -> &str;
     fn impure(&self) -> bool;
     fn provision(&self, artifact_path: &str, commit_hash: &str, template_cache_path: &str) -> Result<()>;
+    fn provision_inactive(&self, artifact_path: &str, commit_hash: &str, template_cache_path: &str) -> Result<()>;
 
     fn nix_build(&self, repo_path: &str) -> Result<String> {
         let nix_dir = find_flake_dir(repo_path)?;
@@ -97,16 +98,20 @@ pub trait Materialise {
 }
 
 impl Materialise for VMConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.qcow2"
     }
     fn impure(&self) -> bool {
         self.impure
     }
-    fn provision(&self, artifact_path: &str, commit_hash: &str, _template_cache_path: &str) -> Result<()> {
+    fn provision(&self, artifact_path: &str, commit_hash: &str, template_cache_path: &str) -> Result<()> {
+        self.provision_inactive(artifact_path, commit_hash, template_cache_path)?;
+        qm_start(self.vm_id)?;
+        info!("VM {} started", self.name);
+        Ok(())
+    }
+
+    fn provision_inactive(&self, artifact_path: &str, commit_hash: &str, _template_cache_path: &str) -> Result<()> {
         let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
             AppError::CmdError(format!("could not extract nix hash from path {}", artifact_path))
         })?;
@@ -116,17 +121,12 @@ impl Materialise for VMConfig {
         qm_set_disk(self.vm_id, &disk_ref, &self.disk_slot)?;
         qm_set_agent(self.vm_id)?;
         qm_resize(self.vm_id, &self.disk_slot, self.disk_gb)?;
-        info!("VM {} provisioned successfully, starting", self.name);
-        qm_start(self.vm_id)?;
-        info!("VM {} started", self.name);
+        info!("VM {} provisioned successfully, not starting", self.name);
         Ok(())
     }
 }
 
 impl Materialise for ContainerConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.tarball"
     }
@@ -134,14 +134,20 @@ impl Materialise for ContainerConfig {
         self.impure
     }
     fn provision(&self, artifact_path: &str, commit_hash: &str, template_cache_path: &str) -> Result<()> {
+        self.provision_inactive(artifact_path, commit_hash, template_cache_path)?;
+        pct_start(self.ct_id)?;
+        info!("Container {} started", self.name);
+        Ok(())
+    }
+
+    fn provision_inactive(&self, artifact_path: &str, commit_hash: &str, template_cache_path: &str) -> Result<()> {
         let ostemplate = copy_to_template_storage(artifact_path, template_cache_path)?;
         let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
             AppError::CmdError(format!("could not extract nix hash from path {}", artifact_path))
         })?;
         info!("Provisioning container {} (id: {})", self.name, self.ct_id);
         pct_create(self, &ostemplate, nix_hash, commit_hash)?;
-        pct_start(self.ct_id)?;
-        info!("Container {} started", self.name);
+        info!("Container {} provisioned successfully, not starting", self.name);
         Ok(())
     }
 }

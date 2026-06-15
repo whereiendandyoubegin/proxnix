@@ -33,6 +33,35 @@ pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result
     Ok(output_string)
 }
 
+pub fn qm_get_running_ip(vm_id: &u32) -> Result<String> {
+  let output = Command::new("qm")
+      .arg("agent")
+      .arg(vm_id.to_string())
+      .arg("network-get-interfaces")
+      .output()?;
+  if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(AppError::CmdError(format!(
+          "qm agent network-get-interfaces failed for VM {}: {:?}: {}",
+          vm_id,
+          output.status.code(),
+          stderr
+      )));
+  }
+  let output_string = String::from_utf8(output.stdout)?;
+  let interfaces: serde_json::Value = serde_json::from_str(&output_string)?;
+  interfaces.as_array()
+      .and_then(|arr| arr.iter()
+          .filter(|iface| iface["name"] != "lo")
+          .find_map(|iface| {
+              iface["ip-addresses"].as_array()?.iter()
+                  .find(|addr| addr["ip-address-type"] == "ipv4")
+                  .and_then(|addr| addr["ip-address"].as_str())
+                  .map(|s| s.to_string())
+          }))
+      .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {}", vm_id)))
+}
+
 pub fn qm_stop(vm_id: &u32) -> Result<()> {
     let qm_stop = Command::new("qm")
         .arg("stop")

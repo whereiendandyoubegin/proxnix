@@ -2,8 +2,8 @@ use crate::{
     build::nix_store_hash,
     materialise::Materialise,
     pct::{pct_destroy, pct_list, pct_set_resources, pct_start, pct_stop},
-    qm::{qm_destroy, qm_set_resources, qm_start, qm_stop},
-    sozu::{Proxied, SozuClient},
+    qm::{qm_destroy, qm_get_running_ip, qm_set_resources, qm_start, qm_stop},
+    sozu::{Proxied, SozuClient, WithIp},
     state::{
         enrich_container_info, enrich_cpu_info, list_to_deployed_vm, parse_pct_list, parse_qm_list,
         qm_list,
@@ -13,14 +13,96 @@ use crate::{
         FieldChange, Outcome, OutcomeKind, Result, SkipReason, VMConfig,
     },
 };
+use proxnix_core::{Slot, Workload};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+
+enum Phase {
+    Initial,
+    Provisioned { new_id: u32, new_backend_id: String },
+    Healthy { new_id: u32, new_backend_id: String, new_ip: String },
+    Switched { old_id: u32 },
+}
+
+pub struct DeployContext<'a, T: Deployments> {
+    config: &'a T,
+    deployed_id: u32,
+    active_slot: Slot,
+    old_backend_id: String,
+    old_ip: String,
+    sozu_socket_path: &'a str,
+    artifact: String,
+    commit_hash: &'a str,
+    template_cache_path: &'a str,
+    phase: Phase,
+}
+
+impl<'a, T: Deployments> DeployContext<'a, T>{
+    // Provision the new VM without starting it. Old VM still running.
+    fn provision_inactive(self, new_backend_id: String) -> Result<Self> {
+        self.config.provision_inactive(&self.artifact, self.commit_hash, self.template_cache_path)?;
+        Ok(Self {
+            phase: Phase::Provisioned { new_id: self.config.id(), new_backend_id },
+            ..self
+        })
+    }    
+
+    fn start_and_check(self) -> Result<Self> {
+        let Phase::Provisioned { new_id, new_backend_id } = self.phase else {
+            unreachable!("start_and_check called outside of Provisioned phase")
+        };
+        T::start(new_id)?;
+        let new_ip = T::get_ip(new_id)?;
+        self.config.post_check()?;
+        self.config.health_check()?;
+        Ok(Self {
+            phase: Phase::Healthy { new_id, new_backend_id, new_ip },
+            ..self
+        })
+    }
+
+    fn switch_sozu(self) -> Result<Self> {
+        let Phase::Healthy { ref new_backend_id, ref new_ip, .. } = self.phase else {
+            unreachable!("switch_sozu called outside Healthy phase");
+        };
+        let mut sozu = SozuClient::connect(self.sozu_socket_path)?;
+        sozu.register_backend(&WithIp(self.config, new_ip), new_backend_id)?;
+        sozu.remove_backend(&WithIp(self.config, &self.old_ip), &self.old_backend_id)?;
+        Ok(Self {
+            phase: Phase::Switched { old_id: self.deployed_id },
+            ..self
+        })
+    }
+
+    fn destroy_old(self) -> Result<()> {
+        let Phase::Switched { old_id } = self.phase else {
+            unreachable!("destroy_old called outside Switched phase");
+        };
+        T::stop(&old_id)?;
+        T::destroy(old_id)
+    }
+
+    pub fn run(self) -> Result<()> {
+        let new_hash = nix_store_hash(&self.artifact)
+            .ok_or_else(|| AppError::CmdError("could not get nix hash".to_string()))?;
+        let new_backend_id = format!("{}-{}", self.config.name(), new_hash);
+
+        self.provision_inactive(new_backend_id)?
+            .start_and_check()?
+            .switch_sozu()?
+            .destroy_old()
+    }
+
+
+
+}
 
 pub trait DeployedState {
     fn id(&self) -> u32;
     fn name(&self) -> &str;
     fn nix_hash(&self) -> Option<&str>;
     fn status(&self) -> &str;
+    fn active_slot(&self) -> Slot;
 }
 
 impl DeployedState for DeployedVM {
@@ -36,6 +118,9 @@ impl DeployedState for DeployedVM {
     fn status(&self) -> &str {
         &self.status
     }
+    fn active_slot(&self) -> Slot {
+        self.active_slot
+    }
 }
 
 impl DeployedState for DeployedContainer {
@@ -50,6 +135,9 @@ impl DeployedState for DeployedContainer {
     }
     fn status(&self) -> &str {
         &self.status
+    }
+    fn active_slot(&self) -> Slot {
+        self.active_slot
     }
 }
 
@@ -70,7 +158,7 @@ impl Dangerous for VMConfig {}
 
 impl Dangerous for ContainerConfig {}
 
-pub trait Deployments: Dangerous + Materialise + Sized + Send + Sync + Proxied {
+pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync + Proxied {
     type Deployed: DeployedState + Send + Sync;
     type FieldChange: PartialEq + Clone + Send + Sync;
 
@@ -83,10 +171,10 @@ pub trait Deployments: Dangerous + Materialise + Sized + Send + Sync + Proxied {
     ) -> Vec<Self::FieldChange>;
     fn requires_rebuild(changes: &[Self::FieldChange]) -> bool;
 
-    fn id(&self) -> u32;
     fn image_type(&self) -> &str;
     fn is_protected(&self) -> bool;
 
+    fn get_ip(id: u32) -> Result<String>;
     fn stop(id: &u32) -> Result<()>;
     fn destroy(id: u32) -> Result<()>;
     fn start(id: u32) -> Result<bool>;
@@ -136,14 +224,14 @@ impl Deployments for VMConfig {
             .iter()
             .any(|s| matches!(s, FieldChange::Image | FieldChange::Disk))
     }
-    fn id(&self) -> u32 {
-        self.vm_id
-    }
     fn image_type(&self) -> &str {
         &self.image_type
     }
     fn is_protected(&self) -> bool {
         self.protected
+    }
+    fn get_ip(id: u32) -> Result<String> {
+        qm_get_running_ip(&id)
     }
     fn stop(id: &u32) -> Result<()> {
         qm_stop(id)
@@ -198,14 +286,34 @@ impl Deployments for ContainerConfig {
             .iter()
             .any(|s| matches!(s, ContainerFieldChange::Image | ContainerFieldChange::Disk))
     }
-    fn id(&self) -> u32 {
-        self.ct_id
-    }
     fn image_type(&self) -> &str {
         &self.image_type
     }
     fn is_protected(&self) -> bool {
         self.protected
+    }
+    fn get_ip(id: u32) -> Result<String> {
+        let output = std::process::Command::new("pct")
+            .arg("exec")
+            .arg(id.to_string())
+            .arg("--")
+            .arg("ip").arg("-4").arg("-o").arg("addr").arg("show").arg("eth0")
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AppError::CmdError(format!(
+                "pct exec ip addr failed for container {}: {}",
+                id, stderr
+            )));
+        }
+
+        String::from_utf8(output.stdout)?
+            .split_whitespace()
+            .skip_while(|s| *s != "inet")
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+            .map(|s| s.to_string())
+            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {}", id)))
     }
     fn stop(id: &u32) -> Result<()> {
         pct_stop(id)
@@ -227,6 +335,7 @@ enum Action<'a, T: Deployments> {
     },
     Rebuild {
         config: &'a T,
+        deployed: &'a T::Deployed,
         deployed_id: u32,
         changes: Vec<T::FieldChange>,
         old_nix_hash: Option<&'a str>,
@@ -274,7 +383,8 @@ pub fn reconcile<T: Deployments>(
                     config.post_check()?;
                     config.health_check()?;
                     let mut sozu = SozuClient::connect(sozu_socket_path)?;
-                    sozu.check_sozu_cluster(config)?.register_backend(config, &backend_id)?;
+                    sozu.check_sozu_cluster(config)?
+                        .register_backend(config, &backend_id)?;
                     Ok(())
                 })();
                 Outcome::new(config.name(), OutcomeKind::Created, result)
@@ -394,6 +504,7 @@ fn classify<'a, T: Deployments>(
         },
         (_, true, _) => Action::Rebuild {
             config,
+            deployed: d,
             deployed_id: d.id(),
             changes,
             old_nix_hash: d.nix_hash(),

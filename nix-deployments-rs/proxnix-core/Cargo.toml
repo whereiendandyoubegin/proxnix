@@ -6,3 +6,4 @@ license = "MIT"
 
 [dependencies]
 thiserror = "2.0.17"
+serde = { version = "1.0.228", features = ["derive"] }

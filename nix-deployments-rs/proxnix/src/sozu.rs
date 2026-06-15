@@ -7,6 +7,7 @@ use sozu_command_lib::{
         ResponseStatus, SocketAddress, request::RequestType,
     },
 };
+use tracing::info;
 
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 
@@ -70,6 +71,34 @@ impl Proxied for ContainerConfig {
     }
 }
 
+pub struct WithIp<'a, T: Proxied>(pub &'a T, pub &'a str);
+
+impl<'a, T: Proxied> Proxied for WithIp<'a, T> {
+    fn ip(&self) -> Result<IpAddress> {
+        let parsed: Ipv4Addr = self.1.parse()?;
+        Ok(IpAddress {
+            inner: Some(sozu_command_lib::proto::command::ip_address::Inner::V4(
+                u32::from(parsed),
+            )),
+        })
+    }
+    fn socket_address(&self) -> Result<SocketAddress> {
+        Ok(SocketAddress {
+            ip: self.ip()?,
+            port: self.0.proxy_port(),
+        })
+    }
+    fn proxy_port(&self) -> u32 {
+        self.0.proxy_port()
+    }
+    fn cluster_id(&self) -> &str {
+        self.0.cluster_id()
+    }
+    fn hostname(&self) -> &str {
+        self.0.hostname()
+    }
+}
+
 pub struct SozuClient {
     pub channel: Channel<Request, Response>,
 }
@@ -82,6 +111,7 @@ impl SozuClient {
     }
 
     pub fn ensure_cluster<T: Proxied>(&mut self, config: &T) -> Result<&mut Self> {
+        info!("sozu: adding cluster '{}'", config.cluster_id());
         self.channel.write_message(
             &RequestType::AddCluster(Cluster {
                 cluster_id: config.cluster_id().to_string(),
@@ -99,6 +129,11 @@ impl SozuClient {
             _ => return Err(AppError::SozuError("invalid status".to_string())),
         }
 
+        info!(
+            "sozu: adding http frontend for '{}' -> hostname '{}'",
+            config.cluster_id(),
+            config.hostname()
+        );
         self.channel.write_message(
             &RequestType::AddHttpFrontend(RequestHttpFrontend {
                 cluster_id: Some(config.cluster_id().to_string()),
@@ -123,6 +158,11 @@ impl SozuClient {
         config: &T,
         backend_id: &str,
     ) -> Result<&mut Self> {
+        info!(
+            "sozu: registering backend '{}' for cluster '{}'",
+            backend_id,
+            config.cluster_id()
+        );
         self.channel.write_message(
             &RequestType::AddBackend(AddBackend {
                 cluster_id: config.cluster_id().to_string(),
@@ -142,6 +182,11 @@ impl SozuClient {
         }
     }
     pub fn remove_backend<T: Proxied>(&mut self, config: &T, backend_id: &str) -> Result<()> {
+        info!(
+            "sozu: removing backend '{}' from cluster '{}'",
+            backend_id,
+            config.cluster_id()
+        );
         self.channel.write_message(
             &RequestType::RemoveBackend(RemoveBackend {
                 cluster_id: config.cluster_id().to_string(),
@@ -161,6 +206,7 @@ impl SozuClient {
         }
     }
     pub fn check_sozu_cluster<T: Proxied>(&mut self, config: &T) -> Result<&mut Self> {
+        info!("sozu: checking cluster '{}'", config.cluster_id());
         self.channel.write_message(
             &RequestType::QueryClusterById(config.cluster_id().to_string()).into(),
         )?;
@@ -175,6 +221,7 @@ impl SozuClient {
     }
 
     pub fn remove_cluster(&mut self, cluster_id: &str) -> Result<&mut Self> {
+        info!("sozu: removing cluster '{}'", cluster_id);
         self.channel
             .write_message(&RequestType::RemoveCluster(cluster_id.to_string()).into())?;
         let response = self.channel.read_message()?;
