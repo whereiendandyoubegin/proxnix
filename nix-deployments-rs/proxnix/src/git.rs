@@ -3,8 +3,19 @@ use git2::{FetchOptions, Oid, RemoteCallbacks, Repository, build::RepoBuilder};
 use std::path::Path;
 use tracing::info;
 
+const DEFAULT_KEY_CANDIDATES: &[&str] = &[
+    "/root/.ssh/id_ed25519",
+    "/root/.ssh/id_ecdsa",
+    "/root/.ssh/id_rsa",
+];
+
 fn find_ssh_key(candidates: &[String]) -> Option<String> {
-    candidates.iter().find(|p| Path::new(p.as_str()).exists()).cloned()
+    candidates
+        .iter()
+        .map(|s| s.as_str())
+        .chain(DEFAULT_KEY_CANDIDATES.iter().copied())
+        .find(|p| Path::new(p).exists())
+        .map(|s| s.to_string())
 }
 
 pub fn git_clone(repo_url: &str, dest_path: &str, ssh_key_candidates: &[String]) -> Result<Repository> {
