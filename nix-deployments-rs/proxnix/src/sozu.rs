@@ -72,6 +72,8 @@ impl Proxied for ContainerConfig {
     }
 }
 
+const SOZU_MAX_PROCESSING: u32 = 32;
+
 pub struct SozuClient {
     pub channel: Channel<Request, Response>,
 }
@@ -81,6 +83,32 @@ impl SozuClient {
         let mut channel = Channel::from_path(socket_path, 16384, 163840)?;
         channel.blocking()?;
         Ok(Self { channel })
+    }
+
+    fn settled(&mut self) -> Result<(ResponseStatus, String)> {
+        for _ in 0..SOZU_MAX_PROCESSING {
+            let response = self.channel.read_message()?;
+            match ResponseStatus::try_from(response.status) {
+                Ok(ResponseStatus::Processing) => continue,
+                Ok(status) => return Ok((status, response.message)),
+                Err(_) => {
+                    return Err(AppError::SozuError(format!(
+                        "unrecognised sozu status {}",
+                        response.status
+                    )));
+                }
+            }
+        }
+        Err(AppError::SozuError(
+            "sozu kept reporting Processing without settling".to_string(),
+        ))
+    }
+
+    fn expect_ok(&mut self, what: &str) -> Result<()> {
+        match self.settled()? {
+            (ResponseStatus::Ok, _) => Ok(()),
+            (_, message) => Err(AppError::SozuError(format!("{}: {}", what, message))),
+        }
     }
 
     fn ensure_listener(&mut self, address: SocketAddress) -> Result<()> {
@@ -98,12 +126,11 @@ impl SozuClient {
             })
             .into(),
         )?;
-        let added = self.channel.read_message()?;
-        match ResponseStatus::from_i32(added.status) {
-            Some(ResponseStatus::Ok) => {}
-            _ => info!(
+        match self.settled()? {
+            (ResponseStatus::Ok, _) => {}
+            (_, message) => info!(
                 "sozu: listener not added, assuming it already exists: {}",
-                added.message
+                message
             ),
         }
 
@@ -115,12 +142,11 @@ impl SozuClient {
             })
             .into(),
         )?;
-        let activated = self.channel.read_message()?;
-        match ResponseStatus::from_i32(activated.status) {
-            Some(ResponseStatus::Ok) => {}
-            _ => info!(
+        match self.settled()? {
+            (ResponseStatus::Ok, _) => {}
+            (_, message) => info!(
                 "sozu: listener not activated, assuming it is already active: {}",
-                activated.message
+                message
             ),
         }
         Ok(())
@@ -136,14 +162,7 @@ impl SozuClient {
             .into(),
         )?;
 
-        let response_cluster = self.channel.read_message()?;
-        let parsed = ResponseStatus::from_i32(response_cluster.status)
-            .ok_or(AppError::SozuError("invalid status".to_string()))?;
-        match parsed {
-            ResponseStatus::Ok => {}
-            ResponseStatus::Failure => return Err(AppError::SozuError(response_cluster.message)),
-            _ => return Err(AppError::SozuError("invalid status".to_string())),
-        }
+        self.expect_ok("add cluster")?;
 
         let frontend = config.frontend_address().ok_or_else(|| {
             AppError::SozuError(format!(
@@ -171,14 +190,8 @@ impl SozuClient {
             .into(),
         )?;
 
-        let response_frontend = self.channel.read_message()?;
-        let parsed = ResponseStatus::from_i32(response_frontend.status)
-            .ok_or(AppError::SozuError("invalid status".to_string()))?;
-        match parsed {
-            ResponseStatus::Ok => Ok(self),
-            ResponseStatus::Failure => Err(AppError::SozuError(response_frontend.message)),
-            _ => Err(AppError::SozuError("invalid status".to_string())),
-        }
+        self.expect_ok("add http frontend")?;
+        Ok(self)
     }
 
     pub fn register_backend<T: Proxied>(
@@ -202,14 +215,8 @@ impl SozuClient {
             })
             .into(),
         )?;
-        let response = self.channel.read_message()?;
-        let parsed = ResponseStatus::from_i32(response.status)
-            .ok_or(AppError::SozuError("invalid status".to_string()))?;
-        match parsed {
-            ResponseStatus::Ok => Ok(self),
-            ResponseStatus::Failure => Err(AppError::SozuError(response.message)),
-            _ => Err(AppError::SozuError("invalid status".to_string())),
-        }
+        self.expect_ok("add backend")?;
+        Ok(self)
     }
     pub fn remove_backend<T: Proxied>(
         &mut self,
@@ -232,27 +239,23 @@ impl SozuClient {
             })
             .into(),
         )?;
-        let response = self.channel.read_message()?;
-        let parsed = ResponseStatus::from_i32(response.status)
-            .ok_or(AppError::SozuError("invalid status".to_string()))?;
-        match parsed {
-            ResponseStatus::Ok => Ok(()),
-            ResponseStatus::Failure => Err(AppError::SozuError(response.message)),
-            _ => Err(AppError::SozuError("invalid status".to_string())),
-        }
+        self.expect_ok("remove backend")
     }
     pub fn check_sozu_cluster<T: Proxied>(&mut self, config: &T) -> Result<&mut Self> {
         info!("sozu: checking cluster '{}'", config.cluster_id());
         self.channel.write_message(
             &RequestType::QueryClusterById(config.cluster_id().to_string()).into(),
         )?;
-        let response = self.channel.read_message()?;
-        let parsed = ResponseStatus::from_i32(response.status)
-            .ok_or(AppError::SozuError("invalid status".to_string()))?;
-        match parsed {
-            ResponseStatus::Ok => Ok(self),
-            ResponseStatus::Failure => self.ensure_cluster(config),
-            _ => Err(AppError::SozuError("invalid status".to_string())),
+        match self.settled()? {
+            (ResponseStatus::Ok, _) => Ok(self),
+            (_, message) => {
+                info!(
+                    "sozu: cluster '{}' not present ({}), creating it",
+                    config.cluster_id(),
+                    message
+                );
+                self.ensure_cluster(config)
+            }
         }
     }
 
@@ -260,13 +263,7 @@ impl SozuClient {
         info!("sozu: removing cluster '{}'", cluster_id);
         self.channel
             .write_message(&RequestType::RemoveCluster(cluster_id.to_string()).into())?;
-        let response = self.channel.read_message()?;
-        let parsed = ResponseStatus::from_i32(response.status)
-            .ok_or(AppError::SozuError("invalid status".to_string()))?;
-        match parsed {
-            ResponseStatus::Ok => Ok(self),
-            ResponseStatus::Failure => Err(AppError::SozuError(response.message)),
-            _ => Err(AppError::SozuError("invalid status".to_string())),
-        }
+        self.expect_ok("add backend")?;
+        Ok(self)
     }
 }

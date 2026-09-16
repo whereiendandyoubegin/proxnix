@@ -11,6 +11,7 @@ const IP_POLL_DELAY: Duration = Duration::from_secs(2);
 const HEALTH_ATTEMPTS: u32 = 30;
 const HEALTH_DELAY: Duration = Duration::from_secs(2);
 const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const PROGRESS_EVERY: u32 = 5;
 
 use crate::{
     context::{BackendId, BackendPool, NixHash, ReconcileContext, StorePath, Tags},
@@ -128,6 +129,12 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     fn provision_inactive(self) -> Result<Self> {
         let target = self.config.id_for_slot(self.new_slot);
         let new_backend_id = BackendId::new(self.config.name(), &self.tags.nix_hash);
+        info!(
+            "[{}] provisioning {:?} as {} (inactive, not started)",
+            self.config.name(),
+            self.new_slot,
+            target.inner()
+        );
         self.config.provision_inactive(
             &self.artifact,
             &self.tags,
@@ -146,8 +153,10 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             Phase::Provisioned { target, new_backend_id } => (target, new_backend_id),
             _ => unreachable!("start_and_check called outside Provisioned phase"),
         };
+        info!("[{}] starting {}", config.name(), target.inner());
         T::start(target.inner())?;
-        let new_ip = await_ip::<T>(target.inner())?;
+        let new_ip = await_ip::<T>(config.name(), target.inner())?;
+        info!("[{}] {} came up at {}", config.name(), target.inner(), new_ip);
         match backend_pool {
             Some(pool) if !pool.contains(new_ip) => warn!(
                 "{} came up on {}, which is outside the declared backend pool {}-{}; the pool declaration and the dhcp scope disagree",
@@ -158,7 +167,10 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         let tags = tags.with_service_ip(new_ip);
         T::set_tags(target.inner(), &tags)?;
         config.post_check()?;
-        config.health_check(SocketAddr::from((new_ip, config.backend_port())))?;
+        let addr = SocketAddr::from((new_ip, config.backend_port()));
+        info!("[{}] health checking {}", config.name(), addr);
+        config.health_check(addr)?;
+        info!("[{}] healthy at {}", config.name(), addr);
         Ok(Self {
             config,
             new_slot,
@@ -185,7 +197,14 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
                 "{} has no service address, leaving it unproxied",
                 config.name()
             ),
-            Some(_) => {
+            Some(service) => {
+                info!(
+                    "[{}] cutting traffic over: {} -> {} (service address {})",
+                    config.name(),
+                    old_ip.map(|i| i.to_string()).unwrap_or_else(|| "nothing".to_string()),
+                    new_ip,
+                    service
+                );
                 sozu.check_sozu_cluster(config)?
                     .register_backend(config, &new_backend_id, new_ip)?;
                 if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
@@ -230,6 +249,11 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         };
         match self.old_slot_id {
             Some(slot_id) => {
+                info!(
+                    "[{}] traffic is on the new instance, retiring {}",
+                    self.config.name(),
+                    slot_id.inner()
+                );
                 T::stop(&slot_id.inner())?;
                 T::destroy(slot_id.inner())
             }
@@ -241,6 +265,17 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         self.config.pre_check()?;
         let target = self.config.id_for_slot(self.new_slot);
         let new_hash = self.tags.nix_hash.clone();
+        let name = self.config.name().to_string();
+        info!(
+            "[{}] deploying {} into {:?} (id {}), current instance {}",
+            name,
+            new_hash,
+            self.new_slot,
+            target.inner(),
+            self.old_slot_id
+                .map(|s| s.inner().to_string())
+                .unwrap_or_else(|| "none".to_string())
+        );
 
         let switched = self
             .provision_inactive()
@@ -248,8 +283,21 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             .and_then(Self::register_and_switch);
 
         match switched {
-            Ok(ctx) => ctx.maybe_destroy_old(),
+            Ok(ctx) => {
+                let result = ctx.maybe_destroy_old();
+                match &result {
+                    Ok(()) => info!("[{}] deployed, now serving from {}", name, target.inner()),
+                    Err(e) => warn!(
+                        "[{}] traffic is on {} but retiring the old instance failed: {}",
+                        name,
+                        target.inner(),
+                        e
+                    ),
+                }
+                result
+            }
             Err(e) => {
+                warn!("[{}] deploy failed: {}", name, e);
                 abort::<T>(target, &new_hash);
                 Err(e)
             }
@@ -263,15 +311,26 @@ fn nix_hash_of(artifact: &StorePath) -> Result<NixHash> {
     })
 }
 
-fn await_ip<T: Deployments>(id: u32) -> Result<Ipv4Addr> {
+fn await_ip<T: Deployments>(name: &str, id: u32) -> Result<Ipv4Addr> {
+    info!("[{}] waiting for {} to report an address", name, id);
     (0..IP_POLL_ATTEMPTS)
-        .find_map(|_| {
+        .find_map(|attempt| {
             match T::get_ip(id)
                 .ok()
                 .and_then(|raw| raw.trim().parse::<Ipv4Addr>().ok())
             {
                 Some(ip) => Some(ip),
                 None => {
+                    if attempt > 0 && attempt % PROGRESS_EVERY == 0 {
+                        info!(
+                            "[{}] still no address on {} after {}s ({}/{})",
+                            name,
+                            id,
+                            attempt * IP_POLL_DELAY.as_secs() as u32,
+                            attempt,
+                            IP_POLL_ATTEMPTS
+                        );
+                    }
                     std::thread::sleep(IP_POLL_DELAY);
                     None
                 }
@@ -415,9 +474,15 @@ pub trait Dangerous {
     fn health_check(&self, addr: SocketAddr) -> Result<()> {
         (0..HEALTH_ATTEMPTS)
             .find_map(
-                |_| match TcpStream::connect_timeout(&addr, HEALTH_CONNECT_TIMEOUT) {
+                |attempt| match TcpStream::connect_timeout(&addr, HEALTH_CONNECT_TIMEOUT) {
                     Ok(_) => Some(()),
-                    Err(_) => {
+                    Err(e) => {
+                        if attempt > 0 && attempt % PROGRESS_EVERY == 0 {
+                            info!(
+                                "still waiting on {} after {} attempts: {}",
+                                addr, attempt, e
+                            );
+                        }
                         std::thread::sleep(HEALTH_DELAY);
                         None
                     }
