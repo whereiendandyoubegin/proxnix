@@ -621,25 +621,23 @@ impl Deployments for ContainerConfig {
         self.protected
     }
     fn get_ip(id: u32) -> Result<String> {
-        let output = std::process::Command::new("pct")
-            .arg("exec")
+        let output = std::process::Command::new("lxc-info")
+            .arg("-n")
             .arg(id.to_string())
-            .arg("--")
-            .arg("ip").arg("-4").arg("-o").arg("addr").arg("show").arg("eth0")
+            .arg("-i")
+            .arg("-H")
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(AppError::CmdError(format!(
-                "pct exec ip addr failed for container {}: {}",
+                "lxc-info failed for container {}: {}",
                 id, stderr
             )));
         }
         String::from_utf8(output.stdout)?
-            .split_whitespace()
-            .skip_while(|s| *s != "inet")
-            .nth(1)
-            .and_then(|s| s.split('/').next())
-            .map(|s| s.to_string())
+            .lines()
+            .find_map(|line| line.trim().parse::<Ipv4Addr>().ok())
+            .map(|ip| ip.to_string())
             .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {}", id)))
     }
     fn tags(id: u32) -> Result<Option<String>> {
@@ -746,7 +744,14 @@ pub fn reconcile<T: Deployments>(
             Action::Destroy { name, id } => {
                 let result = (|| -> Result<()> {
                     let mut sozu = SozuClient::connect(ctx.sozu_socket_path.as_str())?;
-                    sozu.remove_cluster(&name)?;
+                    match sozu.remove_cluster(&name) {
+                        Ok(_) => {}
+                        Err(e) => info!(
+                            "[{}] sozu had no cluster to remove ({}), continuing with teardown",
+                            name, e
+                        ),
+                    }
+                    info!("[{}] destroying orphaned instance {}", name, id);
                     T::stop(&id)?;
                     T::destroy(id)
                 })();
