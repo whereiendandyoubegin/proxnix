@@ -9,6 +9,36 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::process::Command;
 
+pub(crate) fn slot_from_tags(tags: Option<&str>) -> Slot {
+    tags.and_then(|t| {
+        t.split(';')
+            .find(|tag| tag.trim().starts_with("slot-"))
+            .and_then(|tag| Slot::try_from(tag.trim()).ok())
+    })
+    .unwrap_or(Slot::Blue)
+}
+
+pub(crate) fn nix_hash_from_tags(tags: Option<&str>) -> Option<NixHash> {
+    tags.and_then(|t| {
+        t.split(';')
+            .find(|tag| tag.trim().starts_with("nix-"))
+            .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
+    })
+}
+
+pub(crate) fn is_proxnix_managed(tags: Option<&str>) -> bool {
+    tags.map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+        .unwrap_or(false)
+}
+
+pub(crate) fn vm_tags(vm_id: u32) -> Result<Option<String>> {
+    Ok(parse_qm_config(&qm_config(vm_id)?)?.tags)
+}
+
+pub(crate) fn container_tags(ct_id: u32) -> Result<Option<String>> {
+    Ok(parse_pct_config(&pct_config(ct_id)?)?.tags)
+}
+
 pub fn parse_config(json: &str) -> Result<DesiredState> {
     let state: DesiredState = serde_json::from_str(json)?;
     Ok(state)
@@ -144,26 +174,11 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
         .map(|(_name, vm)| -> Result<Option<(String, DeployedVM)>> {
             let config = qm_config(vm.vm_id)?;
             let parsed = parse_qm_config(&config)?;
-            let is_proxnix = parsed
-                .tags
-                .as_deref()
-                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-                .unwrap_or(false);
-            if !is_proxnix {
+            if !is_proxnix_managed(parsed.tags.as_deref()) {
                 return Ok(None);
             }
-            let nix_hash = parsed.tags.as_deref().and_then(|t| {
-                t.split(';')
-                    .find(|tag| tag.trim().starts_with("nix-"))
-                    .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
-            });
-            let active_slot = parsed.tags.as_deref()
-                .and_then(|t| {
-                    t.split(';')
-                        .find(|tag| tag.trim().starts_with("slot-"))
-                        .and_then(|tag| Slot::try_from(tag.trim()).ok())
-                })
-                .unwrap_or(Slot::Blue);
+            let nix_hash = nix_hash_from_tags(parsed.tags.as_deref());
+            let active_slot = slot_from_tags(parsed.tags.as_deref());
             Ok(Some((
                 vm.vm_name.clone(),
                 DeployedVM {
@@ -340,26 +355,11 @@ pub fn enrich_container_info(
         .map(|entry| -> Result<Option<(String, DeployedContainer)>> {
             let config_raw = pct_config(entry.ct_id)?;
             let config = parse_pct_config(&config_raw)?;
-            let is_proxnix = config
-                .tags
-                .as_deref()
-                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-                .unwrap_or(false);
-            if !is_proxnix {
+            if !is_proxnix_managed(config.tags.as_deref()) {
                 return Ok(None);
             }
-            let nix_hash = config.tags.as_deref().and_then(|t| {
-                t.split(';')
-                    .find(|tag| tag.trim().starts_with("nix-"))
-                    .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
-            });
-            let active_slot = config.tags.as_deref()
-                .and_then(|t| {
-                    t.split(';')
-                        .find(|tag| tag.trim().starts_with("slot-"))
-                        .and_then(|tag| Slot::try_from(tag.trim()).ok())
-                })
-                .unwrap_or(Slot::Blue);
+            let nix_hash = nix_hash_from_tags(config.tags.as_deref());
+            let active_slot = slot_from_tags(config.tags.as_deref());
             Ok(Some((
                 entry.ct_name.clone(),
                 DeployedContainer {
@@ -418,5 +418,69 @@ mod tests {
 
         let result = parse_qm_list(sample);
         println!("{:#?}", result)
+    }
+
+    fn tags_for(nix: &str, commit: &str, slot: Slot) -> String {
+        format!("proxnix;nix-{};commit-{};{}", nix, commit, slot)
+    }
+
+    #[test]
+    fn slot_round_trips_through_proxmox_tags() {
+        for slot in [Slot::Blue, Slot::Green] {
+            let tags = tags_for("abc123", "deadbeef", slot);
+            assert_eq!(slot_from_tags(Some(&tags)), slot);
+        }
+    }
+
+    #[test]
+    fn nix_hash_round_trips_through_proxmox_tags() {
+        let tags = tags_for("0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7", "deadbeef", Slot::Green);
+        assert_eq!(
+            nix_hash_from_tags(Some(&tags)).unwrap().as_str(),
+            "0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7"
+        );
+    }
+
+    #[test]
+    fn untagged_vm_defaults_to_blue() {
+        assert_eq!(slot_from_tags(None), Slot::Blue);
+        assert_eq!(slot_from_tags(Some("proxnix;nix-abc")), Slot::Blue);
+    }
+
+    #[test]
+    fn slot_tag_is_not_confused_with_other_tags() {
+        let tags = "proxnix;nix-slot-green-looking-hash;commit-abc;slot-blue";
+        assert_eq!(slot_from_tags(Some(tags)), Slot::Blue);
+    }
+
+    #[test]
+    fn only_proxnix_tagged_resources_are_managed() {
+        assert!(is_proxnix_managed(Some("proxnix;nix-abc;slot-blue")));
+        assert!(!is_proxnix_managed(Some("nix-abc;slot-blue")));
+        assert!(!is_proxnix_managed(None));
+    }
+
+    #[test]
+    fn rollback_only_claims_an_instance_carrying_both_the_tag_and_our_hash() {
+        let owned = |tags: Option<&str>| {
+            is_proxnix_managed(tags)
+                && nix_hash_from_tags(tags).map(|h| h.as_str().to_string())
+                    == Some("abc123".to_string())
+        };
+
+        assert!(owned(Some("proxnix;nix-abc123;commit-x;slot-green")));
+        assert!(!owned(Some("nix-abc123;commit-x;slot-green")));
+        assert!(!owned(Some("proxnix;nix-somethingelse;commit-x;slot-green")));
+        assert!(!owned(Some("a-hand-made-vm")));
+        assert!(!owned(None));
+    }
+
+    #[test]
+    fn tags_tolerate_surrounding_whitespace() {
+        assert_eq!(slot_from_tags(Some("proxnix; slot-green ")), Slot::Green);
+        assert_eq!(
+            nix_hash_from_tags(Some("proxnix; nix-abc123 ")).unwrap().as_str(),
+            "abc123"
+        );
     }
 }

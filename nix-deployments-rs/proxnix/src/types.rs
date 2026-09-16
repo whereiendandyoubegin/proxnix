@@ -37,6 +37,12 @@ pub enum AppError {
     ChannelError(#[from] sozu_command_lib::channel::ChannelError),
     #[error("Error parsing addr: {0}")]
     AddrParseErr(#[from] std::net::AddrParseError),
+    #[error("Port out of range: {0}")]
+    PortRangeError(#[from] std::num::TryFromIntError),
+    #[error("Timed out waiting for an IP address on instance {0}")]
+    IpTimeoutError(u32),
+    #[error("Health check failed for {0}")]
+    HealthCheckError(std::net::SocketAddr),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

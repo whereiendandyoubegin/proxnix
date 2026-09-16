@@ -1,8 +1,16 @@
 use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::time::Duration;
 
 use proxnix_core::{Slot, SlotId, Workload};
 use rayon::prelude::*;
+use tracing::warn;
+
+const IP_POLL_ATTEMPTS: u32 = 60;
+const IP_POLL_DELAY: Duration = Duration::from_secs(2);
+const HEALTH_ATTEMPTS: u32 = 30;
+const HEALTH_DELAY: Duration = Duration::from_secs(2);
+const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 use crate::{
     context::{BackendId, NixHash, ReconcileContext, StorePath},
@@ -11,8 +19,8 @@ use crate::{
     qm::{qm_destroy, qm_get_running_ip, qm_set_resources, qm_start, qm_stop},
     sozu::{Proxied, SozuClient, WithIp},
     state::{
-        enrich_container_info, enrich_cpu_info, list_to_deployed_vm, parse_pct_list, parse_qm_list,
-        qm_list,
+        container_tags, enrich_container_info, enrich_cpu_info, is_proxnix_managed,
+        list_to_deployed_vm, nix_hash_from_tags, parse_pct_list, parse_qm_list, qm_list, vm_tags,
     },
     types::{
         AppError, ContainerConfig, ContainerFieldChange, DeployedContainer, DeployedVM,
@@ -95,12 +103,9 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         })
     }
 
-    fn provision_inactive(self) -> Result<Self> {
+    fn provision_inactive(self, new_hash: &NixHash) -> Result<Self> {
         let target = self.config.id_for_slot(self.new_slot);
-        let new_hash = self.artifact.nix_hash().ok_or_else(|| {
-            AppError::CmdError(format!("could not extract nix hash from {}", self.artifact))
-        })?;
-        let new_backend_id = BackendId::new(self.config.name(), &new_hash);
+        let new_backend_id = BackendId::new(self.config.name(), new_hash);
         self.config.provision_inactive(&self.artifact, self.commit_hash, self.template_cache_path, target)?;
         Ok(Self {
             phase: Phase::Provisioned { target, new_backend_id },
@@ -115,9 +120,12 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             _ => unreachable!("start_and_check called outside Provisioned phase"),
         };
         T::start(target.inner())?;
-        let new_ip: Ipv4Addr = T::get_ip(target.inner())?.parse()?;
+        let new_ip = await_ip::<T>(target.inner())?;
         config.post_check()?;
-        config.health_check()?;
+        config.health_check(SocketAddr::from((
+            new_ip,
+            u16::try_from(config.proxy_port())?,
+        )))?;
         Ok(Self {
             config,
             new_slot,
@@ -141,7 +149,23 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         sozu.check_sozu_cluster(config)?
             .register_backend(&WithIp(config, new_ip), &new_backend_id)?;
         if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
-            sozu.remove_backend(&WithIp(config, old_ip_val), old_bid)?;
+            match sozu.remove_backend(&WithIp(config, old_ip_val), old_bid) {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!(
+                        "failed to deregister old backend {}, rolling back new registration: {}",
+                        old_bid, e
+                    );
+                    match sozu.remove_backend(&WithIp(config, new_ip), &new_backend_id) {
+                        Ok(()) => {}
+                        Err(undo) => warn!(
+                            "could not deregister new backend {}: {}",
+                            new_backend_id, undo
+                        ),
+                    }
+                    return Err(e);
+                }
+            }
         }
         Ok(Self {
             config,
@@ -172,10 +196,74 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
 
     pub fn run(self) -> Result<()> {
         self.config.pre_check()?;
-        self.provision_inactive()?
-            .start_and_check()?
-            .register_and_switch()?
-            .maybe_destroy_old()
+        let target = self.config.id_for_slot(self.new_slot);
+        let new_hash = self.artifact.nix_hash().ok_or_else(|| {
+            AppError::CmdError(format!("could not extract nix hash from {}", self.artifact))
+        })?;
+
+        let switched = self
+            .provision_inactive(&new_hash)
+            .and_then(Self::start_and_check)
+            .and_then(Self::register_and_switch);
+
+        match switched {
+            Ok(ctx) => ctx.maybe_destroy_old(),
+            Err(e) => {
+                abort::<T>(target, &new_hash);
+                Err(e)
+            }
+        }
+    }
+}
+
+fn await_ip<T: Deployments>(id: u32) -> Result<Ipv4Addr> {
+    (0..IP_POLL_ATTEMPTS)
+        .find_map(|_| {
+            match T::get_ip(id)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<Ipv4Addr>().ok())
+            {
+                Some(ip) => Some(ip),
+                None => {
+                    std::thread::sleep(IP_POLL_DELAY);
+                    None
+                }
+            }
+        })
+        .ok_or(AppError::IpTimeoutError(id))
+}
+
+fn created_by_this_deploy<T: Deployments>(id: u32, expected: &NixHash) -> bool {
+    match T::tags(id) {
+        Ok(tags) => {
+            is_proxnix_managed(tags.as_deref())
+                && nix_hash_from_tags(tags.as_deref()).as_ref() == Some(expected)
+        }
+        Err(e) => {
+            warn!("abort: could not read tags for {}: {}", id, e);
+            false
+        }
+    }
+}
+
+fn abort<T: Deployments>(target: SlotId, expected: &NixHash) {
+    let id = target.inner();
+    match created_by_this_deploy::<T>(id, expected) {
+        false => warn!(
+            "abort: refusing to destroy {}, it does not carry this deploy's nix hash {}",
+            id, expected
+        ),
+        true => {
+            warn!("deploy failed, destroying provisioned instance {}", id);
+            match T::stop(&id) {
+                Ok(()) => {}
+                Err(e) => warn!("abort: could not stop {}: {}", id, e),
+            }
+            match T::destroy(id) {
+                Ok(()) => {}
+                Err(e) => warn!("abort: could not destroy {}: {}", id, e),
+            }
+        }
     }
 }
 
@@ -230,8 +318,18 @@ pub trait Dangerous {
     fn post_check(&self) -> Result<()> {
         Ok(())
     }
-    fn health_check(&self) -> Result<()> {
-        Ok(())
+    fn health_check(&self, addr: SocketAddr) -> Result<()> {
+        (0..HEALTH_ATTEMPTS)
+            .find_map(
+                |_| match TcpStream::connect_timeout(&addr, HEALTH_CONNECT_TIMEOUT) {
+                    Ok(_) => Some(()),
+                    Err(_) => {
+                        std::thread::sleep(HEALTH_DELAY);
+                        None
+                    }
+                },
+            )
+            .ok_or(AppError::HealthCheckError(addr))
     }
 }
 
@@ -255,6 +353,7 @@ pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync 
     fn is_protected(&self) -> bool;
 
     fn get_ip(id: u32) -> Result<String>;
+    fn tags(id: u32) -> Result<Option<String>>;
     fn stop(id: &u32) -> Result<()>;
     fn destroy(id: u32) -> Result<()>;
     fn start(id: u32) -> Result<bool>;
@@ -303,6 +402,9 @@ impl Deployments for VMConfig {
     }
     fn get_ip(id: u32) -> Result<String> {
         qm_get_running_ip(&id)
+    }
+    fn tags(id: u32) -> Result<Option<String>> {
+        vm_tags(id)
     }
     fn stop(id: &u32) -> Result<()> {
         qm_stop(id)
@@ -377,6 +479,9 @@ impl Deployments for ContainerConfig {
             .map(|s| s.to_string())
             .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {}", id)))
     }
+    fn tags(id: u32) -> Result<Option<String>> {
+        container_tags(id)
+    }
     fn stop(id: &u32) -> Result<()> {
         pct_stop(id)
     }
@@ -403,6 +508,7 @@ enum Action<'a, T: Deployments> {
     UpdateInPlace {
         config: &'a T,
         deployed_id: u32,
+        deployed_slot: Slot,
         changes: Vec<T::FieldChange>,
     },
     Destroy {
@@ -456,12 +562,15 @@ pub fn reconcile<T: Deployments>(
                 })();
                 Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
             }
-            Action::UpdateInPlace { config, deployed_id, changes } => {
-                let result = config
-                    .pre_check()
-                    .and_then(|_| config.apply_in_place(deployed_id, &changes))
-                    .and_then(|_| config.post_check())
-                    .and_then(|_| config.health_check());
+            Action::UpdateInPlace { config, deployed_id, deployed_slot, changes } => {
+                let result = (|| -> Result<()> {
+                    let ip: Ipv4Addr = config.ip_for_slot(deployed_slot).parse()?;
+                    let addr = SocketAddr::from((ip, u16::try_from(config.proxy_port())?));
+                    config.pre_check()?;
+                    config.apply_in_place(deployed_id, &changes)?;
+                    config.post_check()?;
+                    config.health_check(addr)
+                })();
                 Outcome::new(config.name(), OutcomeKind::Updated, result)
             }
             Action::Destroy { name, id } => {
@@ -539,6 +648,209 @@ fn classify<'a, T: Deployments>(
             deployed: d,
             deployed_id: d.id(),
         },
-        (_, false, _) => Action::UpdateInPlace { config, deployed_id: d.id(), changes },
+        (_, false, _) => Action::UpdateInPlace {
+            config,
+            deployed_id: d.id(),
+            deployed_slot: d.active_slot(),
+            changes,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::ImageType;
+
+    fn vm(protected: bool) -> VMConfig {
+        VMConfig {
+            name: "test-website".to_string(),
+            blue_id: 823,
+            green_id: 824,
+            ip: "10.0.0.10".to_string(),
+            hostname: "test-website".to_string(),
+            proxy_port: 80,
+            image_type: ImageType::from("build-qcow2-website"),
+            cores: 2,
+            sockets: 1,
+            memory_mb: 2048,
+            storage_location: "local-lvm".to_string(),
+            disk_gb: 10,
+            protected,
+            network_bridge: "vmbr0".to_string(),
+            scsi_hw: "virtio-scsi-pci".to_string(),
+            disk_slot: "scsi0".to_string(),
+            impure: false,
+            blue_ip: "10.0.0.10".to_string(),
+            green_ip: "10.0.0.11".to_string(),
+            active_slot: Slot::Blue,
+        }
+    }
+
+    fn deployed(hash: &str, slot: Slot) -> DeployedVM {
+        DeployedVM {
+            vm_id: match slot {
+                Slot::Blue => 823,
+                Slot::Green => 824,
+            },
+            vm_name: "test-website".to_string(),
+            nix_hash: Some(NixHash::try_from(hash).unwrap()),
+            template_id: None,
+            mem_mb: 2048,
+            bootdisk_gb: 10.0,
+            status: "running".to_string(),
+            pid: 1234,
+            cores: 2,
+            sockets: 1,
+            active_slot: slot,
+        }
+    }
+
+    fn hashes(hash: &str) -> HashMap<ImageType, NixHash> {
+        HashMap::from([(
+            ImageType::from("build-qcow2-website"),
+            NixHash::try_from(hash).unwrap(),
+        )])
+    }
+
+    #[test]
+    fn blue_and_green_resolve_to_distinct_identities() {
+        let c = vm(false);
+        assert_eq!(c.id_for_slot(Slot::Blue), SlotId::Blue(823));
+        assert_eq!(c.id_for_slot(Slot::Green), SlotId::Green(824));
+        assert_ne!(
+            c.id_for_slot(Slot::Blue).inner(),
+            c.id_for_slot(Slot::Green).inner()
+        );
+        assert_eq!(c.ip_for_slot(Slot::Blue), "10.0.0.10");
+        assert_eq!(c.ip_for_slot(Slot::Green), "10.0.0.11");
+    }
+
+    #[test]
+    fn a_deploy_always_targets_the_inactive_slot() {
+        let c = vm(false);
+        for active in [Slot::Blue, Slot::Green] {
+            let target = c.id_for_slot(active.switch_slot());
+            assert_ne!(target.inner(), c.id_for_slot(active).inner());
+            assert_ne!(target.slot(), active);
+        }
+    }
+
+    #[test]
+    fn unchanged_image_and_resources_is_a_noop() {
+        let c = vm(false);
+        let d = deployed("abc123", Slot::Blue);
+        assert!(c.compute_changes(&d, &hashes("abc123")).is_empty());
+    }
+
+    #[test]
+    fn a_new_image_hash_requires_rebuild() {
+        let c = vm(false);
+        let d = deployed("abc123", Slot::Blue);
+        let changes = c.compute_changes(&d, &hashes("def456"));
+        assert!(changes.contains(&FieldChange::Image));
+        assert!(VMConfig::requires_rebuild(&changes));
+    }
+
+    #[test]
+    fn a_memory_change_alone_does_not_require_rebuild() {
+        let c = VMConfig { memory_mb: 4096, ..vm(false) };
+        let d = deployed("abc123", Slot::Blue);
+        let changes = c.compute_changes(&d, &hashes("abc123"));
+        assert_eq!(changes, vec![FieldChange::Memory]);
+        assert!(!VMConfig::requires_rebuild(&changes));
+    }
+
+    #[test]
+    fn a_disk_grow_requires_rebuild() {
+        let c = VMConfig { disk_gb: 20, ..vm(false) };
+        let d = deployed("abc123", Slot::Blue);
+        let changes = c.compute_changes(&d, &hashes("abc123"));
+        assert!(VMConfig::requires_rebuild(&changes));
+    }
+
+    #[test]
+    fn an_unbuilt_image_counts_as_changed() {
+        let c = vm(false);
+        let d = deployed("abc123", Slot::Blue);
+        let changes = c.compute_changes(&d, &HashMap::new());
+        assert!(changes.contains(&FieldChange::Image));
+    }
+
+    #[test]
+    fn an_undeployed_workload_is_created() {
+        let c = vm(false);
+        let empty = HashMap::new();
+        match classify(&c, &empty, &hashes("abc123")) {
+            Action::Create { .. } => {}
+            _ => panic!("expected Create for a workload with no deployed state"),
+        }
+    }
+
+    #[test]
+    fn a_changed_image_rebuilds_from_the_deployed_slot() {
+        let c = vm(false);
+        let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Green))]);
+        match classify(&c, &d, &hashes("def456")) {
+            Action::Rebuild { deployed, deployed_id, .. } => {
+                assert_eq!(deployed_id, 824);
+                assert_eq!(deployed.active_slot(), Slot::Green);
+            }
+            _ => panic!("expected Rebuild when the image hash changed"),
+        }
+    }
+
+    #[test]
+    fn a_protected_workload_is_skipped_not_rebuilt() {
+        let c = vm(true);
+        let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Blue))]);
+        match classify(&c, &d, &hashes("def456")) {
+            Action::Skip { reason: SkipReason::Protected, .. } => {}
+            _ => panic!("expected protected workloads to be skipped"),
+        }
+    }
+
+    #[test]
+    fn protection_does_not_mask_a_noop() {
+        let c = vm(true);
+        let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Blue))]);
+        match classify(&c, &d, &hashes("abc123")) {
+            Action::NoOp { .. } => {}
+            _ => panic!("expected NoOp to win over Skip when nothing changed"),
+        }
+    }
+
+    #[test]
+    fn an_in_place_update_targets_the_deployed_slot() {
+        let c = VMConfig { memory_mb: 4096, ..vm(false) };
+        let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Green))]);
+        match classify(&c, &d, &hashes("abc123")) {
+            Action::UpdateInPlace { deployed_id, deployed_slot, .. } => {
+                assert_eq!(deployed_id, 824);
+                assert_eq!(deployed_slot, Slot::Green);
+            }
+            _ => panic!("expected UpdateInPlace for a resource-only change"),
+        }
+    }
+
+    #[test]
+    fn a_workload_dropped_from_config_is_destroyed() {
+        let d = HashMap::from([("orphan".to_string(), deployed("abc123", Slot::Blue))]);
+        let actions = plan::<VMConfig>(&[], &d, &hashes("abc123"));
+        match actions.as_slice() {
+            [Action::Destroy { name, id }] => {
+                assert_eq!(name, "orphan");
+                assert_eq!(*id, 823);
+            }
+            _ => panic!("expected a single Destroy for the orphaned workload"),
+        }
+    }
+
+    #[test]
+    fn a_still_desired_workload_is_not_destroyed() {
+        let c = vm(false);
+        let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Blue))]);
+        let actions = plan(std::slice::from_ref(&c), &d, &hashes("abc123"));
+        assert!(!actions.iter().any(|a| matches!(a, Action::Destroy { .. })));
     }
 }

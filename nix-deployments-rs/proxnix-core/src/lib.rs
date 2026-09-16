@@ -65,3 +65,54 @@ impl SlotId {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switch_slot_alternates() {
+        assert_eq!(Slot::Blue.switch_slot(), Slot::Green);
+        assert_eq!(Slot::Green.switch_slot(), Slot::Blue);
+    }
+
+    #[test]
+    fn switch_slot_is_an_involution() {
+        assert_eq!(Slot::Blue.switch_slot().switch_slot(), Slot::Blue);
+        assert_eq!(Slot::Green.switch_slot().switch_slot(), Slot::Green);
+    }
+
+    #[test]
+    fn slot_round_trips_through_its_tag() {
+        for slot in [Slot::Blue, Slot::Green] {
+            let tag = slot.to_string();
+            assert_eq!(Slot::try_from(tag.as_str()), Ok(slot));
+        }
+    }
+
+    #[test]
+    fn slot_tag_format_is_prefixed() {
+        assert_eq!(Slot::Blue.to_string(), "slot-blue");
+        assert_eq!(Slot::Green.to_string(), "slot-green");
+    }
+
+    #[test]
+    fn unknown_slot_tag_is_rejected() {
+        assert!(Slot::try_from("slot-purple").is_err());
+        assert!(Slot::try_from("nix-abc123").is_err());
+        assert!(Slot::try_from("").is_err());
+    }
+
+    #[test]
+    fn slot_id_carries_its_slot() {
+        assert_eq!(SlotId::Blue(823).slot(), Slot::Blue);
+        assert_eq!(SlotId::Green(824).slot(), Slot::Green);
+        assert_eq!(SlotId::Blue(823).inner(), 823);
+        assert_eq!(SlotId::Green(824).inner(), 824);
+    }
+
+    #[test]
+    fn same_id_in_different_slots_is_not_equal() {
+        assert_ne!(SlotId::Blue(823), SlotId::Green(823));
+    }
+}
