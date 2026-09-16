@@ -1,10 +1,29 @@
-use crate::context::NixHash;
+use crate::context::Tags;
 use crate::types::{AppError, FieldChange, Result, VMConfig};
 use proxnix_core::SlotId;
 use std::process::Command;
 
+pub fn qm_set_tags(vm_id: u32, tags: &Tags) -> Result<()> {
+    let output = Command::new("qm")
+        .arg("set")
+        .arg(vm_id.to_string())
+        .arg("--tags")
+        .arg(tags.render())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "qm set tags failed for {} (exit: {:?}): {}",
+            vm_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
+
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
-pub fn qm_create(config: &VMConfig, nix_hash: &NixHash, commit_hash: &str, target: SlotId) -> Result<String> {
+pub fn qm_create(config: &VMConfig, tags: &Tags, target: SlotId) -> Result<String> {
     let qm_create = Command::new("qm")
         .arg("create")
         .arg(target.inner().to_string())
@@ -19,7 +38,7 @@ pub fn qm_create(config: &VMConfig, nix_hash: &NixHash, commit_hash: &str, targe
         .arg("--scsihw")
         .arg(&config.scsi_hw)
         .arg("--tags")
-        .arg(format!("proxnix;nix-{};commit-{};{}", nix_hash, commit_hash, target.slot()))
+        .arg(tags.render())
         .output()?;
     if !qm_create.status.success() {
         let stderr = String::from_utf8_lossy(&qm_create.stderr);

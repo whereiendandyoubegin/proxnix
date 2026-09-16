@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use proxnix_core::{Slot, SlotId, Workload};
 use rayon::prelude::*;
-use tracing::warn;
+use tracing::{info, warn};
 
 const IP_POLL_ATTEMPTS: u32 = 60;
 const IP_POLL_DELAY: Duration = Duration::from_secs(2);
@@ -13,11 +13,11 @@ const HEALTH_DELAY: Duration = Duration::from_secs(2);
 const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 use crate::{
-    context::{BackendId, NixHash, ReconcileContext, StorePath},
+    context::{BackendId, NixHash, ReconcileContext, StorePath, Tags},
     materialise::Materialise,
-    pct::{pct_destroy, pct_list, pct_set_resources, pct_start, pct_stop},
-    qm::{qm_destroy, qm_get_running_ip, qm_set_resources, qm_start, qm_stop},
-    sozu::{Proxied, SozuClient, WithIp},
+    pct::{pct_destroy, pct_list, pct_set_resources, pct_set_tags, pct_start, pct_stop},
+    qm::{qm_destroy, qm_get_running_ip, qm_set_resources, qm_set_tags, qm_start, qm_stop},
+    sozu::{Proxied, SozuClient},
     state::{
         container_tags, enrich_container_info, enrich_cpu_info, is_proxnix_managed,
         list_to_deployed_vm, nix_hash_from_tags, parse_pct_list, parse_qm_list, qm_list, vm_tags,
@@ -43,7 +43,7 @@ pub struct DeployContext<'a, T: Deployments> {
     old_slot_id: Option<SlotId>,
     sozu: SozuClient,
     artifact: StorePath,
-    commit_hash: &'a str,
+    tags: Tags,
     template_cache_path: &'a str,
     phase: Phase,
 }
@@ -56,16 +56,18 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         template_cache_path: &'a str,
         sozu_socket_path: &str,
     ) -> Result<Self> {
+        let new_slot = Slot::Blue;
+        let tags = Tags::new(nix_hash_of(&artifact)?, commit_hash, new_slot);
         let sozu = SozuClient::connect(sozu_socket_path)?;
         Ok(Self {
             config,
-            new_slot: Slot::Blue,
+            new_slot,
             old_backend_id: None,
             old_ip: None,
             old_slot_id: None,
             sozu,
             artifact,
-            commit_hash,
+            tags,
             template_cache_path,
             phase: Phase::Initial,
         })
@@ -73,17 +75,32 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
 
     fn from_rebuild(
         config: &'a T,
-        deployed_slot: Slot,
+        deployed: &T::Deployed,
         deployed_id: u32,
-        old_nix_hash: Option<&NixHash>,
         artifact: StorePath,
         commit_hash: &'a str,
         template_cache_path: &'a str,
         sozu_socket_path: &str,
     ) -> Result<Self> {
+        let deployed_slot = deployed.active_slot();
         let new_slot = deployed_slot.switch_slot();
-        let old_ip: Ipv4Addr = config.ip_for_slot(deployed_slot).parse()?;
-        let old_backend_id = old_nix_hash.map(|h| BackendId::new(config.name(), h));
+        let tags = Tags::new(nix_hash_of(&artifact)?, commit_hash, new_slot);
+        let old_backend_id = deployed
+            .nix_hash()
+            .map(|h| BackendId::new(config.name(), h));
+        let old_ip = match deployed.service_ip() {
+            Some(ip) => Some(ip),
+            None => match T::get_ip(deployed_id).ok().and_then(|raw| raw.trim().parse().ok()) {
+                Some(ip) => Some(ip),
+                None => {
+                    warn!(
+                        "{} has no recorded service ip and its address could not be read; its backend cannot be deregistered by address",
+                        config.name()
+                    );
+                    None
+                }
+            },
+        };
         let old_slot_id = match deployed_slot {
             Slot::Blue => SlotId::Blue(deployed_id),
             Slot::Green => SlotId::Green(deployed_id),
@@ -93,20 +110,25 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             config,
             new_slot,
             old_backend_id,
-            old_ip: Some(old_ip),
+            old_ip,
             old_slot_id: Some(old_slot_id),
             sozu,
             artifact,
-            commit_hash,
+            tags,
             template_cache_path,
             phase: Phase::Initial,
         })
     }
 
-    fn provision_inactive(self, new_hash: &NixHash) -> Result<Self> {
+    fn provision_inactive(self) -> Result<Self> {
         let target = self.config.id_for_slot(self.new_slot);
-        let new_backend_id = BackendId::new(self.config.name(), new_hash);
-        self.config.provision_inactive(&self.artifact, self.commit_hash, self.template_cache_path, target)?;
+        let new_backend_id = BackendId::new(self.config.name(), &self.tags.nix_hash);
+        self.config.provision_inactive(
+            &self.artifact,
+            &self.tags,
+            self.template_cache_path,
+            target,
+        )?;
         Ok(Self {
             phase: Phase::Provisioned { target, new_backend_id },
             ..self
@@ -114,13 +136,15 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     }
 
     fn start_and_check(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, sozu, artifact, commit_hash, template_cache_path } = self;
+        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, sozu, artifact, tags, template_cache_path } = self;
         let (target, new_backend_id) = match phase {
             Phase::Provisioned { target, new_backend_id } => (target, new_backend_id),
             _ => unreachable!("start_and_check called outside Provisioned phase"),
         };
         T::start(target.inner())?;
         let new_ip = await_ip::<T>(target.inner())?;
+        let tags = tags.with_service_ip(new_ip);
+        T::set_tags(target.inner(), &tags)?;
         config.post_check()?;
         config.health_check(SocketAddr::from((
             new_ip,
@@ -134,29 +158,29 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             old_slot_id,
             sozu,
             artifact,
-            commit_hash,
+            tags,
             template_cache_path,
             phase: Phase::Healthy { new_backend_id, new_ip },
         })
     }
 
     fn register_and_switch(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, mut sozu, artifact, commit_hash, template_cache_path } = self;
+        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, mut sozu, artifact, tags, template_cache_path } = self;
         let (new_backend_id, new_ip) = match phase {
             Phase::Healthy { new_backend_id, new_ip, .. } => (new_backend_id, new_ip),
             _ => unreachable!("register_and_switch called outside Healthy phase"),
         };
         sozu.check_sozu_cluster(config)?
-            .register_backend(&WithIp(config, new_ip), &new_backend_id)?;
+            .register_backend(config, &new_backend_id, new_ip)?;
         if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
-            match sozu.remove_backend(&WithIp(config, old_ip_val), old_bid) {
+            match sozu.remove_backend(config, old_bid, old_ip_val) {
                 Ok(()) => {}
                 Err(e) => {
                     warn!(
                         "failed to deregister old backend {}, rolling back new registration: {}",
                         old_bid, e
                     );
-                    match sozu.remove_backend(&WithIp(config, new_ip), &new_backend_id) {
+                    match sozu.remove_backend(config, &new_backend_id, new_ip) {
                         Ok(()) => {}
                         Err(undo) => warn!(
                             "could not deregister new backend {}: {}",
@@ -175,7 +199,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             old_slot_id,
             sozu,
             artifact,
-            commit_hash,
+            tags,
             template_cache_path,
             phase: Phase::BackendRegistered,
         })
@@ -197,12 +221,10 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     pub fn run(self) -> Result<()> {
         self.config.pre_check()?;
         let target = self.config.id_for_slot(self.new_slot);
-        let new_hash = self.artifact.nix_hash().ok_or_else(|| {
-            AppError::CmdError(format!("could not extract nix hash from {}", self.artifact))
-        })?;
+        let new_hash = self.tags.nix_hash.clone();
 
         let switched = self
-            .provision_inactive(&new_hash)
+            .provision_inactive()
             .and_then(Self::start_and_check)
             .and_then(Self::register_and_switch);
 
@@ -214,6 +236,12 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             }
         }
     }
+}
+
+fn nix_hash_of(artifact: &StorePath) -> Result<NixHash> {
+    artifact.nix_hash().ok_or_else(|| {
+        AppError::CmdError(format!("could not extract nix hash from {}", artifact))
+    })
 }
 
 fn await_ip<T: Deployments>(id: u32) -> Result<Ipv4Addr> {
@@ -231,6 +259,46 @@ fn await_ip<T: Deployments>(id: u32) -> Result<Ipv4Addr> {
             }
         })
         .ok_or(AppError::IpTimeoutError(id))
+}
+
+pub fn ensure_running<T: Deployments>(configs: &[T]) {
+    let deployed = match T::load_deployed() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("periodic reconcile: could not load deployed state: {}", e);
+            return;
+        }
+    };
+
+    configs
+        .iter()
+        .for_each(|config| match deployed.get(config.name()) {
+            None => warn!(
+                "periodic reconcile: {} is not deployed, it will be created on the next push",
+                config.name()
+            ),
+            Some(d) => match d.status() {
+                "running" => {}
+                status => {
+                    info!(
+                        "periodic reconcile: {} ({:?}, id {}) is {}, starting",
+                        config.name(),
+                        d.active_slot(),
+                        d.id(),
+                        status
+                    );
+                    match T::start(d.id()) {
+                        Ok(true) => info!("periodic reconcile: started {}", config.name()),
+                        Ok(false) => {}
+                        Err(e) => warn!(
+                            "periodic reconcile: could not start {}: {}",
+                            config.name(),
+                            e
+                        ),
+                    }
+                }
+            },
+        });
 }
 
 fn created_by_this_deploy<T: Deployments>(id: u32, expected: &NixHash) -> bool {
@@ -273,6 +341,7 @@ pub trait DeployedState {
     fn nix_hash(&self) -> Option<&NixHash>;
     fn status(&self) -> &str;
     fn active_slot(&self) -> Slot;
+    fn service_ip(&self) -> Option<Ipv4Addr>;
 }
 
 impl DeployedState for DeployedVM {
@@ -291,6 +360,9 @@ impl DeployedState for DeployedVM {
     fn active_slot(&self) -> Slot {
         self.active_slot
     }
+    fn service_ip(&self) -> Option<Ipv4Addr> {
+        self.service_ip
+    }
 }
 
 impl DeployedState for DeployedContainer {
@@ -308,6 +380,9 @@ impl DeployedState for DeployedContainer {
     }
     fn active_slot(&self) -> Slot {
         self.active_slot
+    }
+    fn service_ip(&self) -> Option<Ipv4Addr> {
+        self.service_ip
     }
 }
 
@@ -354,6 +429,7 @@ pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync 
 
     fn get_ip(id: u32) -> Result<String>;
     fn tags(id: u32) -> Result<Option<String>>;
+    fn set_tags(id: u32, tags: &Tags) -> Result<()>;
     fn stop(id: &u32) -> Result<()>;
     fn destroy(id: u32) -> Result<()>;
     fn start(id: u32) -> Result<bool>;
@@ -405,6 +481,9 @@ impl Deployments for VMConfig {
     }
     fn tags(id: u32) -> Result<Option<String>> {
         vm_tags(id)
+    }
+    fn set_tags(id: u32, tags: &Tags) -> Result<()> {
+        qm_set_tags(id, tags)
     }
     fn stop(id: &u32) -> Result<()> {
         qm_stop(id)
@@ -482,6 +561,9 @@ impl Deployments for ContainerConfig {
     fn tags(id: u32) -> Result<Option<String>> {
         container_tags(id)
     }
+    fn set_tags(id: u32, tags: &Tags) -> Result<()> {
+        pct_set_tags(id, tags)
+    }
     fn stop(id: &u32) -> Result<()> {
         pct_stop(id)
     }
@@ -508,7 +590,7 @@ enum Action<'a, T: Deployments> {
     UpdateInPlace {
         config: &'a T,
         deployed_id: u32,
-        deployed_slot: Slot,
+        service_ip: Option<Ipv4Addr>,
         changes: Vec<T::FieldChange>,
     },
     Destroy {
@@ -551,9 +633,8 @@ pub fn reconcile<T: Deployments>(
                     let artifact = get_artifact(config, ctx)?;
                     DeployContext::from_rebuild(
                         config,
-                        deployed.active_slot(),
+                        deployed,
                         deployed_id,
-                        deployed.nix_hash(),
                         artifact,
                         ctx.commit_hash.as_str(),
                         ctx.template_cache_path.as_str(),
@@ -562,14 +643,18 @@ pub fn reconcile<T: Deployments>(
                 })();
                 Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
             }
-            Action::UpdateInPlace { config, deployed_id, deployed_slot, changes } => {
+            Action::UpdateInPlace { config, deployed_id, service_ip, changes } => {
                 let result = (|| -> Result<()> {
-                    let ip: Ipv4Addr = config.ip_for_slot(deployed_slot).parse()?;
-                    let addr = SocketAddr::from((ip, u16::try_from(config.proxy_port())?));
                     config.pre_check()?;
                     config.apply_in_place(deployed_id, &changes)?;
                     config.post_check()?;
-                    config.health_check(addr)
+                    match service_ip {
+                        Some(ip) => config.health_check(SocketAddr::from((
+                            ip,
+                            u16::try_from(config.proxy_port())?,
+                        ))),
+                        None => Ok(()),
+                    }
                 })();
                 Outcome::new(config.name(), OutcomeKind::Updated, result)
             }
@@ -651,7 +736,7 @@ fn classify<'a, T: Deployments>(
         (_, false, _) => Action::UpdateInPlace {
             config,
             deployed_id: d.id(),
-            deployed_slot: d.active_slot(),
+            service_ip: d.service_ip(),
             changes,
         },
     }
@@ -667,7 +752,6 @@ mod tests {
             name: "test-website".to_string(),
             blue_id: 823,
             green_id: 824,
-            ip: "10.0.0.10".to_string(),
             hostname: "test-website".to_string(),
             proxy_port: 80,
             image_type: ImageType::from("build-qcow2-website"),
@@ -681,9 +765,6 @@ mod tests {
             scsi_hw: "virtio-scsi-pci".to_string(),
             disk_slot: "scsi0".to_string(),
             impure: false,
-            blue_ip: "10.0.0.10".to_string(),
-            green_ip: "10.0.0.11".to_string(),
-            active_slot: Slot::Blue,
         }
     }
 
@@ -703,6 +784,7 @@ mod tests {
             cores: 2,
             sockets: 1,
             active_slot: slot,
+            service_ip: Some(Ipv4Addr::new(10, 0, 0, 10)),
         }
     }
 
@@ -722,8 +804,6 @@ mod tests {
             c.id_for_slot(Slot::Blue).inner(),
             c.id_for_slot(Slot::Green).inner()
         );
-        assert_eq!(c.ip_for_slot(Slot::Blue), "10.0.0.10");
-        assert_eq!(c.ip_for_slot(Slot::Green), "10.0.0.11");
     }
 
     #[test]
@@ -825,9 +905,9 @@ mod tests {
         let c = VMConfig { memory_mb: 4096, ..vm(false) };
         let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Green))]);
         match classify(&c, &d, &hashes("abc123")) {
-            Action::UpdateInPlace { deployed_id, deployed_slot, .. } => {
+            Action::UpdateInPlace { deployed_id, service_ip, .. } => {
                 assert_eq!(deployed_id, 824);
-                assert_eq!(deployed_slot, Slot::Green);
+                assert_eq!(service_ip, Some(Ipv4Addr::new(10, 0, 0, 10)));
             }
             _ => panic!("expected UpdateInPlace for a resource-only change"),
         }

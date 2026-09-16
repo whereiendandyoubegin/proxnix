@@ -52,7 +52,6 @@ pub struct VMConfig {
     pub name: String,
     pub blue_id: u32,
     pub green_id: u32,
-    pub ip: String,
     pub hostname: String,
     pub proxy_port: u32,
     pub image_type: ImageType,
@@ -69,9 +68,6 @@ pub struct VMConfig {
     #[serde(default = "default_disk_slot")]
     pub disk_slot: String,
     pub impure: bool,
-    pub blue_ip: String,
-    pub green_ip: String,
-    pub active_slot: proxnix_core::Slot,
 }
 
 impl Workload for VMConfig {
@@ -83,12 +79,6 @@ impl Workload for VMConfig {
     }
     fn cores(&self) -> u16 {
         self.cores
-    }
-    fn ip_for_slot(&self, s: Slot) -> &str {
-        match s {
-            Slot::Blue => &self.blue_ip,
-            Slot::Green => &self.green_ip,
-        }
     }
     fn id_for_slot(&self, s: Slot) -> SlotId {
         match s {
@@ -114,7 +104,6 @@ fn default_disk_slot() -> String {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ContainerConfig {
     pub name: String,
-    pub ip: String,
     pub proxy_port: u32,
     pub hostname: String,
     pub blue_id: u32,
@@ -132,9 +121,6 @@ pub struct ContainerConfig {
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
     pub impure: bool,
-    pub blue_ip: String,
-    pub green_ip: String,
-    pub active_slot: proxnix_core::Slot,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -152,12 +138,6 @@ impl Workload for ContainerConfig {
     }
     fn cores(&self) -> u16 {
         self.cores
-    }
-    fn ip_for_slot(&self, s: Slot) -> &str {
-        match s {
-            Slot::Blue => &self.blue_ip,
-            Slot::Green => &self.green_ip,
-        }
     }
     fn id_for_slot(&self, s: Slot) -> SlotId {
         match s {
@@ -199,6 +179,8 @@ pub struct DeployedVM {
     pub sockets: u8,
     #[serde(default = "default_slot")]
     pub active_slot: proxnix_core::Slot,
+    #[serde(default)]
+    pub service_ip: Option<std::net::Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -214,6 +196,8 @@ pub struct DeployedContainer {
     pub bind_mounts: Vec<BindMount>,
     #[serde(default = "default_slot")]
     pub active_slot: proxnix_core::Slot,
+    #[serde(default)]
+    pub service_ip: Option<std::net::Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

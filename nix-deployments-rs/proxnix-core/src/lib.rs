@@ -4,7 +4,6 @@ pub trait Workload {
     fn name(&self) -> &str;
     fn memory_mb(&self) -> u32;
     fn cores(&self) -> u16;
-    fn ip_for_slot(&self, s: Slot) -> &str;
     fn id_for_slot(&self, s: Slot) -> SlotId;
 }
 

@@ -13,22 +13,23 @@ use tracing::info;
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 
 pub trait Proxied {
-    fn ip(&self) -> Result<IpAddress>;
     fn proxy_port(&self) -> u32;
     fn cluster_id(&self) -> &str;
     fn hostname(&self) -> &str;
-    fn socket_address(&self) -> Result<SocketAddress>;
+
+    fn backend_address(&self, ip: Ipv4Addr) -> SocketAddress {
+        SocketAddress {
+            ip: IpAddress {
+                inner: Some(sozu_command_lib::proto::command::ip_address::Inner::V4(
+                    u32::from(ip),
+                )),
+            },
+            port: self.proxy_port(),
+        }
+    }
 }
 
 impl Proxied for VMConfig {
-    fn ip(&self) -> Result<IpAddress> {
-        let parsed: Ipv4Addr = self.ip.parse()?;
-        Ok(IpAddress {
-            inner: Some(sozu_command_lib::proto::command::ip_address::Inner::V4(
-                u32::from(parsed),
-            )),
-        })
-    }
     fn proxy_port(&self) -> u32 {
         self.proxy_port
     }
@@ -37,24 +38,10 @@ impl Proxied for VMConfig {
     }
     fn hostname(&self) -> &str {
         &self.hostname
-    }
-    fn socket_address(&self) -> Result<SocketAddress> {
-        Ok(SocketAddress {
-            ip: self.ip()?,
-            port: self.proxy_port(),
-        })
     }
 }
 
 impl Proxied for ContainerConfig {
-    fn ip(&self) -> Result<IpAddress> {
-        let parsed: Ipv4Addr = self.ip.parse()?;
-        Ok(IpAddress {
-            inner: Some(sozu_command_lib::proto::command::ip_address::Inner::V4(
-                u32::from(parsed),
-            )),
-        })
-    }
     fn proxy_port(&self) -> u32 {
         self.proxy_port
     }
@@ -63,39 +50,6 @@ impl Proxied for ContainerConfig {
     }
     fn hostname(&self) -> &str {
         &self.hostname
-    }
-    fn socket_address(&self) -> Result<SocketAddress> {
-        Ok(SocketAddress {
-            ip: self.ip()?,
-            port: self.proxy_port(),
-        })
-    }
-}
-
-pub struct WithIp<'a, T: Proxied>(pub &'a T, pub Ipv4Addr);
-
-impl<'a, T: Proxied> Proxied for WithIp<'a, T> {
-    fn ip(&self) -> Result<IpAddress> {
-        Ok(IpAddress {
-            inner: Some(sozu_command_lib::proto::command::ip_address::Inner::V4(
-                u32::from(self.1),
-            )),
-        })
-    }
-    fn socket_address(&self) -> Result<SocketAddress> {
-        Ok(SocketAddress {
-            ip: self.ip()?,
-            port: self.0.proxy_port(),
-        })
-    }
-    fn proxy_port(&self) -> u32 {
-        self.0.proxy_port()
-    }
-    fn cluster_id(&self) -> &str {
-        self.0.cluster_id()
-    }
-    fn hostname(&self) -> &str {
-        self.0.hostname()
     }
 }
 
@@ -157,17 +111,19 @@ impl SozuClient {
         &mut self,
         config: &T,
         backend_id: &BackendId,
+        ip: Ipv4Addr,
     ) -> Result<&mut Self> {
         info!(
-            "sozu: registering backend '{}' for cluster '{}'",
+            "sozu: registering backend '{}' at {} for cluster '{}'",
             backend_id,
+            ip,
             config.cluster_id()
         );
         self.channel.write_message(
             &RequestType::AddBackend(AddBackend {
                 cluster_id: config.cluster_id().to_string(),
                 backend_id: backend_id.as_str().to_string(),
-                address: config.socket_address()?,
+                address: config.backend_address(ip),
                 ..Default::default()
             })
             .into(),
@@ -181,17 +137,23 @@ impl SozuClient {
             _ => Err(AppError::SozuError("invalid status".to_string())),
         }
     }
-    pub fn remove_backend<T: Proxied>(&mut self, config: &T, backend_id: &BackendId) -> Result<()> {
+    pub fn remove_backend<T: Proxied>(
+        &mut self,
+        config: &T,
+        backend_id: &BackendId,
+        ip: Ipv4Addr,
+    ) -> Result<()> {
         info!(
-            "sozu: removing backend '{}' from cluster '{}'",
+            "sozu: removing backend '{}' at {} from cluster '{}'",
             backend_id,
+            ip,
             config.cluster_id()
         );
         self.channel.write_message(
             &RequestType::RemoveBackend(RemoveBackend {
                 cluster_id: config.cluster_id().to_string(),
                 backend_id: backend_id.as_str().to_string(),
-                address: config.socket_address()?,
+                address: config.backend_address(ip),
                 ..Default::default()
             })
             .into(),

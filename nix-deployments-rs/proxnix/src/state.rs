@@ -1,5 +1,5 @@
 use crate::context::NixHash;
-use crate::pct::{pct_config, pct_list};
+use crate::pct::pct_config;
 use crate::types::{
     AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
     QMConfig, QMList, Result,
@@ -23,6 +23,14 @@ pub(crate) fn nix_hash_from_tags(tags: Option<&str>) -> Option<NixHash> {
         t.split(';')
             .find(|tag| tag.trim().starts_with("nix-"))
             .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
+    })
+}
+
+pub(crate) fn service_ip_from_tags(tags: Option<&str>) -> Option<std::net::Ipv4Addr> {
+    tags.and_then(|t| {
+        t.split(';')
+            .find(|tag| tag.trim().starts_with("ip-"))
+            .and_then(|tag| tag.trim().trim_start_matches("ip-").parse().ok())
     })
 }
 
@@ -179,6 +187,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
             }
             let nix_hash = nix_hash_from_tags(parsed.tags.as_deref());
             let active_slot = slot_from_tags(parsed.tags.as_deref());
+            let service_ip = service_ip_from_tags(parsed.tags.as_deref());
             Ok(Some((
                 vm.vm_name.clone(),
                 DeployedVM {
@@ -193,6 +202,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
                     cores: parsed.cores as u16,
                     sockets: parsed.sockets,
                     active_slot,
+                    service_ip,
                 },
             )))
         })
@@ -224,6 +234,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                     cores: 0,   //placeholder
                     sockets: 0, //placeholder
                     active_slot: Slot::Blue,
+                    service_ip: None,
                 },
             )
         })
@@ -233,18 +244,6 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
         vms: lists,
         containers: HashMap::new(),
     }
-}
-
-pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
-    let raw = qm_list()?;
-    let parsed = parse_qm_list(&raw)?;
-    Ok(parsed.into_iter().map(|q| (q.vm_id, q.status)).collect())
-}
-
-pub fn get_container_statuses() -> Result<HashMap<u32, String>> {
-    let raw = pct_list()?;
-    let parsed = parse_pct_list(&raw)?;
-    Ok(parsed.into_iter().map(|e| (e.ct_id, e.status)).collect())
 }
 
 pub(crate) struct PctListEntry {
@@ -360,6 +359,7 @@ pub fn enrich_container_info(
             }
             let nix_hash = nix_hash_from_tags(config.tags.as_deref());
             let active_slot = slot_from_tags(config.tags.as_deref());
+            let service_ip = service_ip_from_tags(config.tags.as_deref());
             Ok(Some((
                 entry.ct_name.clone(),
                 DeployedContainer {
@@ -373,6 +373,7 @@ pub fn enrich_container_info(
                     bind_mounts: config.bind_mounts,
                     privileged: !config.unprivileged,
                     active_slot,
+                    service_ip,
                 },
             )))
         })
@@ -420,8 +421,45 @@ mod tests {
         println!("{:#?}", result)
     }
 
+    use crate::context::Tags;
+    use std::net::Ipv4Addr;
+
     fn tags_for(nix: &str, commit: &str, slot: Slot) -> String {
-        format!("proxnix;nix-{};commit-{};{}", nix, commit, slot)
+        Tags::new(NixHash::try_from(nix).unwrap(), commit, slot).render()
+    }
+
+    #[test]
+    fn a_registered_service_ip_survives_a_tag_round_trip() {
+        let ip = Ipv4Addr::new(10, 42, 0, 7);
+        let rendered = Tags::new(NixHash::try_from("abc123").unwrap(), "deadbeef", Slot::Green)
+            .with_service_ip(ip)
+            .render();
+
+        assert_eq!(service_ip_from_tags(Some(&rendered)), Some(ip));
+        assert_eq!(slot_from_tags(Some(&rendered)), Slot::Green);
+        assert_eq!(
+            nix_hash_from_tags(Some(&rendered)).unwrap().as_str(),
+            "abc123"
+        );
+        assert!(is_proxnix_managed(Some(&rendered)));
+    }
+
+    #[test]
+    fn an_instance_with_no_observed_ip_yet_has_none() {
+        let rendered = tags_for("abc123", "deadbeef", Slot::Blue);
+        assert_eq!(service_ip_from_tags(Some(&rendered)), None);
+    }
+
+    #[test]
+    fn the_service_ip_tag_is_not_confused_with_the_nix_tag() {
+        let rendered = Tags::new(NixHash::try_from("abc123").unwrap(), "x", Slot::Blue)
+            .with_service_ip(Ipv4Addr::new(192, 168, 1, 50))
+            .render();
+        assert_eq!(
+            service_ip_from_tags(Some(&rendered)),
+            Some(Ipv4Addr::new(192, 168, 1, 50))
+        );
+        assert_eq!(nix_hash_from_tags(Some(&rendered)).unwrap().as_str(), "abc123");
     }
 
     #[test]

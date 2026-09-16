@@ -1,4 +1,4 @@
-use crate::context::StorePath;
+use crate::context::{StorePath, Tags};
 use crate::nix::find_in_repo;
 use proxnix_core::{SlotId, Workload};
 use crate::pct::{copy_to_template_storage, pct_create};
@@ -80,7 +80,7 @@ fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<Stri
 pub trait Materialise: Workload {
     fn nix_build_attr(&self) -> &str;
     fn impure(&self) -> bool;
-    fn provision_inactive(&self, artifact: &StorePath, commit_hash: &str, template_cache_path: &str, target: SlotId) -> Result<()>;
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()>;
 
     fn nix_build(&self, repo_path: &str) -> Result<StorePath> {
         let nix_dir = find_flake_dir(repo_path)?;
@@ -97,12 +97,9 @@ impl Materialise for VMConfig {
     fn impure(&self) -> bool {
         self.impure
     }
-    fn provision_inactive(&self, artifact: &StorePath, commit_hash: &str, _template_cache_path: &str, target: SlotId) -> Result<()> {
-        let nix_hash = artifact.nix_hash().ok_or_else(|| {
-            AppError::CmdError(format!("could not extract nix hash from path {}", artifact))
-        })?;
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, _template_cache_path: &str, target: SlotId) -> Result<()> {
         let id = target.inner();
-        qm_create(self, &nix_hash, commit_hash, target)?;
+        qm_create(self, tags, target)?;
         let disk_ref = qm_importdisk(id, &qcow2_path(artifact.as_str()), &self.storage_location)?;
         qm_set_disk(id, &disk_ref, &self.disk_slot)?;
         qm_set_agent(id)?;
@@ -118,12 +115,9 @@ impl Materialise for ContainerConfig {
     fn impure(&self) -> bool {
         self.impure
     }
-    fn provision_inactive(&self, artifact: &StorePath, commit_hash: &str, template_cache_path: &str, target: SlotId) -> Result<()> {
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()> {
         let ostemplate = copy_to_template_storage(artifact.as_str(), template_cache_path)?;
-        let nix_hash = artifact.nix_hash().ok_or_else(|| {
-            AppError::CmdError(format!("could not extract nix hash from path {}", artifact))
-        })?;
-        pct_create(self, &ostemplate, &nix_hash, commit_hash, target)?;
+        pct_create(self, &ostemplate, tags, target)?;
         Ok(())
     }
 }

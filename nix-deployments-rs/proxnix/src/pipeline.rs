@@ -41,6 +41,13 @@ impl WorkloadGroup {
             WorkloadGroup::Containers(configs) => deployments::reconcile(configs, ctx),
         }
     }
+
+    pub fn ensure_running(&self) {
+        match self {
+            WorkloadGroup::Vms(configs) => deployments::ensure_running(configs),
+            WorkloadGroup::Containers(configs) => deployments::ensure_running(configs),
+        }
+    }
 }
 
 pub fn run_pipeline(repo_url: &str, commit_hash: &str, app_config: &AppConfig) -> Result<()> {

@@ -1,7 +1,26 @@
-use crate::context::NixHash;
+use crate::context::Tags;
 use crate::types::{AppError, ContainerConfig, ContainerFieldChange, Result};
 use proxnix_core::SlotId;
 use std::process::Command;
+
+pub fn pct_set_tags(ct_id: u32, tags: &Tags) -> Result<()> {
+    let output = Command::new("pct")
+        .arg("set")
+        .arg(ct_id.to_string())
+        .arg("--tags")
+        .arg(tags.render())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "pct set tags failed for {} (exit: {:?}): {}",
+            ct_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
 
 // Finds the .tar.xz inside the nix build result tarball directory,
 // copies it to Proxmox template storage, and returns the storage reference
@@ -33,8 +52,7 @@ pub fn copy_to_template_storage(result_path: &str, template_cache_path: &str) ->
 pub fn pct_create(
     config: &ContainerConfig,
     ostemplate: &str,
-    nix_hash: &NixHash,
-    commit_hash: &str,
+    tags: &Tags,
     target: SlotId,
 ) -> Result<String> {
     let mut cmd = Command::new("pct");
@@ -60,7 +78,7 @@ pub fn pct_create(
         .arg("--protection")
         .arg(if config.protected { "1" } else { "0" })
         .arg("--tags")
-        .arg(format!("proxnix;nix-{};commit-{};{}", nix_hash, commit_hash, target.slot()));
+        .arg(tags.render());
 
     for (i, mount) in config.bind_mounts.iter().enumerate() {
         cmd.arg(format!("--mp{}", i))

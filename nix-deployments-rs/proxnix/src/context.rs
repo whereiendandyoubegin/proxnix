@@ -1,4 +1,6 @@
-use std::{borrow::Borrow, collections::HashMap, fmt};
+use std::{borrow::Borrow, collections::HashMap, fmt, net::Ipv4Addr};
+
+use proxnix_core::Slot;
 
 use crate::types::{AppError, Result};
 
@@ -124,6 +126,43 @@ impl AsRef<str> for ImageType {
 impl Borrow<str> for ImageType {
     fn borrow(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tags {
+    pub nix_hash: NixHash,
+    pub commit: String,
+    pub slot: Slot,
+    pub service_ip: Option<Ipv4Addr>,
+}
+
+impl Tags {
+    pub fn new(nix_hash: NixHash, commit: &str, slot: Slot) -> Self {
+        Self {
+            nix_hash,
+            commit: commit.to_string(),
+            slot,
+            service_ip: None,
+        }
+    }
+
+    pub fn with_service_ip(&self, ip: Ipv4Addr) -> Self {
+        Self {
+            service_ip: Some(ip),
+            ..self.clone()
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let base = format!(
+            "proxnix;nix-{};commit-{};{}",
+            self.nix_hash, self.commit, self.slot
+        );
+        match self.service_ip {
+            Some(ip) => format!("{};ip-{}", base, ip),
+            None => base,
+        }
     }
 }
 
