@@ -428,6 +428,46 @@ mod tests {
         Tags::new(NixHash::try_from(nix).unwrap(), commit, slot).render()
     }
 
+    const NIX_EVAL_SAMPLE: &str = r#"{
+      "vms": {
+        "test-website": {
+          "name": "test-website", "hostname": "test-website",
+          "blue_id": 823, "green_id": 923,
+          "service_address": "192.168.1.23", "backend_port": 80,
+          "image_type": "build-qcow2-website",
+          "cores": 2, "sockets": 1, "memory_mb": 2048, "disk_gb": 10,
+          "storage_location": "local-lvm", "protected": false, "impure": false
+        }
+      },
+      "containers": {
+        "pihole": {
+          "name": "pihole", "hostname": "pihole",
+          "blue_id": 833, "green_id": 933,
+          "image_type": "build-lxc-pihole",
+          "cores": 2, "memory_mb": 1024, "disk_gb": 8,
+          "storage_location": "local-lvm", "protected": false,
+          "privileged": true, "impure": false
+        }
+      }
+    }"#;
+
+    #[test]
+    fn the_nix_schema_parses_into_the_config_types() {
+        let parsed = parse_config(NIX_EVAL_SAMPLE).expect("nix eval output should parse");
+
+        let vm = &parsed.vms["test-website"];
+        assert_eq!(vm.blue_id, 823);
+        assert_eq!(vm.green_id, 923);
+        assert_eq!(vm.service_address, Some(Ipv4Addr::new(192, 168, 1, 23)));
+        assert_eq!(vm.backend_port, 80);
+    }
+
+    #[test]
+    fn a_workload_without_a_service_address_is_unproxied() {
+        let parsed = parse_config(NIX_EVAL_SAMPLE).expect("nix eval output should parse");
+        assert_eq!(parsed.containers["pihole"].service_address, None);
+    }
+
     #[test]
     fn a_registered_service_ip_survives_a_tag_round_trip() {
         let ip = Ipv4Addr::new(10, 42, 0, 7);

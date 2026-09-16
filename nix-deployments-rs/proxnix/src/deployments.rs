@@ -146,10 +146,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         let tags = tags.with_service_ip(new_ip);
         T::set_tags(target.inner(), &tags)?;
         config.post_check()?;
-        config.health_check(SocketAddr::from((
-            new_ip,
-            u16::try_from(config.proxy_port())?,
-        )))?;
+        config.health_check(SocketAddr::from((new_ip, config.backend_port())))?;
         Ok(Self {
             config,
             new_slot,
@@ -170,8 +167,16 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             Phase::Healthy { new_backend_id, new_ip, .. } => (new_backend_id, new_ip),
             _ => unreachable!("register_and_switch called outside Healthy phase"),
         };
-        sozu.check_sozu_cluster(config)?
-            .register_backend(config, &new_backend_id, new_ip)?;
+        match config.service_address() {
+            None => info!(
+                "{} has no service address, leaving it unproxied",
+                config.name()
+            ),
+            Some(_) => {
+                sozu.check_sozu_cluster(config)?
+                    .register_backend(config, &new_backend_id, new_ip)?;
+            }
+        }
         if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
             match sozu.remove_backend(config, old_bid, old_ip_val) {
                 Ok(()) => {}
@@ -649,10 +654,9 @@ pub fn reconcile<T: Deployments>(
                     config.apply_in_place(deployed_id, &changes)?;
                     config.post_check()?;
                     match service_ip {
-                        Some(ip) => config.health_check(SocketAddr::from((
-                            ip,
-                            u16::try_from(config.proxy_port())?,
-                        ))),
+                        Some(ip) => {
+                            config.health_check(SocketAddr::from((ip, config.backend_port())))
+                        }
                         None => Ok(()),
                     }
                 })();
@@ -753,7 +757,8 @@ mod tests {
             blue_id: 823,
             green_id: 824,
             hostname: "test-website".to_string(),
-            proxy_port: 80,
+            service_address: Some(Ipv4Addr::new(192, 168, 1, 23)),
+            backend_port: 80,
             image_type: ImageType::from("build-qcow2-website"),
             cores: 2,
             sockets: 1,
