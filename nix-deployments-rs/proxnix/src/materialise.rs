@@ -116,7 +116,8 @@ impl Materialise for ContainerConfig {
         self.impure
     }
     fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()> {
-        let ostemplate = copy_to_template_storage(artifact.as_str(), template_cache_path)?;
+        let ostemplate =
+            copy_to_template_storage(artifact.as_str(), template_cache_path, &tags.nix_hash)?;
         pct_create(self, &ostemplate, tags, target)?;
         Ok(())
     }

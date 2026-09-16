@@ -1,4 +1,4 @@
-use crate::context::Tags;
+use crate::context::{NixHash, Tags};
 use crate::types::{AppError, ContainerConfig, ContainerFieldChange, MountMode, Result};
 use proxnix_core::SlotId;
 use std::process::Command;
@@ -25,7 +25,11 @@ pub fn pct_set_tags(ct_id: u32, tags: &Tags) -> Result<()> {
 // Finds the .tar.xz inside the nix build result tarball directory,
 // copies it to Proxmox template storage, and returns the storage reference
 // for use with pct create (e.g. "local:vztmpl/nixos-image-lxc-....tar.xz")
-pub fn copy_to_template_storage(result_path: &str, template_cache_path: &str) -> Result<String> {
+pub fn copy_to_template_storage(
+    result_path: &str,
+    template_cache_path: &str,
+    nix_hash: &NixHash,
+) -> Result<String> {
     let tarball_dir = std::path::Path::new(result_path).join("tarball");
     let entry = std::fs::read_dir(&tarball_dir)
         .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", tarball_dir.display(), e)))?
@@ -42,11 +46,12 @@ pub fn copy_to_template_storage(result_path: &str, template_cache_path: &str) ->
         .to_string_lossy()
         .to_string();
 
-    let dest = format!("{}{}", template_cache_path, filename);
+    let unique = format!("{}-{}", nix_hash, filename);
+    let dest = format!("{}{}", template_cache_path, unique);
     std::fs::copy(&src, &dest)
         .map_err(|e| AppError::CmdError(format!("failed to copy {} to {}: {}", src.display(), dest, e)))?;
 
-    Ok(format!("local:vztmpl/{}", filename))
+    Ok(format!("local:vztmpl/{}", unique))
 }
 
 pub fn pct_create(

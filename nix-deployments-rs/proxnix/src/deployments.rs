@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use proxnix_core::{Slot, SlotId, Workload};
 use rayon::prelude::*;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const IP_POLL_ATTEMPTS: u32 = 60;
 const IP_POLL_DELAY: Duration = Duration::from_secs(2);
@@ -351,7 +351,7 @@ pub fn ensure_running<T: Deployments>(configs: &[T]) {
     configs
         .iter()
         .for_each(|config| match deployed.get(config.name()) {
-            None => warn!(
+            None => debug!(
                 "periodic reconcile: {} is not deployed, it will be created on the next push",
                 config.name()
             ),
