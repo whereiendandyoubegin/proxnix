@@ -133,10 +133,25 @@ pub struct ContainerConfig {
     pub impure: bool,
 }
 
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MountMode {
+    ReadWrite,
+    ReadOnly,
+}
+
+impl Default for MountMode {
+    fn default() -> Self {
+        MountMode::ReadWrite
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct BindMount {
     pub host_path: String,
     pub container_path: String,
+    #[serde(default)]
+    pub mode: MountMode,
 }
 
 impl Workload for ContainerConfig {

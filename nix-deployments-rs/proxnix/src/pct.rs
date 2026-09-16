@@ -1,5 +1,5 @@
 use crate::context::Tags;
-use crate::types::{AppError, ContainerConfig, ContainerFieldChange, Result};
+use crate::types::{AppError, ContainerConfig, ContainerFieldChange, MountMode, Result};
 use proxnix_core::SlotId;
 use std::process::Command;
 
@@ -81,8 +81,14 @@ pub fn pct_create(
         .arg(tags.render());
 
     for (i, mount) in config.bind_mounts.iter().enumerate() {
-        cmd.arg(format!("--mp{}", i))
-            .arg(format!("{},mp={}", mount.host_path, mount.container_path));
+        let suffix = match mount.mode {
+            MountMode::ReadOnly => ",ro=1",
+            MountMode::ReadWrite => "",
+        };
+        cmd.arg(format!("--mp{}", i)).arg(format!(
+            "{},mp={}{}",
+            mount.host_path, mount.container_path, suffix
+        ));
     }
 
     let output = cmd.output()?;

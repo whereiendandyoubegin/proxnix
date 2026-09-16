@@ -2,7 +2,7 @@ use crate::context::NixHash;
 use crate::pct::pct_config;
 use crate::types::{
     AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
-    QMConfig, QMList, Result,
+    MountMode, QMConfig, QMList, Result,
 };
 use proxnix_core::Slot;
 use rayon::prelude::*;
@@ -327,6 +327,10 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
                         bind_mounts.push(BindMount {
                             host_path: host_path.to_string(),
                             container_path: container_path.to_string(),
+                            mode: match value.contains("ro=1") {
+                                true => MountMode::ReadOnly,
+                                false => MountMode::ReadWrite,
+                            },
                         });
                     }
                 }
