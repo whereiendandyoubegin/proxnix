@@ -1,4 +1,6 @@
+use crate::context::NixHash;
 use crate::types::{AppError, ContainerConfig, ContainerFieldChange, Result};
+use proxnix_core::SlotId;
 use std::process::Command;
 
 // Finds the .tar.xz inside the nix build result tarball directory,
@@ -31,12 +33,13 @@ pub fn copy_to_template_storage(result_path: &str, template_cache_path: &str) ->
 pub fn pct_create(
     config: &ContainerConfig,
     ostemplate: &str,
-    nix_hash: &str,
+    nix_hash: &NixHash,
     commit_hash: &str,
+    target: SlotId,
 ) -> Result<String> {
     let mut cmd = Command::new("pct");
     cmd.arg("create")
-        .arg(config.ct_id.to_string())
+        .arg(target.inner().to_string())
         .arg(ostemplate)
         .arg("--hostname")
         .arg(&config.name)
@@ -57,7 +60,7 @@ pub fn pct_create(
         .arg("--protection")
         .arg(if config.protected { "1" } else { "0" })
         .arg("--tags")
-        .arg(format!("proxnix;nix-{};commit-{}", nix_hash, commit_hash));
+        .arg(format!("proxnix;nix-{};commit-{};{}", nix_hash, commit_hash, target.slot()));
 
     for (i, mount) in config.bind_mounts.iter().enumerate() {
         cmd.arg(format!("--mp{}", i))

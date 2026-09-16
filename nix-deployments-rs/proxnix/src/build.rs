@@ -1,27 +1,24 @@
+use crate::context::{ImageType, StorePath};
 use crate::nix::{eval_config, nix_build};
 use crate::pct::pct_start;
 use crate::qm::qm_start;
 use crate::state::{get_container_statuses, get_vm_statuses, parse_config};
 use crate::types::Result;
+use proxnix_core::{Slot, Workload};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
-pub fn nix_store_hash(store_path: &str) -> Option<&str> {
-    store_path
-        .strip_prefix("/nix/store/")
-        .and_then(|s| s.split('-').next())
-}
-
 pub fn build_image_types(
-    image_type_attrs: &HashMap<String, String>,
+    image_type_attrs: &HashMap<ImageType, String>,
     repo_path: &str,
-) -> (HashMap<String, String>, HashMap<String, String>) {
-    let results: Vec<(String, Result<String>)> = image_type_attrs
+) -> (HashMap<ImageType, StorePath>, HashMap<ImageType, String>) {
+    let results: Vec<(ImageType, Result<StorePath>)> = image_type_attrs
         .par_iter()
         .map(|(image_type, build_attr)| {
             info!("Building image type '{}' ({})", image_type, build_attr);
-            let result = nix_build(image_type, build_attr, repo_path);
+            let result = nix_build(image_type.as_str(), build_attr, repo_path)
+                .and_then(|raw| StorePath::try_from(raw));
             match &result {
                 Ok(path) => info!("Built '{}' -> {}", image_type, path),
                 Err(e) => warn!("Failed to build image type '{}': {}", image_type, e),
@@ -69,16 +66,17 @@ pub fn ensure_vms_running(repo_path: &str) {
             desired.vms.len()
         );
         for (name, vm) in &desired.vms {
-            match vm_statuses.get(&vm.vm_id).map(|s| s.as_str()) {
+            let id = vm.id_for_slot(Slot::Blue).inner();
+            match vm_statuses.get(&id).map(|s| s.as_str()) {
                 Some("running") => {
-                    info!("Periodic reconcile: {} (id: {}) is running", name, vm.vm_id);
+                    info!("Periodic reconcile: {} (id: {}) is running", name, id);
                 }
                 Some(status) => {
                     info!(
                         "Periodic reconcile: {} (id: {}) is {} -> starting",
-                        name, vm.vm_id, status
+                        name, id, status
                     );
-                    match qm_start(vm.vm_id) {
+                    match qm_start(id) {
                         Ok(true) => info!("Periodic reconcile: started VM {}", name),
                         Ok(false) => info!("Periodic reconcile: {} already running", name),
                         Err(e) => warn!("Periodic reconcile: failed to start VM {}: {:?}", name, e),
@@ -86,8 +84,8 @@ pub fn ensure_vms_running(repo_path: &str) {
                 }
                 None => {
                     warn!(
-                        "Periodic reconcile: {} (id: {}) does not exist in Proxmox, will be recreated on next push",
-                        name, vm.vm_id
+                        "Periodic reconcile: {} (id: {}) does not exist in Proxmox",
+                        name, id
                     );
                 }
             }
@@ -110,19 +108,20 @@ pub fn ensure_vms_running(repo_path: &str) {
             desired.containers.len()
         );
         for (name, ct) in &desired.containers {
-            match ct_statuses.get(&ct.ct_id).map(|s| s.as_str()) {
+            let id = ct.id_for_slot(Slot::Blue).inner();
+            match ct_statuses.get(&id).map(|s| s.as_str()) {
                 Some("running") => {
                     info!(
                         "Periodic reconcile: container {} (id: {}) is running",
-                        name, ct.ct_id
+                        name, id
                     );
                 }
                 Some(status) => {
                     info!(
                         "Periodic reconcile: container {} (id: {}) is {} -> starting",
-                        name, ct.ct_id, status
+                        name, id, status
                     );
-                    match pct_start(ct.ct_id) {
+                    match pct_start(id) {
                         Ok(true) => info!("Periodic reconcile: started container {}", name),
                         Ok(false) => {
                             info!("Periodic reconcile: container {} already running", name)
@@ -135,8 +134,8 @@ pub fn ensure_vms_running(repo_path: &str) {
                 }
                 None => {
                     warn!(
-                        "Periodic reconcile: container {} (id: {}) does not exist, will be recreated on next push",
-                        name, ct.ct_id
+                        "Periodic reconcile: container {} (id: {}) does not exist",
+                        name, id
                     );
                 }
             }

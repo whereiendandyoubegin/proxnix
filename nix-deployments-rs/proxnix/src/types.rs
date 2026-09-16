@@ -1,6 +1,7 @@
-use proxnix_core::Workload;
+use proxnix_core::{Slot, SlotId, Workload};
 use std::{collections::HashMap, string::FromUtf8Error};
 
+use crate::context::{ImageType, NixHash};
 use crate::pipeline::WorkloadGroup;
 
 #[allow(clippy::enum_variant_names)]
@@ -43,11 +44,12 @@ pub type Result<T> = std::result::Result<T, AppError>;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct VMConfig {
     pub name: String,
-    pub vm_id: u32,
+    pub blue_id: u32,
+    pub green_id: u32,
     pub ip: String,
     pub hostname: String,
     pub proxy_port: u32,
-    pub image_type: String,
+    pub image_type: ImageType,
     pub cores: u16,
     pub sockets: u8,
     pub memory_mb: u32,
@@ -67,9 +69,6 @@ pub struct VMConfig {
 }
 
 impl Workload for VMConfig {
-    fn id(&self) -> u32 {
-        self.vm_id
-    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -79,10 +78,16 @@ impl Workload for VMConfig {
     fn cores(&self) -> u16 {
         self.cores
     }
-    fn ip_for_slot(&self, s: proxnix_core::Slot) -> &str {
+    fn ip_for_slot(&self, s: Slot) -> &str {
         match s {
-            proxnix_core::Slot::Blue => &self.blue_ip,
-            proxnix_core::Slot::Green => &self.green_ip,
+            Slot::Blue => &self.blue_ip,
+            Slot::Green => &self.green_ip,
+        }
+    }
+    fn id_for_slot(&self, s: Slot) -> SlotId {
+        match s {
+            Slot::Blue => SlotId::Blue(self.blue_id),
+            Slot::Green => SlotId::Green(self.green_id),
         }
     }
 }
@@ -106,8 +111,9 @@ pub struct ContainerConfig {
     pub ip: String,
     pub proxy_port: u32,
     pub hostname: String,
-    pub ct_id: u32,
-    pub image_type: String,
+    pub blue_id: u32,
+    pub green_id: u32,
+    pub image_type: ImageType,
     pub cores: u16,
     pub memory_mb: u32,
     pub storage_location: String,
@@ -132,9 +138,6 @@ pub struct BindMount {
 }
 
 impl Workload for ContainerConfig {
-    fn id(&self) -> u32 {
-        self.ct_id
-    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -144,10 +147,16 @@ impl Workload for ContainerConfig {
     fn cores(&self) -> u16 {
         self.cores
     }
-    fn ip_for_slot(&self, s: proxnix_core::Slot) -> &str {
+    fn ip_for_slot(&self, s: Slot) -> &str {
         match s {
-            proxnix_core::Slot::Blue => &self.blue_ip,
-            proxnix_core::Slot::Green => &self.green_ip,
+            Slot::Blue => &self.blue_ip,
+            Slot::Green => &self.green_ip,
+        }
+    }
+    fn id_for_slot(&self, s: Slot) -> SlotId {
+        match s {
+            Slot::Blue => SlotId::Blue(self.blue_id),
+            Slot::Green => SlotId::Green(self.green_id),
         }
     }
 }
@@ -174,7 +183,7 @@ fn default_slot() -> proxnix_core::Slot {
 pub struct DeployedVM {
     pub vm_id: u32,
     pub vm_name: String,
-    pub nix_hash: Option<String>,
+    pub nix_hash: Option<NixHash>,
     pub template_id: Option<u32>,
     pub mem_mb: u32,
     pub bootdisk_gb: f64,
@@ -190,7 +199,7 @@ pub struct DeployedVM {
 pub struct DeployedContainer {
     pub ct_id: u32,
     pub ct_name: String,
-    pub nix_hash: Option<String>,
+    pub nix_hash: Option<NixHash>,
     pub mem_mb: u32,
     pub bootdisk_gb: f64,
     pub status: String,
@@ -289,8 +298,8 @@ pub struct DesiredState {
 impl DesiredState {
     pub fn into_workload_groups(self) -> Vec<WorkloadGroup> {
         vec![
-            WorkloadGroup::new(self.vms.into_values().collect()),
-            WorkloadGroup::new(self.containers.into_values().collect()),
+            WorkloadGroup::Vms(self.vms.into_values().collect()),
+            WorkloadGroup::Containers(self.containers.into_values().collect()),
         ]
     }
 }
@@ -364,3 +373,4 @@ impl Outcome {
         }
     }
 }
+

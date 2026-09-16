@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+use crate::context::BackendId;
 
 use sozu_command_lib::{
     channel::Channel,
@@ -71,14 +72,13 @@ impl Proxied for ContainerConfig {
     }
 }
 
-pub struct WithIp<'a, T: Proxied>(pub &'a T, pub &'a str);
+pub struct WithIp<'a, T: Proxied>(pub &'a T, pub Ipv4Addr);
 
 impl<'a, T: Proxied> Proxied for WithIp<'a, T> {
     fn ip(&self) -> Result<IpAddress> {
-        let parsed: Ipv4Addr = self.1.parse()?;
         Ok(IpAddress {
             inner: Some(sozu_command_lib::proto::command::ip_address::Inner::V4(
-                u32::from(parsed),
+                u32::from(self.1),
             )),
         })
     }
@@ -156,7 +156,7 @@ impl SozuClient {
     pub fn register_backend<T: Proxied>(
         &mut self,
         config: &T,
-        backend_id: &str,
+        backend_id: &BackendId,
     ) -> Result<&mut Self> {
         info!(
             "sozu: registering backend '{}' for cluster '{}'",
@@ -166,7 +166,7 @@ impl SozuClient {
         self.channel.write_message(
             &RequestType::AddBackend(AddBackend {
                 cluster_id: config.cluster_id().to_string(),
-                backend_id: backend_id.to_string(),
+                backend_id: backend_id.as_str().to_string(),
                 address: config.socket_address()?,
                 ..Default::default()
             })
@@ -181,7 +181,7 @@ impl SozuClient {
             _ => Err(AppError::SozuError("invalid status".to_string())),
         }
     }
-    pub fn remove_backend<T: Proxied>(&mut self, config: &T, backend_id: &str) -> Result<()> {
+    pub fn remove_backend<T: Proxied>(&mut self, config: &T, backend_id: &BackendId) -> Result<()> {
         info!(
             "sozu: removing backend '{}' from cluster '{}'",
             backend_id,
@@ -190,7 +190,7 @@ impl SozuClient {
         self.channel.write_message(
             &RequestType::RemoveBackend(RemoveBackend {
                 cluster_id: config.cluster_id().to_string(),
-                backend_id: backend_id.to_string(),
+                backend_id: backend_id.as_str().to_string(),
                 address: config.socket_address()?,
                 ..Default::default()
             })

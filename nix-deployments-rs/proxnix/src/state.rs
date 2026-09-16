@@ -1,3 +1,4 @@
+use crate::context::NixHash;
 use crate::pct::{pct_config, pct_list};
 use crate::types::{
     AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
@@ -154,8 +155,15 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
             let nix_hash = parsed.tags.as_deref().and_then(|t| {
                 t.split(';')
                     .find(|tag| tag.trim().starts_with("nix-"))
-                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+                    .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
             });
+            let active_slot = parsed.tags.as_deref()
+                .and_then(|t| {
+                    t.split(';')
+                        .find(|tag| tag.trim().starts_with("slot-"))
+                        .and_then(|tag| Slot::try_from(tag.trim()).ok())
+                })
+                .unwrap_or(Slot::Blue);
             Ok(Some((
                 vm.vm_name.clone(),
                 DeployedVM {
@@ -169,7 +177,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
                     pid: vm.pid,
                     cores: parsed.cores as u16,
                     sockets: parsed.sockets,
-                    active_slot: vm.active_slot,
+                    active_slot,
                 },
             )))
         })
@@ -191,7 +199,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                 qmlist.name.clone(),
                 DeployedVM {
                     vm_id: qmlist.vm_id,
-                    vm_name: qmlist.name,
+                    vm_name: qmlist.name.clone(),
                     nix_hash: None,
                     template_id: None,
                     mem_mb: qmlist.mem_mb,
@@ -343,8 +351,15 @@ pub fn enrich_container_info(
             let nix_hash = config.tags.as_deref().and_then(|t| {
                 t.split(';')
                     .find(|tag| tag.trim().starts_with("nix-"))
-                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
+                    .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
             });
+            let active_slot = config.tags.as_deref()
+                .and_then(|t| {
+                    t.split(';')
+                        .find(|tag| tag.trim().starts_with("slot-"))
+                        .and_then(|tag| Slot::try_from(tag.trim()).ok())
+                })
+                .unwrap_or(Slot::Blue);
             Ok(Some((
                 entry.ct_name.clone(),
                 DeployedContainer {
@@ -357,7 +372,7 @@ pub fn enrich_container_info(
                     cores: config.cores,
                     bind_mounts: config.bind_mounts,
                     privileged: !config.unprivileged,
-                    active_slot: Slot::Blue,
+                    active_slot,
                 },
             )))
         })

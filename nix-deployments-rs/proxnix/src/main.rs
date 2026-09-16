@@ -15,6 +15,7 @@ struct AppState {
 }
 
 mod build;
+mod context;
 mod deployments;
 mod git;
 mod materialise;
