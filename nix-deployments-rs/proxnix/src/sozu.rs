@@ -4,9 +4,9 @@ use crate::context::BackendId;
 use sozu_command_lib::{
     channel::Channel,
     proto::command::{
-        ActivateListener, AddBackend, Cluster, HttpListenerConfig, IpAddress, ListenerType,
-        RemoveBackend, Request, RequestHttpFrontend, Response, ResponseStatus, SocketAddress,
-        request::RequestType,
+        AddBackend, Cluster, IpAddress, RemoveBackend, Request, RequestHttpFrontend, Response,
+        ResponseContent, ResponseStatus, SocketAddress, request::RequestType,
+        response_content::ContentType,
     },
 };
 use tracing::info;
@@ -36,11 +36,12 @@ pub trait Proxied {
 
     fn frontend_address(&self) -> Option<SocketAddress> {
         self.service_address()
-            .map(|ip| socket_address(ip, FRONTEND_PORT))
+            .map(|_| socket_address(SOZU_LISTENER_IP, FRONTEND_PORT))
     }
 }
 
 pub const FRONTEND_PORT: u16 = 80;
+pub const SOZU_LISTENER_IP: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 
 impl Proxied for VMConfig {
     fn backend_port(&self) -> u16 {
@@ -74,6 +75,16 @@ impl Proxied for ContainerConfig {
 
 const SOZU_MAX_PROCESSING: u32 = 32;
 
+fn names_a_cluster(content: Option<&ResponseContent>) -> bool {
+    match content.and_then(|c| c.content_type.as_ref()) {
+        Some(ContentType::Clusters(clusters)) => !clusters.vec.is_empty(),
+        Some(ContentType::WorkerResponses(workers)) => {
+            workers.map.values().any(|c| names_a_cluster(Some(c)))
+        }
+        _ => false,
+    }
+}
+
 pub struct SozuClient {
     pub channel: Channel<Request, Response>,
 }
@@ -85,12 +96,12 @@ impl SozuClient {
         Ok(Self { channel })
     }
 
-    fn settled(&mut self) -> Result<(ResponseStatus, String)> {
+    fn settled_response(&mut self) -> Result<Response> {
         for _ in 0..SOZU_MAX_PROCESSING {
             let response = self.channel.read_message()?;
             match ResponseStatus::try_from(response.status) {
                 Ok(ResponseStatus::Processing) => continue,
-                Ok(status) => return Ok((status, response.message)),
+                Ok(_) => return Ok(response),
                 Err(_) => {
                     return Err(AppError::SozuError(format!(
                         "unrecognised sozu status {}",
@@ -104,52 +115,22 @@ impl SozuClient {
         ))
     }
 
+    fn settled(&mut self) -> Result<(ResponseStatus, String)> {
+        let response = self.settled_response()?;
+        match ResponseStatus::try_from(response.status) {
+            Ok(status) => Ok((status, response.message)),
+            Err(_) => Err(AppError::SozuError(format!(
+                "unrecognised sozu status {}",
+                response.status
+            ))),
+        }
+    }
+
     fn expect_ok(&mut self, what: &str) -> Result<()> {
         match self.settled()? {
             (ResponseStatus::Ok, _) => Ok(()),
             (_, message) => Err(AppError::SozuError(format!("{}: {}", what, message))),
         }
-    }
-
-    fn ensure_listener(&mut self, address: SocketAddress) -> Result<()> {
-        info!("sozu: ensuring http listener on port {}", address.port);
-        self.channel.write_message(
-            &RequestType::AddHttpListener(HttpListenerConfig {
-                address: address.clone(),
-                sticky_name: "SOZUBALANCEID".to_string(),
-                front_timeout: 60,
-                back_timeout: 30,
-                connect_timeout: 3,
-                request_timeout: 10,
-                active: false,
-                ..Default::default()
-            })
-            .into(),
-        )?;
-        match self.settled()? {
-            (ResponseStatus::Ok, _) => {}
-            (_, message) => info!(
-                "sozu: listener not added, assuming it already exists: {}",
-                message
-            ),
-        }
-
-        self.channel.write_message(
-            &RequestType::ActivateListener(ActivateListener {
-                address,
-                proxy: ListenerType::Http.into(),
-                from_scm: false,
-            })
-            .into(),
-        )?;
-        match self.settled()? {
-            (ResponseStatus::Ok, _) => {}
-            (_, message) => info!(
-                "sozu: listener not activated, assuming it is already active: {}",
-                message
-            ),
-        }
-        Ok(())
     }
 
     pub fn ensure_cluster<T: Proxied>(&mut self, config: &T) -> Result<&mut Self> {
@@ -171,12 +152,10 @@ impl SozuClient {
             ))
         })?;
 
-        self.ensure_listener(frontend.clone())?;
-
         info!(
-            "sozu: adding http frontend for '{}' on {}:{} -> hostname '{}'",
+            "sozu: adding http frontend for '{}' on {}:{} matching hostname '{}'",
             config.cluster_id(),
-            config.service_address().map(|i| i.to_string()).unwrap_or_default(),
+            SOZU_LISTENER_IP,
             FRONTEND_PORT,
             config.hostname()
         );
@@ -239,20 +218,27 @@ impl SozuClient {
             })
             .into(),
         )?;
-        self.expect_ok("remove backend")
+        match self.settled()? {
+            (ResponseStatus::Ok, _) => Ok(()),
+            (_, message) if message.contains("did not bring any change") => {
+                info!("sozu: backend '{}' was already absent", backend_id);
+                Ok(())
+            }
+            (_, message) => Err(AppError::SozuError(format!("remove backend: {}", message))),
+        }
     }
     pub fn check_sozu_cluster<T: Proxied>(&mut self, config: &T) -> Result<&mut Self> {
         info!("sozu: checking cluster '{}'", config.cluster_id());
         self.channel.write_message(
             &RequestType::QueryClusterById(config.cluster_id().to_string()).into(),
         )?;
-        match self.settled()? {
-            (ResponseStatus::Ok, _) => Ok(self),
-            (_, message) => {
+        let response = self.settled_response()?;
+        match ResponseStatus::try_from(response.status) {
+            Ok(ResponseStatus::Ok) if names_a_cluster(response.content.as_ref()) => Ok(self),
+            _ => {
                 info!(
-                    "sozu: cluster '{}' not present ({}), creating it",
-                    config.cluster_id(),
-                    message
+                    "sozu: cluster '{}' is not registered, creating it",
+                    config.cluster_id()
                 );
                 self.ensure_cluster(config)
             }
