@@ -278,6 +278,8 @@ pub struct AppConfig {
     #[serde(default = "default_template_cache_path")]
     pub template_cache_path: String,
     pub server_address: std::net::SocketAddr,
+    #[serde(default)]
+    pub backend_pool: Option<crate::context::BackendPool>,
 }
 
 fn default_sozu_socket_path() -> String {

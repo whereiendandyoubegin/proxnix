@@ -5,7 +5,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
     build::build_image_types,
-    context::{CommitHash, ImageType, NixHash, ReconcileContext, RepoPath, SozuSocketPath, TemplateCachePath},
+    context::{CommitHash, ImageType, NixHash, PoolFit, ReconcileContext, RepoPath, SozuSocketPath, TemplateCachePath},
     deployments,
     git::git_ensure_commit,
     materialise::Materialise,
@@ -42,6 +42,13 @@ impl WorkloadGroup {
         }
     }
 
+    pub fn len(&self) -> usize {
+        match self {
+            WorkloadGroup::Vms(configs) => configs.len(),
+            WorkloadGroup::Containers(configs) => configs.len(),
+        }
+    }
+
     pub fn ensure_running(&self) {
         match self {
             WorkloadGroup::Vms(configs) => deployments::ensure_running(configs),
@@ -58,6 +65,15 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, app_config: &AppConfig) -
     );
     git_ensure_commit(repo_url, &dest_path, commit_hash, &app_config.ssh_key_candidates)?;
     let groups = parse_config(&eval_config(&dest_path)?)?.into_workload_groups();
+
+    let service_count = groups.iter().map(|g| g.len() as u32).sum::<u32>();
+    match app_config.backend_pool.as_ref().map(|p| p.fits(service_count)) {
+        Some(PoolFit::TooSmall { capacity, required }) => warn!(
+            "backend pool holds {} addresses but {} services need {} to deploy; a rebuild may have nowhere to place its new instance",
+            capacity, service_count, required
+        ),
+        Some(PoolFit::Sufficient) | None => {}
+    }
 
     let image_type_attrs: HashMap<ImageType, String> = groups
         .iter()
@@ -79,6 +95,7 @@ pub fn run_pipeline(repo_url: &str, commit_hash: &str, app_config: &AppConfig) -
         commit_hash: CommitHash::try_from(commit_hash)?,
         template_cache_path: TemplateCachePath::try_from(app_config.template_cache_path.as_str())?,
         sozu_socket_path: SozuSocketPath::try_from(app_config.sozu_socket_path.as_str())?,
+        backend_pool: app_config.backend_pool.as_ref(),
     };
 
     let outcomes: Vec<Outcome> = groups

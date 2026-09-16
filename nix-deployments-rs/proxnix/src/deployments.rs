@@ -13,7 +13,7 @@ const HEALTH_DELAY: Duration = Duration::from_secs(2);
 const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 use crate::{
-    context::{BackendId, NixHash, ReconcileContext, StorePath, Tags},
+    context::{BackendId, BackendPool, NixHash, ReconcileContext, StorePath, Tags},
     materialise::Materialise,
     pct::{pct_destroy, pct_list, pct_set_resources, pct_set_tags, pct_start, pct_stop},
     qm::{qm_destroy, qm_get_running_ip, qm_set_resources, qm_set_tags, qm_start, qm_stop},
@@ -45,6 +45,7 @@ pub struct DeployContext<'a, T: Deployments> {
     artifact: StorePath,
     tags: Tags,
     template_cache_path: &'a str,
+    backend_pool: Option<&'a BackendPool>,
     phase: Phase,
 }
 
@@ -55,6 +56,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         commit_hash: &'a str,
         template_cache_path: &'a str,
         sozu_socket_path: &str,
+        backend_pool: Option<&'a BackendPool>,
     ) -> Result<Self> {
         let new_slot = Slot::Blue;
         let tags = Tags::new(nix_hash_of(&artifact)?, commit_hash, new_slot);
@@ -69,6 +71,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             artifact,
             tags,
             template_cache_path,
+            backend_pool,
             phase: Phase::Initial,
         })
     }
@@ -81,6 +84,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         commit_hash: &'a str,
         template_cache_path: &'a str,
         sozu_socket_path: &str,
+        backend_pool: Option<&'a BackendPool>,
     ) -> Result<Self> {
         let deployed_slot = deployed.active_slot();
         let new_slot = deployed_slot.switch_slot();
@@ -116,6 +120,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             artifact,
             tags,
             template_cache_path,
+            backend_pool,
             phase: Phase::Initial,
         })
     }
@@ -136,13 +141,20 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     }
 
     fn start_and_check(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, sozu, artifact, tags, template_cache_path } = self;
+        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, sozu, artifact, tags, template_cache_path, backend_pool } = self;
         let (target, new_backend_id) = match phase {
             Phase::Provisioned { target, new_backend_id } => (target, new_backend_id),
             _ => unreachable!("start_and_check called outside Provisioned phase"),
         };
         T::start(target.inner())?;
         let new_ip = await_ip::<T>(target.inner())?;
+        match backend_pool {
+            Some(pool) if !pool.contains(new_ip) => warn!(
+                "{} came up on {}, which is outside the declared backend pool {}-{}; the pool declaration and the dhcp scope disagree",
+                config.name(), new_ip, pool.start, pool.end
+            ),
+            _ => {}
+        }
         let tags = tags.with_service_ip(new_ip);
         T::set_tags(target.inner(), &tags)?;
         config.post_check()?;
@@ -157,12 +169,13 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             artifact,
             tags,
             template_cache_path,
+            backend_pool,
             phase: Phase::Healthy { new_backend_id, new_ip },
         })
     }
 
     fn register_and_switch(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, mut sozu, artifact, tags, template_cache_path } = self;
+        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, mut sozu, artifact, tags, template_cache_path, backend_pool } = self;
         let (new_backend_id, new_ip) = match phase {
             Phase::Healthy { new_backend_id, new_ip, .. } => (new_backend_id, new_ip),
             _ => unreachable!("register_and_switch called outside Healthy phase"),
@@ -175,24 +188,24 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             Some(_) => {
                 sozu.check_sozu_cluster(config)?
                     .register_backend(config, &new_backend_id, new_ip)?;
-            }
-        }
-        if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
-            match sozu.remove_backend(config, old_bid, old_ip_val) {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!(
-                        "failed to deregister old backend {}, rolling back new registration: {}",
-                        old_bid, e
-                    );
-                    match sozu.remove_backend(config, &new_backend_id, new_ip) {
+                if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
+                    match sozu.remove_backend(config, old_bid, old_ip_val) {
                         Ok(()) => {}
-                        Err(undo) => warn!(
-                            "could not deregister new backend {}: {}",
-                            new_backend_id, undo
-                        ),
+                        Err(e) => {
+                            warn!(
+                                "failed to deregister old backend {}, rolling back new registration: {}",
+                                old_bid, e
+                            );
+                            match sozu.remove_backend(config, &new_backend_id, new_ip) {
+                                Ok(()) => {}
+                                Err(undo) => warn!(
+                                    "could not deregister new backend {}: {}",
+                                    new_backend_id, undo
+                                ),
+                            }
+                            return Err(e);
+                        }
                     }
-                    return Err(e);
                 }
             }
         }
@@ -206,6 +219,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             artifact,
             tags,
             template_cache_path,
+            backend_pool,
             phase: Phase::BackendRegistered,
         })
     }
@@ -629,6 +643,7 @@ pub fn reconcile<T: Deployments>(
                         ctx.commit_hash.as_str(),
                         ctx.template_cache_path.as_str(),
                         ctx.sozu_socket_path.as_str(),
+                        ctx.backend_pool,
                     )?.run()
                 })();
                 Outcome::new(config.name(), OutcomeKind::Created, result)
@@ -644,6 +659,7 @@ pub fn reconcile<T: Deployments>(
                         ctx.commit_hash.as_str(),
                         ctx.template_cache_path.as_str(),
                         ctx.sozu_socket_path.as_str(),
+                        ctx.backend_pool,
                     )?.run()
                 })();
                 Outcome::new(config.name(), OutcomeKind::Rebuilt, result)

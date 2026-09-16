@@ -266,6 +266,63 @@ pub struct ReconcileContext<'a> {
     pub commit_hash: CommitHash<'a>,
     pub template_cache_path: TemplateCachePath<'a>,
     pub sozu_socket_path: SozuSocketPath<'a>,
+    pub backend_pool: Option<&'a BackendPool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawBackendPool {
+    start: Ipv4Addr,
+    end: Ipv4Addr,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "RawBackendPool")]
+pub struct BackendPool {
+    pub start: Ipv4Addr,
+    pub end: Ipv4Addr,
+}
+
+impl TryFrom<RawBackendPool> for BackendPool {
+    type Error = String;
+    fn try_from(raw: RawBackendPool) -> std::result::Result<Self, Self::Error> {
+        match u32::from(raw.start) > u32::from(raw.end) {
+            true => Err(format!(
+                "backend pool start {} is above its end {}",
+                raw.start, raw.end
+            )),
+            false => Ok(BackendPool {
+                start: raw.start,
+                end: raw.end,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PoolFit {
+    Sufficient,
+    TooSmall { capacity: u32, required: u32 },
+}
+
+impl BackendPool {
+    pub fn capacity(&self) -> u32 {
+        u32::from(self.end) - u32::from(self.start) + 1
+    }
+
+    pub fn contains(&self, ip: Ipv4Addr) -> bool {
+        (u32::from(self.start)..=u32::from(self.end)).contains(&u32::from(ip))
+    }
+
+    pub fn fits(&self, service_count: u32) -> PoolFit {
+        let required = service_count * 2;
+        match self.capacity() >= required {
+            true => PoolFit::Sufficient,
+            false => PoolFit::TooSmall {
+                capacity: self.capacity(),
+                required,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +375,41 @@ mod tests {
         )]);
         assert!(map.get("build-qcow2-website").is_some());
         assert!(map.get("build-qcow2-other").is_none());
+    }
+
+    fn pool(start: &str, end: &str) -> BackendPool {
+        serde_json::from_str(&format!(r#"{{"start":"{}","end":"{}"}}"#, start, end)).unwrap()
+    }
+
+    #[test]
+    fn a_pool_counts_both_endpoints() {
+        assert_eq!(pool("192.168.1.200", "192.168.1.207").capacity(), 8);
+        assert_eq!(pool("192.168.1.200", "192.168.1.200").capacity(), 1);
+    }
+
+    #[test]
+    fn four_services_need_eight_addresses() {
+        assert_eq!(pool("192.168.1.200", "192.168.1.207").fits(4), PoolFit::Sufficient);
+        assert_eq!(
+            pool("192.168.1.200", "192.168.1.206").fits(4),
+            PoolFit::TooSmall { capacity: 7, required: 8 }
+        );
+    }
+
+    #[test]
+    fn a_pool_knows_which_addresses_are_its_own() {
+        let p = pool("192.168.1.200", "192.168.1.207");
+        assert!(p.contains(Ipv4Addr::new(192, 168, 1, 200)));
+        assert!(p.contains(Ipv4Addr::new(192, 168, 1, 207)));
+        assert!(!p.contains(Ipv4Addr::new(192, 168, 1, 199)));
+        assert!(!p.contains(Ipv4Addr::new(192, 168, 1, 208)));
+    }
+
+    #[test]
+    fn an_inverted_pool_is_rejected() {
+        let inverted: std::result::Result<BackendPool, _> =
+            serde_json::from_str(r#"{"start":"192.168.1.207","end":"192.168.1.200"}"#);
+        assert!(inverted.is_err());
     }
 
     #[test]
