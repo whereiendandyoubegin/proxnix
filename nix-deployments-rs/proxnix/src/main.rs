@@ -2,7 +2,7 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::state::parse_appconfig;
 use crate::types::AppConfig;
@@ -111,7 +111,7 @@ async fn main() {
             let permit = match periodic_state.semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    info!("Pipeline is running, skipping periodic reconcile");
+                    debug!("Pipeline is running, skipping periodic reconcile");
                     continue;
                 }
             };
