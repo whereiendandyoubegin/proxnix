@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 const IP_POLL_ATTEMPTS: u32 = 120;
 const IP_POLL_DELAY: Duration = Duration::from_secs(2);
-const HEALTH_ATTEMPTS: u32 = 30;
+const HEALTH_ATTEMPTS: u32 = 90;
 const HEALTH_DELAY: Duration = Duration::from_secs(2);
 const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const PROGRESS_EVERY: u32 = 5;
