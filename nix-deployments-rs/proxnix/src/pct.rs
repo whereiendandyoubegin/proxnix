@@ -153,6 +153,25 @@ pub fn pct_create(
     Ok(String::from_utf8(output.stdout)?)
 }
 
+pub fn pct_set_protection(ct_id: u32, protected: bool) -> Result<()> {
+    let output = Command::new("pct")
+        .arg("set")
+        .arg(ct_id.to_string())
+        .arg("--protection")
+        .arg(if protected { "1" } else { "0" })
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "pct set protection {} failed (exit: {:?}): {}",
+            ct_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
+
 pub fn pct_start(ct_id: u32) -> Result<bool> {
     let output = Command::new("pct")
         .arg("start")

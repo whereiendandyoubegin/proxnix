@@ -209,6 +209,25 @@ pub fn qm_set_agent(vm_id: u32) -> Result<String> {
 }
 
 
+pub fn qm_set_protection(vm_id: u32, protected: bool) -> Result<()> {
+    let output = Command::new("qm")
+        .arg("set")
+        .arg(vm_id.to_string())
+        .arg("--protection")
+        .arg(if protected { "1" } else { "0" })
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "qm set protection {} failed (exit: {:?}): {}",
+            vm_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
+
 pub fn qm_start(vm_id: u32) -> Result<bool> {
     let output = Command::new("qm")
         .arg("start")

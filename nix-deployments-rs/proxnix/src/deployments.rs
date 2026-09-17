@@ -16,8 +16,8 @@ const PROGRESS_EVERY: u32 = 5;
 use crate::{
     context::{BackendId, BackendPool, NixHash, ReconcileContext, StorePath, Tags},
     materialise::Materialise,
-    pct::{pct_destroy, pct_list, pct_set_resources, pct_set_tags, pct_start, pct_stop},
-    qm::{qm_destroy, qm_get_running_ip, qm_set_resources, qm_set_tags, qm_start, qm_stop},
+    pct::{pct_destroy, pct_list, pct_set_protection, pct_set_resources, pct_set_tags, pct_start, pct_stop},
+    qm::{qm_destroy, qm_get_running_ip, qm_set_protection, qm_set_resources, qm_set_tags, qm_start, qm_stop},
     sozu::{Proxied, SozuClient},
     state::{
         container_tags, enrich_container_info, enrich_cpu_info, is_proxnix_managed,
@@ -411,6 +411,10 @@ fn abort<T: Deployments>(target: SlotId, expected: &NixHash) {
         ),
         true => {
             warn!("deploy failed, destroying provisioned instance {}", id);
+            match T::set_protection(id, false) {
+                Ok(()) => {}
+                Err(e) => warn!("abort: could not clear protection on {}: {}", id, e),
+            }
             match T::stop(&id) {
                 Ok(()) => {}
                 Err(e) => warn!("abort: could not stop {}: {}", id, e),
@@ -524,6 +528,7 @@ pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync 
     fn get_ip(id: u32) -> Result<String>;
     fn tags(id: u32) -> Result<Option<String>>;
     fn set_tags(id: u32, tags: &Tags) -> Result<()>;
+    fn set_protection(id: u32, protected: bool) -> Result<()>;
     fn stop(id: &u32) -> Result<()>;
     fn destroy(id: u32) -> Result<()>;
     fn start(id: u32) -> Result<bool>;
@@ -578,6 +583,9 @@ impl Deployments for VMConfig {
     }
     fn set_tags(id: u32, tags: &Tags) -> Result<()> {
         qm_set_tags(id, tags)
+    }
+    fn set_protection(id: u32, protected: bool) -> Result<()> {
+        qm_set_protection(id, protected)
     }
     fn stop(id: &u32) -> Result<()> {
         qm_stop(id)
@@ -655,6 +663,9 @@ impl Deployments for ContainerConfig {
     }
     fn set_tags(id: u32, tags: &Tags) -> Result<()> {
         pct_set_tags(id, tags)
+    }
+    fn set_protection(id: u32, protected: bool) -> Result<()> {
+        pct_set_protection(id, protected)
     }
     fn stop(id: &u32) -> Result<()> {
         pct_stop(id)
