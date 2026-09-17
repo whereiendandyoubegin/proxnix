@@ -1,7 +1,47 @@
 use crate::context::{NixHash, Tags};
 use crate::types::{AppError, ContainerConfig, ContainerFieldChange, MountMode, Result};
 use proxnix_core::SlotId;
+use std::path::Path;
 use std::process::Command;
+use tracing::info;
+
+const UNPRIVILEGED_ROOT: u32 = 100000;
+
+fn prepare_bind_mount(mount: &crate::types::BindMount, privileged: bool) -> Result<()> {
+    let path = Path::new(&mount.host_path);
+    match path.exists() {
+        true => Ok(()),
+        false => {
+            info!("creating bind mount host directory {}", mount.host_path);
+            std::fs::create_dir_all(path).map_err(|e| {
+                AppError::CmdError(format!(
+                    "could not create bind mount directory {}: {}",
+                    mount.host_path, e
+                ))
+            })?;
+            match (privileged, mount.mode) {
+                (false, MountMode::ReadWrite) => {
+                    info!(
+                        "chowning {} to {} for unprivileged container access",
+                        mount.host_path, UNPRIVILEGED_ROOT
+                    );
+                    std::os::unix::fs::chown(
+                        path,
+                        Some(UNPRIVILEGED_ROOT),
+                        Some(UNPRIVILEGED_ROOT),
+                    )
+                    .map_err(|e| {
+                        AppError::CmdError(format!(
+                            "could not chown bind mount directory {}: {}",
+                            mount.host_path, e
+                        ))
+                    })
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+}
 
 pub fn pct_set_tags(ct_id: u32, tags: &Tags) -> Result<()> {
     let output = Command::new("pct")
@@ -60,6 +100,11 @@ pub fn pct_create(
     tags: &Tags,
     target: SlotId,
 ) -> Result<String> {
+    config
+        .bind_mounts
+        .iter()
+        .try_for_each(|mount| prepare_bind_mount(mount, config.privileged))?;
+
     let mut cmd = Command::new("pct");
     cmd.arg("create")
         .arg(target.inner().to_string())
