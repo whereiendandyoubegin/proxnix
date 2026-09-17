@@ -8,6 +8,7 @@ use tracing::{info, warn};
 pub const BASE_REPO_PATH: &str = "/tmp/proxnix/repos";
 const NIX_BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 const NIX_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const NIX_EVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 enum BuildOutcome {
     Finished(ExitStatus),
@@ -83,24 +84,63 @@ pub fn eval_config(repo_path: &str) -> Result<String> {
         .parent()
         .ok_or_else(|| AppError::CmdError("Failed to get parent path".to_string()))?;
 
-    let nix_eval = Command::new("nix")
+    let mut child = Command::new("nix")
         .current_dir(nix_dir)
         .arg("eval")
         .arg(".#proxnix")
         .arg("--json")
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
-    if !nix_eval.status.success() {
-        let stderr = String::from_utf8_lossy(&nix_eval.stderr);
-        return Err(AppError::CmdError(format!(
-            "Nix eval failed (exit: {:?}): {}",
-            nix_eval.status.code(),
-            stderr
-        )));
-    }
-    let output_string = String::from_utf8(nix_eval.stdout)?;
 
-    Ok(output_string)
+    let drain = |stream: Option<std::process::ChildStdout>| {
+        stream.map(|s| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut BufReader::new(s), &mut buf).ok();
+                buf
+            })
+        })
+    };
+    let stdout_pump = drain(child.stdout.take());
+    let stderr_pump = child.stderr.take().map(|s| {
+        std::thread::spawn(move || {
+            BufReader::new(s)
+                .lines()
+                .map_while(|l| l.ok())
+                .filter(|l| !l.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    });
+
+    let outcome = wait_with_timeout(&mut child, NIX_EVAL_TIMEOUT)?;
+    let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
+
+    match outcome {
+        BuildOutcome::TimedOut => {
+            warn!(
+                "nix eval exceeded {}s, killing it",
+                NIX_EVAL_TIMEOUT.as_secs()
+            );
+            child.kill().ok();
+            child.wait().ok();
+            Err(AppError::NixError(format!(
+                "eval of .#proxnix timed out after {}s",
+                NIX_EVAL_TIMEOUT.as_secs()
+            )))
+        }
+        BuildOutcome::Finished(status) => match status.success() {
+            false => Err(AppError::NixError(format!(
+                "eval of .#proxnix failed (exit: {:?}): {}",
+                status.code(),
+                stderr
+            ))),
+            true => Ok(stdout),
+        },
+    }
 }
 
 
