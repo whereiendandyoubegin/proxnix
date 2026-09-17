@@ -6,7 +6,7 @@ use proxnix_core::{Slot, SlotId, Workload};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
-const IP_POLL_ATTEMPTS: u32 = 60;
+const IP_POLL_ATTEMPTS: u32 = 120;
 const IP_POLL_DELAY: Duration = Duration::from_secs(2);
 const HEALTH_ATTEMPTS: u32 = 30;
 const HEALTH_DELAY: Duration = Duration::from_secs(2);
@@ -318,6 +318,16 @@ fn await_ip<T: Deployments>(name: &str, id: u32) -> Result<Ipv4Addr> {
             match T::get_ip(id)
                 .ok()
                 .and_then(|raw| raw.trim().parse::<Ipv4Addr>().ok())
+                .filter(|ip| {
+                    let usable = !ip.is_link_local() && !ip.is_unspecified() && !ip.is_loopback();
+                    if !usable {
+                        warn!(
+                            "[{}] {} self-assigned {}, dhcp has not answered",
+                            name, id, ip
+                        );
+                    }
+                    usable
+                })
             {
                 Some(ip) => Some(ip),
                 None => {
