@@ -7,6 +7,9 @@ use tracing::{debug, error, info, warn};
 use crate::state::parse_appconfig;
 use crate::types::AppConfig;
 
+const PERIODIC_INTERVAL: Duration = Duration::from_secs(120);
+const WEBHOOK_LOCK_WAIT: Duration = Duration::from_secs(600);
+
 #[derive(Clone)]
 struct AppState {
     semaphore: Arc<Semaphore>,
@@ -44,11 +47,17 @@ async fn webhook_handler(
     let git_repo_url = parsed.repository.clone();
     let current_git_commit = parsed.hash.clone();
 
-    let permit = match state.semaphore.try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
+    let permit = match tokio::time::timeout(
+        WEBHOOK_LOCK_WAIT,
+        state.semaphore.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
             warn!(
-                "Pipeline already running, rejecting webhook for commit {}",
+                "Pipeline still busy after {}s, rejecting webhook for commit {}",
+                WEBHOOK_LOCK_WAIT.as_secs(),
                 current_git_commit
             );
             return StatusCode::TOO_MANY_REQUESTS;
@@ -105,7 +114,7 @@ async fn main() {
 
     let periodic_state = app_state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
         loop {
             interval.tick().await;
             let permit = match periodic_state.semaphore.clone().try_acquire_owned() {
