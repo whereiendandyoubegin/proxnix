@@ -295,6 +295,8 @@ pub struct AppConfig {
     pub server_address: std::net::SocketAddr,
     #[serde(default)]
     pub backend_pool: Option<crate::context::BackendPool>,
+    #[serde(default)]
+    pub local_repo: Option<String>,
 }
 
 fn default_sozu_socket_path() -> String {

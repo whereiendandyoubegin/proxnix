@@ -91,6 +91,20 @@ async fn webhook_handler(
     StatusCode::OK
 }
 
+enum Mode {
+    Serve,
+    DeployOnce,
+}
+
+impl Mode {
+    fn from_args() -> Self {
+        match std::env::args().any(|a| a == "--deploy-once") {
+            true => Mode::DeployOnce,
+            false => Mode::Serve,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -104,6 +118,20 @@ async fn main() {
     let appconfig_json = nix::eval_appconfig(nixology_path).expect("Failed to eval appconfig");
     let appconfig = parse_appconfig(&appconfig_json).expect("Failed to parse appconfig");
     let server_address = appconfig.server_address;
+
+    if let Mode::DeployOnce = Mode::from_args() {
+        let result = tokio::task::spawn_blocking(move || pipeline::run_local(&appconfig))
+            .await
+            .expect("deploy task panicked");
+        match result {
+            Ok(()) => info!("Deploy finished"),
+            Err(e) => {
+                error!("Deploy failed: {:?}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     let last_repo = Arc::new(RwLock::new(None));
     let app_state = AppState {

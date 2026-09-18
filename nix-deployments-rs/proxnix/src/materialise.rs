@@ -80,11 +80,12 @@ fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<Stri
 pub trait Materialise: Workload {
     fn nix_build_attr(&self) -> &str;
     fn impure(&self) -> bool;
+    fn image_type(&self) -> &str;
     fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()>;
 
     fn nix_build(&self, repo_path: &str) -> Result<StorePath> {
         let nix_dir = find_flake_dir(repo_path)?;
-        let installable = flake_installable(self.name(), self.nix_build_attr());
+        let installable = flake_installable(self.image_type(), self.nix_build_attr());
         let raw = run_nix_build(&nix_dir, &installable, self.impure())?;
         StorePath::try_from(raw)
     }
@@ -96,6 +97,9 @@ impl Materialise for VMConfig {
     }
     fn impure(&self) -> bool {
         self.impure
+    }
+    fn image_type(&self) -> &str {
+        self.image_type.as_str()
     }
     fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, _template_cache_path: &str, target: SlotId) -> Result<()> {
         let id = target.inner();
@@ -114,6 +118,9 @@ impl Materialise for ContainerConfig {
     }
     fn impure(&self) -> bool {
         self.impure
+    }
+    fn image_type(&self) -> &str {
+        self.image_type.as_str()
     }
     fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()> {
         let ostemplate =

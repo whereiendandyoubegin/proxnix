@@ -522,7 +522,6 @@ pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync 
     ) -> Vec<Self::FieldChange>;
     fn requires_rebuild(changes: &[Self::FieldChange]) -> bool;
 
-    fn image_type(&self) -> &str;
     fn is_protected(&self) -> bool;
 
     fn get_ip(id: u32) -> Result<String>;
@@ -568,9 +567,6 @@ impl Deployments for VMConfig {
     }
     fn requires_rebuild(changes: &[Self::FieldChange]) -> bool {
         changes.iter().any(|s| matches!(s, FieldChange::Image | FieldChange::Disk))
-    }
-    fn image_type(&self) -> &str {
-        self.image_type.as_str()
     }
     fn is_protected(&self) -> bool {
         self.protected
@@ -631,9 +627,6 @@ impl Deployments for ContainerConfig {
     }
     fn requires_rebuild(changes: &[Self::FieldChange]) -> bool {
         changes.iter().any(|s| matches!(s, ContainerFieldChange::Image | ContainerFieldChange::Disk))
-    }
-    fn image_type(&self) -> &str {
-        self.image_type.as_str()
     }
     fn is_protected(&self) -> bool {
         self.protected
@@ -926,6 +919,13 @@ mod tests {
             assert_ne!(target.inner(), c.id_for_slot(active).inner());
             assert_ne!(target.slot(), active);
         }
+    }
+
+    #[test]
+    fn builds_reference_the_image_type_not_the_workload_name() {
+        let c = vm(false);
+        assert_eq!(Materialise::image_type(&c), "build-qcow2-website");
+        assert_ne!(Materialise::image_type(&c), Workload::name(&c));
     }
 
     #[test]

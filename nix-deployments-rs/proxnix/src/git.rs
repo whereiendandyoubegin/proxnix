@@ -64,3 +64,15 @@ pub fn git_ensure_commit(repo_url: &str, dest_path: &str, commit_hash: &str, ssh
 
     Ok(repo)
 }
+
+pub fn git_head_commit(repo_path: &str) -> Result<String> {
+    let repo = Repository::open(repo_path)
+        .map_err(|e| AppError::GitError(format!("could not open {}: {}", repo_path, e)))?;
+    let head = repo
+        .head()
+        .map_err(|e| AppError::GitError(format!("could not read HEAD of {}: {}", repo_path, e)))?;
+    let commit = head
+        .peel_to_commit()
+        .map_err(|e| AppError::GitError(format!("HEAD of {} is not a commit: {}", repo_path, e)))?;
+    Ok(commit.id().to_string())
+}
