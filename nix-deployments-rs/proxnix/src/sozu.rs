@@ -5,8 +5,7 @@ use sozu_command_lib::{
     channel::Channel,
     proto::command::{
         AddBackend, Cluster, IpAddress, RemoveBackend, Request, RequestHttpFrontend, Response,
-        ResponseContent, ResponseStatus, SocketAddress, request::RequestType,
-        response_content::ContentType,
+        ResponseStatus, SocketAddress, request::RequestType,
     },
 };
 use tracing::{debug, info};
@@ -75,20 +74,11 @@ impl Proxied for ContainerConfig {
 
 const SOZU_MAX_PROCESSING: u32 = 32;
 const NO_CHANGE: &str = "did not bring any change";
+const ALREADY_EXISTS: &str = "already exists";
 
 pub enum Settled {
     Changed,
     AlreadyApplied,
-}
-
-fn names_a_cluster(content: Option<&ResponseContent>) -> bool {
-    match content.and_then(|c| c.content_type.as_ref()) {
-        Some(ContentType::Clusters(clusters)) => !clusters.vec.is_empty(),
-        Some(ContentType::WorkerResponses(workers)) => {
-            workers.map.values().any(|c| names_a_cluster(Some(c)))
-        }
-        _ => false,
-    }
 }
 
 pub struct SozuClient {
@@ -135,12 +125,14 @@ impl SozuClient {
     fn expect_applied(&mut self, what: &str) -> Result<Settled> {
         match self.settled()? {
             (ResponseStatus::Ok, _) => Ok(Settled::Changed),
-            (_, message) if message.contains(NO_CHANGE) => Ok(Settled::AlreadyApplied),
+            (_, message) if message.contains(NO_CHANGE) || message.contains(ALREADY_EXISTS) => {
+                Ok(Settled::AlreadyApplied)
+            }
             (_, message) => Err(AppError::SozuError(format!("{}: {}", what, message))),
         }
     }
 
-    pub fn ensure_cluster<T: Proxied>(&mut self, config: &T) -> Result<&mut Self> {
+    pub fn ensure_cluster<T: Proxied>(&mut self, config: &T) -> Result<Settled> {
         debug!("sozu: adding cluster '{}'", config.cluster_id());
         self.channel.write_message(
             &RequestType::AddCluster(Cluster {
@@ -176,8 +168,7 @@ impl SozuClient {
             .into(),
         )?;
 
-        self.expect_applied("add http frontend")?;
-        Ok(self)
+        self.expect_applied("add http frontend")
     }
 
     pub fn register_backend<T: Proxied>(
@@ -232,24 +223,6 @@ impl SozuClient {
             }
         }
     }
-    pub fn check_sozu_cluster<T: Proxied>(&mut self, config: &T) -> Result<&mut Self> {
-        debug!("sozu: checking cluster '{}'", config.cluster_id());
-        self.channel.write_message(
-            &RequestType::QueryClusterById(config.cluster_id().to_string()).into(),
-        )?;
-        let response = self.settled_response()?;
-        match ResponseStatus::try_from(response.status) {
-            Ok(ResponseStatus::Ok) if names_a_cluster(response.content.as_ref()) => Ok(self),
-            _ => {
-                info!(
-                    "sozu: cluster '{}' is not registered, creating it",
-                    config.cluster_id()
-                );
-                self.ensure_cluster(config)
-            }
-        }
-    }
-
     pub fn remove_cluster(&mut self, cluster_id: &str) -> Result<&mut Self> {
         info!("sozu: removing cluster '{}'", cluster_id);
         self.channel

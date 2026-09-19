@@ -208,8 +208,8 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
                     new_ip,
                     service
                 );
-                sozu.check_sozu_cluster(config)?
-                    .register_backend(config, &new_backend_id, new_ip)?;
+                sozu.ensure_cluster(config)?;
+                sozu.register_backend(config, &new_backend_id, new_ip)?;
                 if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
                     match sozu.remove_backend(config, old_bid, old_ip_val) {
                         Ok(()) => {}
@@ -421,7 +421,7 @@ fn restore_routes<T: Deployments>(
     routes.iter().for_each(|(config, backend_id, ip)| {
         let restored = sozu
             .ensure_cluster(*config)
-            .and_then(|s| s.register_backend(*config, backend_id, *ip));
+            .and_then(|routing| sozu.register_backend(*config, backend_id, *ip).map(|_| routing));
         match restored {
             Ok(Settled::Changed) => info!(
                 "periodic reconcile: restored sozu route for {} -> {}:{}",

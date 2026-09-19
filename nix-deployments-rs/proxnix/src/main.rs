@@ -153,24 +153,19 @@ async fn main() {
                 }
             };
             let pushed = periodic_state.last_repo.read().await.clone();
-            let repo_path = match pushed {
-                Some((_, commit_hash)) => {
-                    Some(format!("{}/{}", nix::BASE_REPO_PATH, commit_hash))
-                }
-                None => periodic_state.appconfig.local_repo.clone(),
+            let dest_path = match pushed {
+                Some((_, commit_hash)) => format!("{}/{}", nix::BASE_REPO_PATH, commit_hash),
+                None => periodic_state
+                    .appconfig
+                    .local_repo
+                    .clone()
+                    .unwrap_or_else(|| nixology_path.to_string()),
             };
-            match repo_path {
-                None => info!(
-                    "periodic reconcile: no repo known yet; set local_repo so reconciles can run before the first push"
-                ),
-                Some(dest_path) => {
-                    let socket_path = periodic_state.appconfig.sozu_socket_path.clone();
-                    tokio::task::spawn_blocking(move || {
-                        build::ensure_vms_running(&dest_path, &socket_path);
-                        drop(permit);
-                    });
-                }
-            }
+            let socket_path = periodic_state.appconfig.sozu_socket_path.clone();
+            tokio::task::spawn_blocking(move || {
+                build::ensure_vms_running(&dest_path, &socket_path);
+                drop(permit);
+            });
         }
     });
 
