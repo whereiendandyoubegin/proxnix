@@ -15,15 +15,17 @@ The pipeline runs on every push:
 
 1. Webhook received and parsed
 2. Repo cloned at the pushed commit
-3. All `nixosConfigurations` in the flake are built as qcow2 images concurrently
+3. All image types referenced in the config are built concurrently, as qcow2 images for VMs and tarballs for containers
 4. VM config is read from the flake via `nix eval .#proxnix --json`
-5. Live Proxmox state is queried via `qm`
+5. Live Proxmox state is queried via `qm` and `pct`
 6. Desired state is diffed against live state
-7. VMs are created, updated in place, or destroyed as needed
+7. Workloads are created, updated in place, or destroyed as needed
 
-A reconciliation loop runs every 10 seconds. Any managed VM that is stopped gets started. Any managed VM that no longer exists in Proxmox is removed from state and will be recreated on the next push.
+Anything needing a rebuild is deployed blue/green. The new instance is provisioned into whichever slot is inactive, started, and health checked while the old one is still serving. Only once it answers is traffic cut over in sozu and the old instance retired. If any step before the cutover fails, the new instance is destroyed and the old one keeps serving.
 
-Concurrent builds are handled by rayon. The webhook uses a semaphore to ensure only one pipeline runs at a time. Duplicate pushes during a running build return 429.
+A reconciliation loop runs every 120 seconds. Any managed VM that is stopped gets started. Any managed VM that no longer exists in Proxmox is removed from state and will be recreated on the next push.
+
+Concurrent builds are handled by rayon. The webhook uses a semaphore to ensure only one pipeline runs at a time. Pushes arriving during a running build wait for the lock, and return 429 only if it has not freed within ten minutes.
 
 ## Requirements
 
@@ -40,16 +42,10 @@ Clone this repo onto your Proxmox host and run:
 nix build
 ```
 
-This produces the binary at `result/bin/nix-deployments-rs`. Run it once with `--init` to create required directories:
+This produces the binary at `result/bin/proxnix`. Run the daemon:
 
 ```bash
-./result/bin/nix-deployments-rs --init
-```
-
-Then run the daemon:
-
-```bash
-./result/bin/nix-deployments-rs
+./result/bin/proxnix
 ```
 
 It listens on `0.0.0.0:6780`. Point your git server's push webhook at `http://<host>:6780/whlisten`.
@@ -81,21 +77,28 @@ proxnix = import ./proxnix.nix;
   vms = {
     "my-server" = {
       name = "my-server";
-      vm_id = 100;
+      hostname = "my-server.example.com";
+      blue_id = 100;
+      green_id = 200;
+      service_address = "192.168.1.40";
+      backend_port = 80;
       image_type = "my-server";   # must match a nixosConfigurations key
       cores = 2;
       sockets = 1;
       memory_mb = 4096;
       disk_gb = 20;
       storage_location = "local-lvm";
-      cloud_init = "None";
       protected = false;
+      impure = false;
     };
   };
+  containers = { };
 }
 ```
 
-`image_type` maps a VM to the nixosConfiguration that builds its disk image. Multiple VMs can share the same image type.
+`image_type` maps a workload to the nixosConfiguration that builds its image. Multiple workloads can share the same image type.
+
+`blue_id` and `green_id` are the two Proxmox IDs a workload alternates between. `service_address` is the stable address sozu fronts, and `backend_port` is the port the service listens on inside the instance. Omit `service_address` to leave a workload unproxied. `containers` takes the same shape as `vms` and additionally accepts `bind_mounts` for state that must survive a rebuild.
 
 Verify the config evaluates correctly before pushing:
 
@@ -115,7 +118,6 @@ This runs in production on a Proxmox homelab and is in active development. Known
 
 ## Roadmap
 
-- Nix based healthchecks with sensible built in defaults for any linux machine
 - Webhook authentication
 - Fix remaining TODOs, there are a few places the program can panic
 - TUI or web GUI for deployment status

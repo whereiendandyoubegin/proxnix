@@ -57,6 +57,8 @@ pub struct VMConfig {
     pub service_address: Option<std::net::Ipv4Addr>,
     #[serde(default = "default_backend_port")]
     pub backend_port: u16,
+    pub dhcp_timeout_seconds: u64,
+    pub health_check_timeout_seconds: u64,
     pub image_type: ImageType,
     pub cores: u16,
     pub sockets: u8,
@@ -116,6 +118,8 @@ pub struct ContainerConfig {
     pub service_address: Option<std::net::Ipv4Addr>,
     #[serde(default = "default_backend_port")]
     pub backend_port: u16,
+    pub dhcp_timeout_seconds: u64,
+    pub health_check_timeout_seconds: u64,
     pub blue_id: u32,
     pub green_id: u32,
     pub image_type: ImageType,
@@ -392,4 +396,3 @@ impl Outcome {
         }
     }
 }
-

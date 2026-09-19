@@ -454,6 +454,7 @@ mod tests {
           "name": "test-website", "hostname": "test-website",
           "blue_id": 823, "green_id": 923,
           "service_address": "192.168.1.23", "backend_port": 80,
+          "dhcp_timeout_seconds": 240, "health_check_timeout_seconds": 180,
           "image_type": "build-qcow2-website",
           "cores": 2, "sockets": 1, "memory_mb": 2048, "disk_gb": 10,
           "storage_location": "local-lvm", "protected": false, "impure": false
@@ -463,6 +464,7 @@ mod tests {
         "pihole": {
           "name": "pihole", "hostname": "pihole",
           "blue_id": 833, "green_id": 933,
+          "dhcp_timeout_seconds": 240, "health_check_timeout_seconds": 180,
           "image_type": "build-lxc-pihole",
           "cores": 2, "memory_mb": 1024, "disk_gb": 8,
           "storage_location": "local-lvm", "protected": false,
@@ -480,6 +482,8 @@ mod tests {
         assert_eq!(vm.green_id, 923);
         assert_eq!(vm.service_address, Some(Ipv4Addr::new(192, 168, 1, 23)));
         assert_eq!(vm.backend_port, 80);
+        assert_eq!(vm.dhcp_timeout_seconds, 240);
+        assert_eq!(vm.health_check_timeout_seconds, 180);
     }
 
     #[test]

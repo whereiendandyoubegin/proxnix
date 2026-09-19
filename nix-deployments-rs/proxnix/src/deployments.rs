@@ -1,17 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use proxnix_core::{Slot, SlotId, Workload};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
-
-const IP_POLL_ATTEMPTS: u32 = 120;
-const IP_POLL_DELAY: Duration = Duration::from_secs(2);
-const HEALTH_ATTEMPTS: u32 = 90;
-const HEALTH_DELAY: Duration = Duration::from_secs(2);
-const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const PROGRESS_EVERY: u32 = 5;
 
 use crate::{
     context::{BackendId, BackendPool, NixHash, ReconcileContext, StorePath, Tags},
@@ -164,7 +157,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         };
         info!("[{}] starting {}", config.name(), target.inner());
         T::start(target.inner())?;
-        let new_ip = await_ip::<T>(config.name(), target.inner())?;
+        let new_ip = await_ip::<T>(config, target.inner())?;
         info!("[{}] {} came up at {}", config.name(), target.inner(), new_ip);
         match backend_pool {
             Some(pool) if !pool.contains(new_ip) => warn!(
@@ -320,9 +313,17 @@ fn nix_hash_of(artifact: &StorePath) -> Result<NixHash> {
     })
 }
 
-fn await_ip<T: Deployments>(name: &str, id: u32) -> Result<Ipv4Addr> {
-    info!("[{}] waiting for {} to report an address", name, id);
-    (0..IP_POLL_ATTEMPTS)
+fn await_ip<T: Deployments>(config: &T, id: u32) -> Result<Ipv4Addr> {
+    let timeout = config.dhcp_timeout();
+    let started = Instant::now();
+    info!(
+        "[{}] waiting up to {}s for {} to report an address",
+        config.name(),
+        timeout.as_secs(),
+        id
+    );
+    (0_u32..)
+        .take_while(|_| started.elapsed() < timeout)
         .find_map(|attempt| {
             match T::get_ip(id)
                 .ok()
@@ -332,7 +333,7 @@ fn await_ip<T: Deployments>(name: &str, id: u32) -> Result<Ipv4Addr> {
                     if !usable {
                         warn!(
                             "[{}] {} self-assigned {}, dhcp has not answered",
-                            name, id, ip
+                            config.name(), id, ip
                         );
                     }
                     usable
@@ -340,17 +341,19 @@ fn await_ip<T: Deployments>(name: &str, id: u32) -> Result<Ipv4Addr> {
             {
                 Some(ip) => Some(ip),
                 None => {
-                    if attempt > 0 && attempt % PROGRESS_EVERY == 0 {
+                    if attempt > 0 && attempt % 5 == 0 {
                         info!(
-                            "[{}] still no address on {} after {}s ({}/{})",
-                            name,
+                            "[{}] still no address on {} after {}s (attempt {}, timeout {}s)",
+                            config.name(),
                             id,
-                            attempt * IP_POLL_DELAY.as_secs() as u32,
+                            started.elapsed().as_secs(),
                             attempt,
-                            IP_POLL_ATTEMPTS
+                            timeout.as_secs()
                         );
                     }
-                    std::thread::sleep(IP_POLL_DELAY);
+                    std::thread::sleep(
+                        Duration::from_secs(2).min(timeout.saturating_sub(started.elapsed())),
+                    );
                     None
                 }
             }
@@ -507,6 +510,9 @@ impl DeployedState for DeployedContainer {
 }
 
 pub trait Dangerous {
+    fn dhcp_timeout(&self) -> Duration;
+    fn health_check_timeout(&self) -> Duration;
+
     fn pre_check(&self) -> Result<()> {
         Ok(())
     }
@@ -514,18 +520,30 @@ pub trait Dangerous {
         Ok(())
     }
     fn health_check(&self, addr: SocketAddr) -> Result<()> {
-        (0..HEALTH_ATTEMPTS)
+        let timeout = self.health_check_timeout();
+        let started = Instant::now();
+        (0_u32..)
+            .take_while(|_| started.elapsed() < timeout)
             .find_map(
-                |attempt| match TcpStream::connect_timeout(&addr, HEALTH_CONNECT_TIMEOUT) {
+                |attempt| match TcpStream::connect_timeout(
+                    &addr,
+                    Duration::from_secs(2).min(timeout.saturating_sub(started.elapsed())),
+                ) {
                     Ok(_) => Some(()),
                     Err(e) => {
-                        if attempt > 0 && attempt % PROGRESS_EVERY == 0 {
+                        if attempt > 0 && attempt % 5 == 0 {
                             info!(
-                                "still waiting on {} after {} attempts: {}",
-                                addr, attempt, e
+                                "still waiting on {} after {}s (attempt {}): {}",
+                                addr,
+                                started.elapsed().as_secs(),
+                                attempt,
+                                e
                             );
                         }
-                        std::thread::sleep(HEALTH_DELAY);
+                        std::thread::sleep(
+                            Duration::from_secs(2)
+                                .min(timeout.saturating_sub(started.elapsed())),
+                        );
                         None
                     }
                 },
@@ -534,8 +552,25 @@ pub trait Dangerous {
     }
 }
 
-impl Dangerous for VMConfig {}
-impl Dangerous for ContainerConfig {}
+impl Dangerous for VMConfig {
+    fn dhcp_timeout(&self) -> Duration {
+        Duration::from_secs(self.dhcp_timeout_seconds)
+    }
+
+    fn health_check_timeout(&self) -> Duration {
+        Duration::from_secs(self.health_check_timeout_seconds)
+    }
+}
+
+impl Dangerous for ContainerConfig {
+    fn dhcp_timeout(&self) -> Duration {
+        Duration::from_secs(self.dhcp_timeout_seconds)
+    }
+
+    fn health_check_timeout(&self) -> Duration {
+        Duration::from_secs(self.health_check_timeout_seconds)
+    }
+}
 
 pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync + Proxied {
     type Deployed: DeployedState + Send + Sync;
@@ -894,6 +929,8 @@ mod tests {
             hostname: "test-website".to_string(),
             service_address: Some(Ipv4Addr::new(192, 168, 1, 23)),
             backend_port: 80,
+            dhcp_timeout_seconds: 240,
+            health_check_timeout_seconds: 180,
             image_type: ImageType::from("build-qcow2-website"),
             cores: 2,
             sockets: 1,
