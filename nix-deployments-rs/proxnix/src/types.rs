@@ -1,6 +1,7 @@
-use proxnix_core::Workload;
+use proxnix_core::{Slot, SlotId, Workload};
 use std::{collections::HashMap, string::FromUtf8Error};
 
+use crate::context::{ImageType, NixHash};
 use crate::pipeline::WorkloadGroup;
 
 #[allow(clippy::enum_variant_names)]
@@ -30,6 +31,18 @@ pub enum AppError {
     Git2Error(#[from] git2::Error),
     #[error("Parsing module error: {0}")]
     ParsingModuleError(String),
+    #[error("Sozu error: {0}")]
+    SozuError(String),
+    #[error("Sozu channel error: {0}")]
+    ChannelError(#[from] sozu_command_lib::channel::ChannelError),
+    #[error("Error parsing addr: {0}")]
+    AddrParseErr(#[from] std::net::AddrParseError),
+    #[error("Port out of range: {0}")]
+    PortRangeError(#[from] std::num::TryFromIntError),
+    #[error("Timed out waiting for an IP address on instance {0}")]
+    IpTimeoutError(u32),
+    #[error("Health check failed for {0}")]
+    HealthCheckError(std::net::SocketAddr),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
@@ -37,8 +50,14 @@ pub type Result<T> = std::result::Result<T, AppError>;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct VMConfig {
     pub name: String,
-    pub vm_id: u32,
-    pub image_type: String,
+    pub blue_id: u32,
+    pub green_id: u32,
+    pub hostname: String,
+    #[serde(default)]
+    pub service_address: Option<std::net::Ipv4Addr>,
+    #[serde(default = "default_backend_port")]
+    pub backend_port: u16,
+    pub image_type: ImageType,
     pub cores: u16,
     pub sockets: u8,
     pub memory_mb: u32,
@@ -55,9 +74,6 @@ pub struct VMConfig {
 }
 
 impl Workload for VMConfig {
-    fn id(&self) -> u32 {
-        self.vm_id
-    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -66,6 +82,12 @@ impl Workload for VMConfig {
     }
     fn cores(&self) -> u16 {
         self.cores
+    }
+    fn id_for_slot(&self, s: Slot) -> SlotId {
+        match s {
+            Slot::Blue => SlotId::Blue(self.blue_id),
+            Slot::Green => SlotId::Green(self.green_id),
+        }
     }
 }
 
@@ -82,11 +104,21 @@ fn default_disk_slot() -> String {
     "scsi0".to_string()
 }
 
+fn default_backend_port() -> u16 {
+    80
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ContainerConfig {
     pub name: String,
-    pub ct_id: u32,
-    pub image_type: String,
+    pub hostname: String,
+    #[serde(default)]
+    pub service_address: Option<std::net::Ipv4Addr>,
+    #[serde(default = "default_backend_port")]
+    pub backend_port: u16,
+    pub blue_id: u32,
+    pub green_id: u32,
+    pub image_type: ImageType,
     pub cores: u16,
     pub memory_mb: u32,
     pub storage_location: String,
@@ -101,16 +133,28 @@ pub struct ContainerConfig {
     pub impure: bool,
 }
 
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MountMode {
+    ReadWrite,
+    ReadOnly,
+}
+
+impl Default for MountMode {
+    fn default() -> Self {
+        MountMode::ReadWrite
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct BindMount {
     pub host_path: String,
     pub container_path: String,
+    #[serde(default)]
+    pub mode: MountMode,
 }
 
 impl Workload for ContainerConfig {
-    fn id(&self) -> u32 {
-        self.ct_id
-    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -119,6 +163,12 @@ impl Workload for ContainerConfig {
     }
     fn cores(&self) -> u16 {
         self.cores
+    }
+    fn id_for_slot(&self, s: Slot) -> SlotId {
+        match s {
+            Slot::Blue => SlotId::Blue(self.blue_id),
+            Slot::Green => SlotId::Green(self.green_id),
+        }
     }
 }
 
@@ -136,11 +186,15 @@ pub struct QMList {
     pub pid: u32,
 }
 
+fn default_slot() -> proxnix_core::Slot {
+    proxnix_core::Slot::Blue
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeployedVM {
     pub vm_id: u32,
     pub vm_name: String,
-    pub nix_hash: Option<String>,
+    pub nix_hash: Option<NixHash>,
     pub template_id: Option<u32>,
     pub mem_mb: u32,
     pub bootdisk_gb: f64,
@@ -148,19 +202,27 @@ pub struct DeployedVM {
     pub pid: u32,
     pub cores: u16,
     pub sockets: u8,
+    #[serde(default = "default_slot")]
+    pub active_slot: proxnix_core::Slot,
+    #[serde(default)]
+    pub service_ip: Option<std::net::Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeployedContainer {
     pub ct_id: u32,
     pub ct_name: String,
-    pub nix_hash: Option<String>,
+    pub nix_hash: Option<NixHash>,
     pub mem_mb: u32,
     pub bootdisk_gb: f64,
     pub status: String,
     pub cores: u16,
     pub privileged: bool,
     pub bind_mounts: Vec<BindMount>,
+    #[serde(default = "default_slot")]
+    pub active_slot: proxnix_core::Slot,
+    #[serde(default)]
+    pub service_ip: Option<std::net::Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -223,6 +285,29 @@ impl Default for QMConfig {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AppConfig {
+    #[serde(default = "default_sozu_socket_path")]
+    pub sozu_socket_path: String,
+    #[serde(default)]
+    pub ssh_key_candidates: Vec<String>,
+    #[serde(default = "default_template_cache_path")]
+    pub template_cache_path: String,
+    pub server_address: std::net::SocketAddr,
+    #[serde(default)]
+    pub backend_pool: Option<crate::context::BackendPool>,
+    #[serde(default)]
+    pub local_repo: Option<String>,
+}
+
+fn default_sozu_socket_path() -> String {
+    "/run/sozu/command.sock".to_string()
+}
+
+fn default_template_cache_path() -> String {
+    "/var/lib/vz/template/cache/".to_string()
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DesiredState {
     pub vms: HashMap<String, VMConfig>,
     #[serde(default)]
@@ -232,8 +317,8 @@ pub struct DesiredState {
 impl DesiredState {
     pub fn into_workload_groups(self) -> Vec<WorkloadGroup> {
         vec![
-            WorkloadGroup::new(self.vms.into_values().collect()),
-            WorkloadGroup::new(self.containers.into_values().collect()),
+            WorkloadGroup::Vms(self.vms.into_values().collect()),
+            WorkloadGroup::Containers(self.containers.into_values().collect()),
         ]
     }
 }
@@ -307,3 +392,4 @@ impl Outcome {
         }
     }
 }
+

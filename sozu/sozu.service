@@ -1,0 +1,14 @@
+[Unit]
+Description=Sozu reverse proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/.nix-profile/bin/sozu start --config /etc/sozu/config.toml
+Restart=always
+RestartSec=5
+RuntimeDirectory=sozu
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

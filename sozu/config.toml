@@ -1,0 +1,14 @@
+command_socket = "/run/sozu/command.sock"
+log_level      = "info"
+log_target     = "stdout"
+
+# Allow proxnix to connect to the command socket
+command_buffer_size  = 16384
+max_command_buffer_size = 163840
+
+[[listeners]]
+protocol = "http"
+address  = "0.0.0.0:80"
+
+# Clusters are managed dynamically by proxnix via the command socket.
+# No static cluster config needed here.

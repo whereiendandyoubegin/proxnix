@@ -1,18 +1,12 @@
+use crate::context::{StorePath, Tags};
 use crate::nix::find_in_repo;
-use crate::pct::{copy_to_template_storage, pct_create, pct_start};
-use crate::qm::{qm_create, qm_importdisk, qm_resize, qm_set_agent, qm_set_disk, qm_start};
+use proxnix_core::{SlotId, Workload};
+use crate::pct::{copy_to_template_storage, pct_create};
+use crate::qm::{qm_create, qm_importdisk, qm_resize, qm_set_agent, qm_set_disk};
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
-
-// --- Pure ---
-
-fn nix_store_hash(store_path: &str) -> Option<&str> {
-    store_path
-        .strip_prefix("/nix/store/")
-        .and_then(|s| s.split('-').next())
-}
 
 fn flake_installable(config_name: &str, build_attr: &str) -> String {
     format!(".#nixosConfigurations.{}.{}", config_name, build_attr)
@@ -83,65 +77,55 @@ fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<Stri
 
 // --- Trait ---
 
-pub trait Materialise {
-    fn name(&self) -> &str;
+pub trait Materialise: Workload {
     fn nix_build_attr(&self) -> &str;
     fn impure(&self) -> bool;
-    fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()>;
+    fn image_type(&self) -> &str;
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()>;
 
-    fn nix_build(&self, repo_path: &str) -> Result<String> {
+    fn nix_build(&self, repo_path: &str) -> Result<StorePath> {
         let nix_dir = find_flake_dir(repo_path)?;
-        let installable = flake_installable(self.name(), self.nix_build_attr());
-        run_nix_build(&nix_dir, &installable, self.impure())
+        let installable = flake_installable(self.image_type(), self.nix_build_attr());
+        let raw = run_nix_build(&nix_dir, &installable, self.impure())?;
+        StorePath::try_from(raw)
     }
 }
 
 impl Materialise for VMConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.qcow2"
     }
     fn impure(&self) -> bool {
         self.impure
     }
-    fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()> {
-        let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
-            AppError::CmdError(format!("could not extract nix hash from path {}", artifact_path))
-        })?;
-        info!("Provisioning VM {} (id: {})", self.name, self.vm_id);
-        qm_create(self, nix_hash, commit_hash)?;
-        let disk_ref = qm_importdisk(self.vm_id, &qcow2_path(artifact_path), &self.storage_location)?;
-        qm_set_disk(self.vm_id, &disk_ref, &self.disk_slot)?;
-        qm_set_agent(self.vm_id)?;
-        qm_resize(self.vm_id, &self.disk_slot, self.disk_gb)?;
-        info!("VM {} provisioned successfully, starting", self.name);
-        qm_start(self.vm_id)?;
-        info!("VM {} started", self.name);
+    fn image_type(&self) -> &str {
+        self.image_type.as_str()
+    }
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, _template_cache_path: &str, target: SlotId) -> Result<()> {
+        let id = target.inner();
+        qm_create(self, tags, target)?;
+        let disk_ref = qm_importdisk(id, &qcow2_path(artifact.as_str()), &self.storage_location)?;
+        qm_set_disk(id, &disk_ref, &self.disk_slot)?;
+        qm_set_agent(id)?;
+        qm_resize(id, &self.disk_slot, self.disk_gb)?;
         Ok(())
     }
 }
 
 impl Materialise for ContainerConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
     fn nix_build_attr(&self) -> &str {
         "config.system.build.tarball"
     }
     fn impure(&self) -> bool {
         self.impure
     }
-    fn provision(&self, artifact_path: &str, commit_hash: &str) -> Result<()> {
-        let ostemplate = copy_to_template_storage(artifact_path)?;
-        let nix_hash = nix_store_hash(artifact_path).ok_or_else(|| {
-            AppError::CmdError(format!("could not extract nix hash from path {}", artifact_path))
-        })?;
-        info!("Provisioning container {} (id: {})", self.name, self.ct_id);
-        pct_create(self, &ostemplate, nix_hash, commit_hash)?;
-        pct_start(self.ct_id)?;
-        info!("Container {} started", self.name);
+    fn image_type(&self) -> &str {
+        self.image_type.as_str()
+    }
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()> {
+        let ostemplate =
+            copy_to_template_storage(artifact.as_str(), template_cache_path, &tags.nix_hash)?;
+        pct_create(self, &ostemplate, tags, target)?;
         Ok(())
     }
 }

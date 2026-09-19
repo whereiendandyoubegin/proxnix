@@ -1,18 +1,24 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-use std::env;
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+
+use crate::state::parse_appconfig;
+use crate::types::AppConfig;
+
+const PERIODIC_INTERVAL: Duration = Duration::from_secs(120);
+const WEBHOOK_LOCK_WAIT: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 struct AppState {
     semaphore: Arc<Semaphore>,
     last_repo: Arc<RwLock<Option<(String, String)>>>,
+    appconfig: AppConfig,
 }
 
 mod build;
+mod context;
 mod deployments;
 mod git;
 mod materialise;
@@ -21,6 +27,7 @@ mod parsing;
 mod pct;
 mod pipeline;
 mod qm;
+mod sozu;
 mod state;
 mod types;
 
@@ -40,11 +47,17 @@ async fn webhook_handler(
     let git_repo_url = parsed.repository.clone();
     let current_git_commit = parsed.hash.clone();
 
-    let permit = match state.semaphore.try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
+    let permit = match tokio::time::timeout(
+        WEBHOOK_LOCK_WAIT,
+        state.semaphore.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
             warn!(
-                "Pipeline already running, rejecting webhook for commit {}",
+                "Pipeline still busy after {}s, rejecting webhook for commit {}",
+                WEBHOOK_LOCK_WAIT.as_secs(),
                 current_git_commit
             );
             return StatusCode::TOO_MANY_REQUESTS;
@@ -56,12 +69,13 @@ async fn webhook_handler(
         *guard = Some((git_repo_url.clone(), current_git_commit.clone()));
     }
 
+    let appconfig = state.appconfig.clone();
     tokio::task::spawn_blocking(move || {
         info!(
             "Pipeline started for repo: {}, commit: {}",
             git_repo_url, current_git_commit
         );
-        match pipeline::run_pipeline(&git_repo_url, &current_git_commit) {
+        match pipeline::run_pipeline(&git_repo_url, &current_git_commit, &appconfig) {
             Ok(_) => info!(
                 "Pipeline finished for repo: {}, commit: {}",
                 git_repo_url, current_git_commit
@@ -77,19 +91,22 @@ async fn webhook_handler(
     StatusCode::OK
 }
 
-fn init() {
-    fs::create_dir_all("/var/lib/proxnix").expect("Failed to create /var/lib/proxnix");
-    println!("Init complete");
+enum Mode {
+    Serve,
+    DeployOnce,
+}
+
+impl Mode {
+    fn from_args() -> Self {
+        match std::env::args().any(|a| a == "--deploy-once") {
+            true => Mode::DeployOnce,
+            false => Mode::Serve,
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.get(1).map(|s| s.as_str()) == Some("--init") {
-        init();
-        return;
-    }
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -97,21 +114,41 @@ async fn main() {
         )
         .init();
 
+    let nixology_path = option_env!("PROXNIX_NIXOLOGY_PATH").unwrap_or("/root/nixology");
+    let appconfig_json = nix::eval_appconfig(nixology_path).expect("Failed to eval appconfig");
+    let appconfig = parse_appconfig(&appconfig_json).expect("Failed to parse appconfig");
+    let server_address = appconfig.server_address;
+
+    if let Mode::DeployOnce = Mode::from_args() {
+        let result = tokio::task::spawn_blocking(move || pipeline::run_local(&appconfig))
+            .await
+            .expect("deploy task panicked");
+        match result {
+            Ok(()) => info!("Deploy finished"),
+            Err(e) => {
+                error!("Deploy failed: {:?}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let last_repo = Arc::new(RwLock::new(None));
     let app_state = AppState {
         semaphore: Arc::new(Semaphore::new(1)),
         last_repo,
+        appconfig,
     };
 
     let periodic_state = app_state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
         loop {
             interval.tick().await;
             let permit = match periodic_state.semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    info!("Pipeline is running, skipping periodic reconcile");
+                    debug!("Pipeline is running, skipping periodic reconcile");
                     continue;
                 }
             };
@@ -135,7 +172,7 @@ async fn main() {
         .route("/whlisten", post(webhook_handler))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:6780").await.unwrap();
-    info!("Listening on 0.0.0.0:6780");
+    let listener = tokio::net::TcpListener::bind(server_address).await.unwrap();
+    info!("Listening on {}", server_address);
     axum::serve(listener, app).await.unwrap_or_default()
 }

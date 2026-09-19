@@ -1,11 +1,32 @@
+use crate::context::Tags;
 use crate::types::{AppError, FieldChange, Result, VMConfig};
+use proxnix_core::SlotId;
 use std::process::Command;
 
+pub fn qm_set_tags(vm_id: u32, tags: &Tags) -> Result<()> {
+    let output = Command::new("qm")
+        .arg("set")
+        .arg(vm_id.to_string())
+        .arg("--tags")
+        .arg(tags.render())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "qm set tags failed for {} (exit: {:?}): {}",
+            vm_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
+
 // TODO Parse the output from this and pattern match to see if it has failed and add some cases to retry
-pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result<String> {
+pub fn qm_create(config: &VMConfig, tags: &Tags, target: SlotId) -> Result<String> {
     let qm_create = Command::new("qm")
         .arg("create")
-        .arg(config.vm_id.to_string())
+        .arg(target.inner().to_string())
         .arg("--name")
         .arg(&config.name)
         .arg("--memory")
@@ -17,7 +38,7 @@ pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result
         .arg("--scsihw")
         .arg(&config.scsi_hw)
         .arg("--tags")
-        .arg(format!("proxnix;nix-{};commit-{}", nix_hash, commit_hash))
+        .arg(tags.render())
         .output()?;
     if !qm_create.status.success() {
         let stderr = String::from_utf8_lossy(&qm_create.stderr);
@@ -31,6 +52,35 @@ pub fn qm_create(config: &VMConfig, nix_hash: &str, commit_hash: &str) -> Result
     let output_string = String::from_utf8(stdout_bytes)?;
 
     Ok(output_string)
+}
+
+pub fn qm_get_running_ip(vm_id: &u32) -> Result<String> {
+  let output = Command::new("qm")
+      .arg("agent")
+      .arg(vm_id.to_string())
+      .arg("network-get-interfaces")
+      .output()?;
+  if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(AppError::CmdError(format!(
+          "qm agent network-get-interfaces failed for VM {}: {:?}: {}",
+          vm_id,
+          output.status.code(),
+          stderr
+      )));
+  }
+  let output_string = String::from_utf8(output.stdout)?;
+  let interfaces: serde_json::Value = serde_json::from_str(&output_string)?;
+  interfaces.as_array()
+      .and_then(|arr| arr.iter()
+          .filter(|iface| iface["name"] != "lo")
+          .find_map(|iface| {
+              iface["ip-addresses"].as_array()?.iter()
+                  .find(|addr| addr["ip-address-type"] == "ipv4")
+                  .and_then(|addr| addr["ip-address"].as_str())
+                  .map(|s| s.to_string())
+          }))
+      .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {}", vm_id)))
 }
 
 pub fn qm_stop(vm_id: &u32) -> Result<()> {
@@ -158,6 +208,25 @@ pub fn qm_set_agent(vm_id: u32) -> Result<String> {
     Ok(output_string)
 }
 
+
+pub fn qm_set_protection(vm_id: u32, protected: bool) -> Result<()> {
+    let output = Command::new("qm")
+        .arg("set")
+        .arg(vm_id.to_string())
+        .arg("--protection")
+        .arg(if protected { "1" } else { "0" })
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "qm set protection {} failed (exit: {:?}): {}",
+            vm_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
 
 pub fn qm_start(vm_id: u32) -> Result<bool> {
     let output = Command::new("qm")

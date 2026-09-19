@@ -1,15 +1,60 @@
+use crate::context::NixHash;
 use crate::pct::{pct_config, pct_list};
 use crate::types::{
-    AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState, QMConfig,
-    QMList, Result,
+    AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
+    MountMode, QMConfig, QMList, Result,
 };
+use proxnix_core::Slot;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::process::Command;
 
+pub(crate) fn slot_from_tags(tags: Option<&str>) -> Slot {
+    tags.and_then(|t| {
+        t.split(';')
+            .find(|tag| tag.trim().starts_with("slot-"))
+            .and_then(|tag| Slot::try_from(tag.trim()).ok())
+    })
+    .unwrap_or(Slot::Blue)
+}
+
+pub(crate) fn nix_hash_from_tags(tags: Option<&str>) -> Option<NixHash> {
+    tags.and_then(|t| {
+        t.split(';')
+            .find(|tag| tag.trim().starts_with("nix-"))
+            .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
+    })
+}
+
+pub(crate) fn service_ip_from_tags(tags: Option<&str>) -> Option<std::net::Ipv4Addr> {
+    tags.and_then(|t| {
+        t.split(';')
+            .find(|tag| tag.trim().starts_with("ip-"))
+            .and_then(|tag| tag.trim().trim_start_matches("ip-").parse().ok())
+    })
+}
+
+pub(crate) fn is_proxnix_managed(tags: Option<&str>) -> bool {
+    tags.map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
+        .unwrap_or(false)
+}
+
+pub(crate) fn vm_tags(vm_id: u32) -> Result<Option<String>> {
+    Ok(parse_qm_config(&qm_config(vm_id)?)?.tags)
+}
+
+pub(crate) fn container_tags(ct_id: u32) -> Result<Option<String>> {
+    Ok(parse_pct_config(&pct_config(ct_id)?)?.tags)
+}
+
 pub fn parse_config(json: &str) -> Result<DesiredState> {
     let state: DesiredState = serde_json::from_str(json)?;
     Ok(state)
+}
+
+pub fn parse_appconfig(json: &str) -> Result<AppConfig> {
+    let appconfig: AppConfig = serde_json::from_str(json)?;
+    Ok(appconfig)
 }
 
 pub fn qm_list() -> Result<String> {
@@ -24,6 +69,12 @@ pub fn qm_list() -> Result<String> {
     let output_string = String::from_utf8(stdout_bytes)?;
 
     Ok(output_string)
+}
+
+pub(crate) fn vm_exists(vm_id: u32) -> Result<bool> {
+    qm_list().and_then(|raw| {
+        parse_qm_list(&raw).map(|vms| vms.into_iter().any(|vm| vm.vm_id == vm_id))
+    })
 }
 
 pub fn qm_config(vm_id: u32) -> Result<String> {
@@ -137,19 +188,12 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
         .map(|(_name, vm)| -> Result<Option<(String, DeployedVM)>> {
             let config = qm_config(vm.vm_id)?;
             let parsed = parse_qm_config(&config)?;
-            let is_proxnix = parsed
-                .tags
-                .as_deref()
-                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-                .unwrap_or(false);
-            if !is_proxnix {
+            if !is_proxnix_managed(parsed.tags.as_deref()) {
                 return Ok(None);
             }
-            let nix_hash = parsed.tags.as_deref().and_then(|t| {
-                t.split(';')
-                    .find(|tag| tag.trim().starts_with("nix-"))
-                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
-            });
+            let nix_hash = nix_hash_from_tags(parsed.tags.as_deref());
+            let active_slot = slot_from_tags(parsed.tags.as_deref());
+            let service_ip = service_ip_from_tags(parsed.tags.as_deref());
             Ok(Some((
                 vm.vm_name.clone(),
                 DeployedVM {
@@ -163,6 +207,8 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
                     pid: vm.pid,
                     cores: parsed.cores as u16,
                     sockets: parsed.sockets,
+                    active_slot,
+                    service_ip,
                 },
             )))
         })
@@ -184,7 +230,7 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                 qmlist.name.clone(),
                 DeployedVM {
                     vm_id: qmlist.vm_id,
-                    vm_name: qmlist.name,
+                    vm_name: qmlist.name.clone(),
                     nix_hash: None,
                     template_id: None,
                     mem_mb: qmlist.mem_mb,
@@ -193,6 +239,8 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
                     pid: qmlist.pid,
                     cores: 0,   //placeholder
                     sockets: 0, //placeholder
+                    active_slot: Slot::Blue,
+                    service_ip: None,
                 },
             )
         })
@@ -202,18 +250,6 @@ pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
         vms: lists,
         containers: HashMap::new(),
     }
-}
-
-pub fn get_vm_statuses() -> Result<HashMap<u32, String>> {
-    let raw = qm_list()?;
-    let parsed = parse_qm_list(&raw)?;
-    Ok(parsed.into_iter().map(|q| (q.vm_id, q.status)).collect())
-}
-
-pub fn get_container_statuses() -> Result<HashMap<u32, String>> {
-    let raw = pct_list()?;
-    let parsed = parse_pct_list(&raw)?;
-    Ok(parsed.into_iter().map(|e| (e.ct_id, e.status)).collect())
 }
 
 pub(crate) struct PctListEntry {
@@ -297,6 +333,10 @@ fn parse_pct_config(output: &str) -> Result<PctConfigData> {
                         bind_mounts.push(BindMount {
                             host_path: host_path.to_string(),
                             container_path: container_path.to_string(),
+                            mode: match value.contains("ro=1") {
+                                true => MountMode::ReadOnly,
+                                false => MountMode::ReadWrite,
+                            },
                         });
                     }
                 }
@@ -324,19 +364,12 @@ pub fn enrich_container_info(
         .map(|entry| -> Result<Option<(String, DeployedContainer)>> {
             let config_raw = pct_config(entry.ct_id)?;
             let config = parse_pct_config(&config_raw)?;
-            let is_proxnix = config
-                .tags
-                .as_deref()
-                .map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-                .unwrap_or(false);
-            if !is_proxnix {
+            if !is_proxnix_managed(config.tags.as_deref()) {
                 return Ok(None);
             }
-            let nix_hash = config.tags.as_deref().and_then(|t| {
-                t.split(';')
-                    .find(|tag| tag.trim().starts_with("nix-"))
-                    .map(|tag| tag.trim().trim_start_matches("nix-").to_string())
-            });
+            let nix_hash = nix_hash_from_tags(config.tags.as_deref());
+            let active_slot = slot_from_tags(config.tags.as_deref());
+            let service_ip = service_ip_from_tags(config.tags.as_deref());
             Ok(Some((
                 entry.ct_name.clone(),
                 DeployedContainer {
@@ -349,6 +382,8 @@ pub fn enrich_container_info(
                     cores: config.cores,
                     bind_mounts: config.bind_mounts,
                     privileged: !config.unprivileged,
+                    active_slot,
+                    service_ip,
                 },
             )))
         })
@@ -357,6 +392,16 @@ pub fn enrich_container_info(
         .flatten()
         .collect();
     Ok(result)
+}
+
+pub(crate) fn container_exists(ct_id: u32) -> Result<bool> {
+    pct_list().and_then(|raw| {
+        parse_pct_list(&raw).map(|containers| {
+            containers
+                .into_iter()
+                .any(|container| container.ct_id == ct_id)
+        })
+    })
 }
 
 #[cfg(test)]
@@ -394,5 +439,146 @@ mod tests {
 
         let result = parse_qm_list(sample);
         println!("{:#?}", result)
+    }
+
+    use crate::context::Tags;
+    use std::net::Ipv4Addr;
+
+    fn tags_for(nix: &str, commit: &str, slot: Slot) -> String {
+        Tags::new(NixHash::try_from(nix).unwrap(), commit, slot).render()
+    }
+
+    const NIX_EVAL_SAMPLE: &str = r#"{
+      "vms": {
+        "test-website": {
+          "name": "test-website", "hostname": "test-website",
+          "blue_id": 823, "green_id": 923,
+          "service_address": "192.168.1.23", "backend_port": 80,
+          "image_type": "build-qcow2-website",
+          "cores": 2, "sockets": 1, "memory_mb": 2048, "disk_gb": 10,
+          "storage_location": "local-lvm", "protected": false, "impure": false
+        }
+      },
+      "containers": {
+        "pihole": {
+          "name": "pihole", "hostname": "pihole",
+          "blue_id": 833, "green_id": 933,
+          "image_type": "build-lxc-pihole",
+          "cores": 2, "memory_mb": 1024, "disk_gb": 8,
+          "storage_location": "local-lvm", "protected": false,
+          "privileged": true, "impure": false
+        }
+      }
+    }"#;
+
+    #[test]
+    fn the_nix_schema_parses_into_the_config_types() {
+        let parsed = parse_config(NIX_EVAL_SAMPLE).expect("nix eval output should parse");
+
+        let vm = &parsed.vms["test-website"];
+        assert_eq!(vm.blue_id, 823);
+        assert_eq!(vm.green_id, 923);
+        assert_eq!(vm.service_address, Some(Ipv4Addr::new(192, 168, 1, 23)));
+        assert_eq!(vm.backend_port, 80);
+    }
+
+    #[test]
+    fn a_workload_without_a_service_address_is_unproxied() {
+        let parsed = parse_config(NIX_EVAL_SAMPLE).expect("nix eval output should parse");
+        assert_eq!(parsed.containers["pihole"].service_address, None);
+    }
+
+    #[test]
+    fn a_registered_service_ip_survives_a_tag_round_trip() {
+        let ip = Ipv4Addr::new(10, 42, 0, 7);
+        let rendered = Tags::new(NixHash::try_from("abc123").unwrap(), "deadbeef", Slot::Green)
+            .with_service_ip(ip)
+            .render();
+
+        assert_eq!(service_ip_from_tags(Some(&rendered)), Some(ip));
+        assert_eq!(slot_from_tags(Some(&rendered)), Slot::Green);
+        assert_eq!(
+            nix_hash_from_tags(Some(&rendered)).unwrap().as_str(),
+            "abc123"
+        );
+        assert!(is_proxnix_managed(Some(&rendered)));
+    }
+
+    #[test]
+    fn an_instance_with_no_observed_ip_yet_has_none() {
+        let rendered = tags_for("abc123", "deadbeef", Slot::Blue);
+        assert_eq!(service_ip_from_tags(Some(&rendered)), None);
+    }
+
+    #[test]
+    fn the_service_ip_tag_is_not_confused_with_the_nix_tag() {
+        let rendered = Tags::new(NixHash::try_from("abc123").unwrap(), "x", Slot::Blue)
+            .with_service_ip(Ipv4Addr::new(192, 168, 1, 50))
+            .render();
+        assert_eq!(
+            service_ip_from_tags(Some(&rendered)),
+            Some(Ipv4Addr::new(192, 168, 1, 50))
+        );
+        assert_eq!(nix_hash_from_tags(Some(&rendered)).unwrap().as_str(), "abc123");
+    }
+
+    #[test]
+    fn slot_round_trips_through_proxmox_tags() {
+        for slot in [Slot::Blue, Slot::Green] {
+            let tags = tags_for("abc123", "deadbeef", slot);
+            assert_eq!(slot_from_tags(Some(&tags)), slot);
+        }
+    }
+
+    #[test]
+    fn nix_hash_round_trips_through_proxmox_tags() {
+        let tags = tags_for("0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7", "deadbeef", Slot::Green);
+        assert_eq!(
+            nix_hash_from_tags(Some(&tags)).unwrap().as_str(),
+            "0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7"
+        );
+    }
+
+    #[test]
+    fn untagged_vm_defaults_to_blue() {
+        assert_eq!(slot_from_tags(None), Slot::Blue);
+        assert_eq!(slot_from_tags(Some("proxnix;nix-abc")), Slot::Blue);
+    }
+
+    #[test]
+    fn slot_tag_is_not_confused_with_other_tags() {
+        let tags = "proxnix;nix-slot-green-looking-hash;commit-abc;slot-blue";
+        assert_eq!(slot_from_tags(Some(tags)), Slot::Blue);
+    }
+
+    #[test]
+    fn only_proxnix_tagged_resources_are_managed() {
+        assert!(is_proxnix_managed(Some("proxnix;nix-abc;slot-blue")));
+        assert!(!is_proxnix_managed(Some("nix-abc;slot-blue")));
+        assert!(!is_proxnix_managed(None));
+    }
+
+    #[test]
+    fn ownership_depends_on_the_proxnix_tag_not_the_nix_hash() {
+        assert!(is_proxnix_managed(Some(
+            "proxnix;nix-abc123;commit-x;slot-green"
+        )));
+        assert!(is_proxnix_managed(Some(
+            "proxnix;nix-somethingelse;commit-x;slot-green"
+        )));
+        assert!(!is_proxnix_managed(Some(
+            "nix-abc123;commit-x;slot-green"
+        )));
+        assert!(!is_proxnix_managed(Some("a-hand-made-vm")));
+        assert!(!is_proxnix_managed(None));
+    }
+
+    #[test]
+    fn tags_tolerate_surrounding_whitespace() {
+        assert_eq!(slot_from_tags(Some("proxnix; slot-green ")), Slot::Green);
+        assert_eq!(
+            nix_hash_from_tags(Some("proxnix; nix-abc123 ")).unwrap().as_str(),
+            "abc123"
+        );
     }
 }

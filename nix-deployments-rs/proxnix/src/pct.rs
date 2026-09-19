@@ -1,10 +1,75 @@
-use crate::types::{AppError, ContainerConfig, ContainerFieldChange, Result};
+use crate::context::{NixHash, Tags};
+use crate::types::{AppError, ContainerConfig, ContainerFieldChange, MountMode, Result};
+use proxnix_core::SlotId;
+use std::path::Path;
 use std::process::Command;
+use tracing::info;
+
+const UNPRIVILEGED_ROOT: u32 = 100000;
+
+fn prepare_bind_mount(mount: &crate::types::BindMount, privileged: bool) -> Result<()> {
+    let path = Path::new(&mount.host_path);
+    match path.exists() {
+        true => Ok(()),
+        false => {
+            info!("creating bind mount host directory {}", mount.host_path);
+            std::fs::create_dir_all(path).map_err(|e| {
+                AppError::CmdError(format!(
+                    "could not create bind mount directory {}: {}",
+                    mount.host_path, e
+                ))
+            })?;
+            match (privileged, mount.mode) {
+                (false, MountMode::ReadWrite) => {
+                    info!(
+                        "chowning {} to {} for unprivileged container access",
+                        mount.host_path, UNPRIVILEGED_ROOT
+                    );
+                    std::os::unix::fs::chown(
+                        path,
+                        Some(UNPRIVILEGED_ROOT),
+                        Some(UNPRIVILEGED_ROOT),
+                    )
+                    .map_err(|e| {
+                        AppError::CmdError(format!(
+                            "could not chown bind mount directory {}: {}",
+                            mount.host_path, e
+                        ))
+                    })
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+}
+
+pub fn pct_set_tags(ct_id: u32, tags: &Tags) -> Result<()> {
+    let output = Command::new("pct")
+        .arg("set")
+        .arg(ct_id.to_string())
+        .arg("--tags")
+        .arg(tags.render())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "pct set tags failed for {} (exit: {:?}): {}",
+            ct_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
+}
 
 // Finds the .tar.xz inside the nix build result tarball directory,
 // copies it to Proxmox template storage, and returns the storage reference
 // for use with pct create (e.g. "local:vztmpl/nixos-image-lxc-....tar.xz")
-pub fn copy_to_template_storage(result_path: &str) -> Result<String> {
+pub fn copy_to_template_storage(
+    result_path: &str,
+    template_cache_path: &str,
+    nix_hash: &NixHash,
+) -> Result<String> {
     let tarball_dir = std::path::Path::new(result_path).join("tarball");
     let entry = std::fs::read_dir(&tarball_dir)
         .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", tarball_dir.display(), e)))?
@@ -21,22 +86,28 @@ pub fn copy_to_template_storage(result_path: &str) -> Result<String> {
         .to_string_lossy()
         .to_string();
 
-    let dest = format!("/var/lib/vz/template/cache/{}", filename);
+    let unique = format!("{}-{}", nix_hash, filename);
+    let dest = format!("{}{}", template_cache_path, unique);
     std::fs::copy(&src, &dest)
         .map_err(|e| AppError::CmdError(format!("failed to copy {} to {}: {}", src.display(), dest, e)))?;
 
-    Ok(format!("local:vztmpl/{}", filename))
+    Ok(format!("local:vztmpl/{}", unique))
 }
 
 pub fn pct_create(
     config: &ContainerConfig,
     ostemplate: &str,
-    nix_hash: &str,
-    commit_hash: &str,
+    tags: &Tags,
+    target: SlotId,
 ) -> Result<String> {
+    config
+        .bind_mounts
+        .iter()
+        .try_for_each(|mount| prepare_bind_mount(mount, config.privileged))?;
+
     let mut cmd = Command::new("pct");
     cmd.arg("create")
-        .arg(config.ct_id.to_string())
+        .arg(target.inner().to_string())
         .arg(ostemplate)
         .arg("--hostname")
         .arg(&config.name)
@@ -57,11 +128,17 @@ pub fn pct_create(
         .arg("--protection")
         .arg(if config.protected { "1" } else { "0" })
         .arg("--tags")
-        .arg(format!("proxnix;nix-{};commit-{}", nix_hash, commit_hash));
+        .arg(tags.render());
 
     for (i, mount) in config.bind_mounts.iter().enumerate() {
-        cmd.arg(format!("--mp{}", i))
-            .arg(format!("{},mp={}", mount.host_path, mount.container_path));
+        let suffix = match mount.mode {
+            MountMode::ReadOnly => ",ro=1",
+            MountMode::ReadWrite => "",
+        };
+        cmd.arg(format!("--mp{}", i)).arg(format!(
+            "{},mp={}{}",
+            mount.host_path, mount.container_path, suffix
+        ));
     }
 
     let output = cmd.output()?;
@@ -74,6 +151,25 @@ pub fn pct_create(
         )));
     }
     Ok(String::from_utf8(output.stdout)?)
+}
+
+pub fn pct_set_protection(ct_id: u32, protected: bool) -> Result<()> {
+    let output = Command::new("pct")
+        .arg("set")
+        .arg(ct_id.to_string())
+        .arg("--protection")
+        .arg(if protected { "1" } else { "0" })
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::CmdError(format!(
+            "pct set protection {} failed (exit: {:?}): {}",
+            ct_id,
+            output.status.code(),
+            stderr
+        )));
+    }
+    Ok(())
 }
 
 pub fn pct_start(ct_id: u32) -> Result<bool> {
