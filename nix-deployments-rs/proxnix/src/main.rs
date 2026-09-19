@@ -152,15 +152,21 @@ async fn main() {
                     continue;
                 }
             };
-            let lr = periodic_state.last_repo.read().await.clone();
-            match lr {
-                None => {
-                    info!("No pipeline has run yet")
-                }
+            let pushed = periodic_state.last_repo.read().await.clone();
+            let repo_path = match pushed {
                 Some((_, commit_hash)) => {
-                    let dest_path = format!("{}/{}", nix::BASE_REPO_PATH, commit_hash);
+                    Some(format!("{}/{}", nix::BASE_REPO_PATH, commit_hash))
+                }
+                None => periodic_state.appconfig.local_repo.clone(),
+            };
+            match repo_path {
+                None => info!(
+                    "periodic reconcile: no repo known yet; set local_repo so reconciles can run before the first push"
+                ),
+                Some(dest_path) => {
+                    let socket_path = periodic_state.appconfig.sozu_socket_path.clone();
                     tokio::task::spawn_blocking(move || {
-                        build::ensure_vms_running(&dest_path);
+                        build::ensure_vms_running(&dest_path, &socket_path);
                         drop(permit);
                     });
                 }

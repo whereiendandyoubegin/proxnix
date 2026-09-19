@@ -49,10 +49,12 @@ impl WorkloadGroup {
         }
     }
 
-    pub fn ensure_running(&self) {
+    pub fn ensure_running(&self, sozu_socket_path: SozuSocketPath<'_>) {
         match self {
-            WorkloadGroup::Vms(configs) => deployments::ensure_running(configs),
-            WorkloadGroup::Containers(configs) => deployments::ensure_running(configs),
+            WorkloadGroup::Vms(configs) => deployments::ensure_running(configs, sozu_socket_path),
+            WorkloadGroup::Containers(configs) => {
+                deployments::ensure_running(configs, sozu_socket_path)
+            }
         }
     }
 }

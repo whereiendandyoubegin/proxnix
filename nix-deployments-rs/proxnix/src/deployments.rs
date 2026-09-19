@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -7,11 +8,11 @@ use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::{
-    context::{BackendId, BackendPool, NixHash, ReconcileContext, StorePath, Tags},
+    context::{BackendId, BackendPool, NixHash, ReconcileContext, SozuSocketPath, StorePath, Tags},
     materialise::Materialise,
     pct::{pct_destroy, pct_list, pct_set_protection, pct_set_resources, pct_set_tags, pct_start, pct_stop},
     qm::{qm_destroy, qm_get_running_ip, qm_set_protection, qm_set_resources, qm_set_tags, qm_start, qm_stop},
-    sozu::{Proxied, SozuClient},
+    sozu::{Proxied, Settled, SozuClient},
     state::{
         container_exists, container_tags, enrich_container_info, enrich_cpu_info,
         is_proxnix_managed, list_to_deployed_vm, parse_pct_list, parse_qm_list, qm_list, vm_exists,
@@ -361,7 +362,84 @@ fn await_ip<T: Deployments>(config: &T, id: u32) -> Result<Ipv4Addr> {
         .ok_or(AppError::IpTimeoutError(id))
 }
 
-pub fn ensure_running<T: Deployments>(configs: &[T]) {
+enum RouteGap {
+    NoServiceIp,
+    NoNixHash,
+}
+
+impl fmt::Display for RouteGap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RouteGap::NoServiceIp => write!(f, "no service ip is recorded in its tags"),
+            RouteGap::NoNixHash => write!(f, "no nix hash is recorded in its tags"),
+        }
+    }
+}
+
+enum Upkeep {
+    Undeployed,
+    Start { id: u32, status: String },
+    Unproxied,
+    Unroutable { gap: RouteGap },
+    Route { backend_id: BackendId, ip: Ipv4Addr },
+}
+
+fn upkeep<T: Deployments>(config: &T, deployed: Option<&T::Deployed>) -> Upkeep {
+    match deployed {
+        None => Upkeep::Undeployed,
+        Some(d) => match d.status() {
+            "running" => match config.service_address() {
+                None => Upkeep::Unproxied,
+                Some(_) => match (d.service_ip(), d.nix_hash()) {
+                    (Some(ip), Some(hash)) => Upkeep::Route {
+                        backend_id: BackendId::new(config.name(), hash),
+                        ip,
+                    },
+                    (None, _) => Upkeep::Unroutable { gap: RouteGap::NoServiceIp },
+                    (_, None) => Upkeep::Unroutable { gap: RouteGap::NoNixHash },
+                },
+            },
+            status => Upkeep::Start { id: d.id(), status: status.to_string() },
+        },
+    }
+}
+
+fn restore_routes<T: Deployments>(
+    routes: &[(&T, &BackendId, Ipv4Addr)],
+    sozu_socket_path: SozuSocketPath<'_>,
+) {
+    if routes.is_empty() {
+        return;
+    }
+    let mut sozu = match SozuClient::connect(sozu_socket_path.as_str()) {
+        Ok(client) => client,
+        Err(e) => {
+            warn!("periodic reconcile: could not reach sozu: {}", e);
+            return;
+        }
+    };
+    routes.iter().for_each(|(config, backend_id, ip)| {
+        let restored = sozu
+            .ensure_cluster(*config)
+            .and_then(|s| s.register_backend(*config, backend_id, *ip));
+        match restored {
+            Ok(Settled::Changed) => info!(
+                "periodic reconcile: restored sozu route for {} -> {}:{}",
+                config.hostname(),
+                ip,
+                config.backend_port()
+            ),
+            Ok(Settled::AlreadyApplied) => {}
+            Err(e) => warn!(
+                "periodic reconcile: could not restore sozu route for {}: {}",
+                config.name(),
+                e
+            ),
+        }
+    });
+}
+
+pub fn ensure_running<T: Deployments>(configs: &[T], sozu_socket_path: SozuSocketPath<'_>) {
     let deployed = match T::load_deployed() {
         Ok(d) => d,
         Err(e) => {
@@ -370,35 +448,46 @@ pub fn ensure_running<T: Deployments>(configs: &[T]) {
         }
     };
 
-    configs
+    let plans: Vec<(&T, Upkeep)> = configs
         .iter()
-        .for_each(|config| match deployed.get(config.name()) {
-            None => debug!(
-                "periodic reconcile: {} is not deployed, it will be created on the next push",
-                config.name()
-            ),
-            Some(d) => match d.status() {
-                "running" => {}
-                status => {
-                    info!(
-                        "periodic reconcile: {} ({:?}, id {}) is {}, starting",
-                        config.name(),
-                        d.active_slot(),
-                        d.id(),
-                        status
-                    );
-                    match T::start(d.id()) {
-                        Ok(true) => info!("periodic reconcile: started {}", config.name()),
-                        Ok(false) => {}
-                        Err(e) => warn!(
-                            "periodic reconcile: could not start {}: {}",
-                            config.name(),
-                            e
-                        ),
-                    }
-                }
-            },
-        });
+        .map(|config| (config, upkeep(config, deployed.get(config.name()))))
+        .collect();
+
+    plans.iter().for_each(|(config, plan)| match plan {
+        Upkeep::Undeployed => debug!(
+            "periodic reconcile: {} is not deployed, it will be created on the next push",
+            config.name()
+        ),
+        Upkeep::Start { id, status } => {
+            info!(
+                "periodic reconcile: {} (id {}) is {}, starting",
+                config.name(),
+                id,
+                status
+            );
+            match T::start(*id) {
+                Ok(true) => info!("periodic reconcile: started {}", config.name()),
+                Ok(false) => {}
+                Err(e) => warn!("periodic reconcile: could not start {}: {}", config.name(), e),
+            }
+        }
+        Upkeep::Unroutable { gap } => warn!(
+            "periodic reconcile: {} is running but cannot be routed because {}",
+            config.name(),
+            gap
+        ),
+        Upkeep::Unproxied | Upkeep::Route { .. } => {}
+    });
+
+    let routes: Vec<(&T, &BackendId, Ipv4Addr)> = plans
+        .iter()
+        .filter_map(|(config, plan)| match plan {
+            Upkeep::Route { backend_id, ip } => Some((*config, backend_id, *ip)),
+            _ => None,
+        })
+        .collect();
+
+    restore_routes(&routes, sozu_socket_path);
 }
 
 fn target_state<T: Deployments>(id: u32) -> Result<TargetState> {
@@ -970,6 +1059,78 @@ mod tests {
             ImageType::from("build-qcow2-website"),
             NixHash::try_from(hash).unwrap(),
         )])
+    }
+
+    #[test]
+    fn a_running_proxied_workload_is_routed_at_its_recorded_address() {
+        let config = vm(false);
+        let d = deployed("abc123", Slot::Blue);
+        match upkeep(&config, Some(&d)) {
+            Upkeep::Route { backend_id, ip } => {
+                assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 10));
+                assert_eq!(
+                    backend_id.as_str(),
+                    BackendId::new("test-website", &NixHash::try_from("abc123").unwrap()).as_str()
+                );
+            }
+            _ => panic!("a running proxied workload should be routable"),
+        }
+    }
+
+    #[test]
+    fn the_reconcile_backend_id_matches_the_one_a_deploy_registers() {
+        let config = vm(false);
+        let hash = NixHash::try_from("abc123").unwrap();
+        let deploy_time = BackendId::new(config.name(), &hash);
+        match upkeep(&config, Some(&deployed("abc123", Slot::Blue))) {
+            Upkeep::Route { backend_id, .. } => {
+                assert_eq!(backend_id.as_str(), deploy_time.as_str())
+            }
+            _ => panic!("expected a route"),
+        }
+    }
+
+    #[test]
+    fn a_stopped_workload_is_started_and_not_routed() {
+        let config = vm(false);
+        let stopped = DeployedVM {
+            status: "stopped".to_string(),
+            ..deployed("abc123", Slot::Blue)
+        };
+        match upkeep(&config, Some(&stopped)) {
+            Upkeep::Start { id, status } => {
+                assert_eq!(id, 823);
+                assert_eq!(status, "stopped");
+            }
+            _ => panic!("a stopped workload should be started"),
+        }
+    }
+
+    #[test]
+    fn a_workload_without_a_service_address_is_never_routed() {
+        let config = VMConfig { service_address: None, ..vm(false) };
+        match upkeep(&config, Some(&deployed("abc123", Slot::Blue))) {
+            Upkeep::Unproxied => {}
+            _ => panic!("a workload with no service address must not be proxied"),
+        }
+    }
+
+    #[test]
+    fn a_running_workload_with_no_recorded_address_is_reported_not_guessed() {
+        let config = vm(false);
+        let untagged = DeployedVM { service_ip: None, ..deployed("abc123", Slot::Blue) };
+        match upkeep(&config, Some(&untagged)) {
+            Upkeep::Unroutable { gap: RouteGap::NoServiceIp } => {}
+            _ => panic!("a missing service ip must surface as a gap"),
+        }
+    }
+
+    #[test]
+    fn an_undeployed_workload_needs_no_upkeep() {
+        match upkeep(&vm(false), None) {
+            Upkeep::Undeployed => {}
+            _ => panic!("nothing is deployed, nothing to do"),
+        }
     }
 
     #[test]

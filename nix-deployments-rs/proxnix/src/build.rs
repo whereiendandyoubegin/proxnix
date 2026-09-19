@@ -1,4 +1,4 @@
-use crate::context::{ImageType, StorePath};
+use crate::context::{ImageType, SozuSocketPath, StorePath};
 use crate::nix::{eval_config, nix_build};
 use crate::state::parse_config;
 use crate::types::Result;
@@ -36,7 +36,14 @@ pub fn build_image_types(
     (built, errors)
 }
 
-pub fn ensure_vms_running(repo_path: &str) {
+pub fn ensure_vms_running(repo_path: &str, sozu_socket_path: &str) {
+    let sozu_socket_path = match SozuSocketPath::try_from(sozu_socket_path) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("periodic reconcile: {}", e);
+            return;
+        }
+    };
     let raw = match eval_config(repo_path) {
         Ok(r) => r,
         Err(e) => {
@@ -48,7 +55,7 @@ pub fn ensure_vms_running(repo_path: &str) {
         Ok(desired) => desired
             .into_workload_groups()
             .iter()
-            .for_each(|g| g.ensure_running()),
+            .for_each(|g| g.ensure_running(sozu_socket_path)),
         Err(e) => warn!("periodic reconcile: failed to parse config: {:?}", e),
     }
 }
