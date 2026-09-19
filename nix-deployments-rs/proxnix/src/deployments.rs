@@ -20,8 +20,9 @@ use crate::{
     qm::{qm_destroy, qm_get_running_ip, qm_set_protection, qm_set_resources, qm_set_tags, qm_start, qm_stop},
     sozu::{Proxied, SozuClient},
     state::{
-        container_tags, enrich_container_info, enrich_cpu_info, is_proxnix_managed,
-        list_to_deployed_vm, nix_hash_from_tags, parse_pct_list, parse_qm_list, qm_list, vm_tags,
+        container_exists, container_tags, enrich_container_info, enrich_cpu_info,
+        is_proxnix_managed, list_to_deployed_vm, parse_pct_list, parse_qm_list, qm_list, vm_exists,
+        vm_tags,
     },
     types::{
         AppError, ContainerConfig, ContainerFieldChange, DeployedContainer, DeployedVM,
@@ -34,6 +35,13 @@ enum Phase {
     Provisioned { target: SlotId, new_backend_id: BackendId },
     Healthy { new_backend_id: BackendId, new_ip: Ipv4Addr },
     BackendRegistered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetState {
+    Vacant,
+    Managed,
+    Unmanaged,
 }
 
 pub struct DeployContext<'a, T: Deployments> {
@@ -129,6 +137,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     fn provision_inactive(self) -> Result<Self> {
         let target = self.config.id_for_slot(self.new_slot);
         let new_backend_id = BackendId::new(self.config.name(), &self.tags.nix_hash);
+        prepare_target::<T>(self.config.name(), target)?;
         info!(
             "[{}] provisioning {:?} as {} (inactive, not started)",
             self.config.name(),
@@ -298,7 +307,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             }
             Err(e) => {
                 warn!("[{}] deploy failed: {}", name, e);
-                abort::<T>(target, &new_hash);
+                abort::<T>(target);
                 Err(e)
             }
         }
@@ -389,41 +398,60 @@ pub fn ensure_running<T: Deployments>(configs: &[T]) {
         });
 }
 
-fn created_by_this_deploy<T: Deployments>(id: u32, expected: &NixHash) -> bool {
-    match T::tags(id) {
-        Ok(tags) => {
-            is_proxnix_managed(tags.as_deref())
-                && nix_hash_from_tags(tags.as_deref()).as_ref() == Some(expected)
-        }
-        Err(e) => {
-            warn!("abort: could not read tags for {}: {}", id, e);
-            false
-        }
+fn target_state<T: Deployments>(id: u32) -> Result<TargetState> {
+    match T::exists(id)? {
+        false => Ok(TargetState::Vacant),
+        true => T::tags(id).map(|tags| classify_target(true, tags.as_deref())),
     }
 }
 
-fn abort<T: Deployments>(target: SlotId, expected: &NixHash) {
+fn classify_target(exists: bool, tags: Option<&str>) -> TargetState {
+    match (exists, is_proxnix_managed(tags)) {
+        (false, _) => TargetState::Vacant,
+        (true, true) => TargetState::Managed,
+        (true, false) => TargetState::Unmanaged,
+    }
+}
+
+fn destroy_managed<T: Deployments>(id: u32) -> Result<()> {
+    T::set_protection(id, false)?;
+    T::stop(&id)?;
+    T::destroy(id)
+}
+
+fn prepare_target<T: Deployments>(name: &str, target: SlotId) -> Result<()> {
     let id = target.inner();
-    match created_by_this_deploy::<T>(id, expected) {
-        false => warn!(
-            "abort: refusing to destroy {}, it does not carry this deploy's nix hash {}",
-            id, expected
+    match target_state::<T>(id)? {
+        TargetState::Vacant => Ok(()),
+        TargetState::Managed => {
+            info!(
+                "[{}] reclaiming Proxnix-managed inactive slot {} before provisioning",
+                name, id
+            );
+            destroy_managed::<T>(id)
+        }
+        TargetState::Unmanaged => Err(AppError::CmdError(format!(
+            "refusing to replace instance {} because it is not tagged 'proxnix'",
+            id
+        ))),
+    }
+}
+
+fn abort<T: Deployments>(target: SlotId) {
+    let id = target.inner();
+    match target_state::<T>(id) {
+        Ok(TargetState::Vacant) => {}
+        Ok(TargetState::Unmanaged) => warn!(
+            "abort: refusing to destroy {}, it is not tagged 'proxnix'",
+            id
         ),
-        true => {
-            warn!("deploy failed, destroying provisioned instance {}", id);
-            match T::set_protection(id, false) {
-                Ok(()) => {}
-                Err(e) => warn!("abort: could not clear protection on {}: {}", id, e),
-            }
-            match T::stop(&id) {
-                Ok(()) => {}
-                Err(e) => warn!("abort: could not stop {}: {}", id, e),
-            }
-            match T::destroy(id) {
-                Ok(()) => {}
-                Err(e) => warn!("abort: could not destroy {}: {}", id, e),
+        Ok(TargetState::Managed) => {
+            warn!("deploy failed, destroying Proxnix-managed instance {}", id);
+            if let Err(e) = destroy_managed::<T>(id) {
+                warn!("abort: could not destroy {}: {}", id, e);
             }
         }
+        Err(e) => warn!("abort: could not inspect {}: {}", id, e),
     }
 }
 
@@ -525,6 +553,7 @@ pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync 
     fn is_protected(&self) -> bool;
 
     fn get_ip(id: u32) -> Result<String>;
+    fn exists(id: u32) -> Result<bool>;
     fn tags(id: u32) -> Result<Option<String>>;
     fn set_tags(id: u32, tags: &Tags) -> Result<()>;
     fn set_protection(id: u32, protected: bool) -> Result<()>;
@@ -573,6 +602,9 @@ impl Deployments for VMConfig {
     }
     fn get_ip(id: u32) -> Result<String> {
         qm_get_running_ip(&id)
+    }
+    fn exists(id: u32) -> Result<bool> {
+        vm_exists(id)
     }
     fn tags(id: u32) -> Result<Option<String>> {
         vm_tags(id)
@@ -650,6 +682,9 @@ impl Deployments for ContainerConfig {
             .find_map(|line| line.trim().parse::<Ipv4Addr>().ok())
             .map(|ip| ip.to_string())
             .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {}", id)))
+    }
+    fn exists(id: u32) -> Result<bool> {
+        container_exists(id)
     }
     fn tags(id: u32) -> Result<Option<String>> {
         container_tags(id)
@@ -1044,5 +1079,34 @@ mod tests {
         let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Blue))]);
         let actions = plan(std::slice::from_ref(&c), &d, &hashes("abc123"));
         assert!(!actions.iter().any(|a| matches!(a, Action::Destroy { .. })));
+    }
+
+    #[test]
+    fn a_vacant_target_is_ready_for_provisioning() {
+        assert_eq!(
+            classify_target(false, Some("proxnix;nix-old-hash")),
+            TargetState::Vacant
+        );
+    }
+
+    #[test]
+    fn any_proxnix_managed_target_is_reclaimable_regardless_of_hash() {
+        assert_eq!(
+            classify_target(true, Some("proxnix;nix-old-hash;slot-blue")),
+            TargetState::Managed
+        );
+        assert_eq!(
+            classify_target(true, Some("proxnix;nix-new-hash;slot-blue")),
+            TargetState::Managed
+        );
+    }
+
+    #[test]
+    fn an_unmanaged_target_is_not_reclaimable() {
+        assert_eq!(
+            classify_target(true, Some("nix-old-hash;slot-blue")),
+            TargetState::Unmanaged
+        );
+        assert_eq!(classify_target(true, None), TargetState::Unmanaged);
     }
 }

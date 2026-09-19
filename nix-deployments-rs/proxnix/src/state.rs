@@ -1,5 +1,5 @@
 use crate::context::NixHash;
-use crate::pct::pct_config;
+use crate::pct::{pct_config, pct_list};
 use crate::types::{
     AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
     MountMode, QMConfig, QMList, Result,
@@ -69,6 +69,12 @@ pub fn qm_list() -> Result<String> {
     let output_string = String::from_utf8(stdout_bytes)?;
 
     Ok(output_string)
+}
+
+pub(crate) fn vm_exists(vm_id: u32) -> Result<bool> {
+    qm_list().and_then(|raw| {
+        parse_qm_list(&raw).map(|vms| vms.into_iter().any(|vm| vm.vm_id == vm_id))
+    })
 }
 
 pub fn qm_config(vm_id: u32) -> Result<String> {
@@ -388,6 +394,16 @@ pub fn enrich_container_info(
     Ok(result)
 }
 
+pub(crate) fn container_exists(ct_id: u32) -> Result<bool> {
+    pct_list().and_then(|raw| {
+        parse_pct_list(&raw).map(|containers| {
+            containers
+                .into_iter()
+                .any(|container| container.ct_id == ct_id)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,18 +559,18 @@ mod tests {
     }
 
     #[test]
-    fn rollback_only_claims_an_instance_carrying_both_the_tag_and_our_hash() {
-        let owned = |tags: Option<&str>| {
-            is_proxnix_managed(tags)
-                && nix_hash_from_tags(tags).map(|h| h.as_str().to_string())
-                    == Some("abc123".to_string())
-        };
-
-        assert!(owned(Some("proxnix;nix-abc123;commit-x;slot-green")));
-        assert!(!owned(Some("nix-abc123;commit-x;slot-green")));
-        assert!(!owned(Some("proxnix;nix-somethingelse;commit-x;slot-green")));
-        assert!(!owned(Some("a-hand-made-vm")));
-        assert!(!owned(None));
+    fn ownership_depends_on_the_proxnix_tag_not_the_nix_hash() {
+        assert!(is_proxnix_managed(Some(
+            "proxnix;nix-abc123;commit-x;slot-green"
+        )));
+        assert!(is_proxnix_managed(Some(
+            "proxnix;nix-somethingelse;commit-x;slot-green"
+        )));
+        assert!(!is_proxnix_managed(Some(
+            "nix-abc123;commit-x;slot-green"
+        )));
+        assert!(!is_proxnix_managed(Some("a-hand-made-vm")));
+        assert!(!is_proxnix_managed(None));
     }
 
     #[test]
