@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -10,6 +10,7 @@ use crate::{
     git::{git_ensure_commit, git_head_commit},
     materialise::Materialise,
     nix::{BASE_REPO_PATH, eval_config},
+    pct::reap_template_cache,
     state::parse_config,
     types::{AppConfig, AppError, ContainerConfig, Outcome, Result, VMConfig},
 };
@@ -151,5 +152,16 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
         Some(e) => warn!("{}: {:?} failed: {}", o.name, o.kind, e),
         None => info!("{}: {:?}", o.name, o.kind),
     });
+
+    let live: HashSet<NixHash> = image_hashes.values().cloned().collect();
+    match reap_template_cache(app_config.template_cache_path.as_str(), &live) {
+        Ok(reaped) if reaped.files > 0 => info!(
+            "reaped {} stale container templates, freeing {} MB",
+            reaped.files,
+            reaped.bytes / 1_048_576
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("could not reap the template cache: {}", e),
+    }
     Ok(())
 }

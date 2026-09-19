@@ -1,11 +1,87 @@
 use crate::context::{NixHash, Tags};
 use crate::types::{AppError, ContainerConfig, ContainerFieldChange, MountMode, Result};
 use proxnix_core::SlotId;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 const UNPRIVILEGED_ROOT: u32 = 100000;
+const NIX_STORE_HASH_LEN: usize = 32;
+const TEMPLATE_MARKER: &str = "-nixos-image-";
+const TEMPLATE_SUFFIX: &str = ".tar.xz";
+
+struct CachedTemplate {
+    path: PathBuf,
+    nix_hash: NixHash,
+    bytes: u64,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Reaped {
+    pub files: usize,
+    pub bytes: u64,
+}
+
+impl Reaped {
+    fn plus(self, bytes: u64) -> Self {
+        Self {
+            files: self.files + 1,
+            bytes: self.bytes + bytes,
+        }
+    }
+}
+
+fn cached_template(path: PathBuf, file_name: &str, bytes: u64) -> Option<CachedTemplate> {
+    match (
+        file_name.ends_with(TEMPLATE_SUFFIX),
+        file_name.contains(TEMPLATE_MARKER),
+        file_name.split_once('-'),
+    ) {
+        (true, true, Some((prefix, _))) if prefix.len() == NIX_STORE_HASH_LEN => {
+            NixHash::try_from(prefix).ok().map(|nix_hash| CachedTemplate {
+                path,
+                nix_hash,
+                bytes,
+            })
+        }
+        _ => None,
+    }
+}
+
+pub fn reap_template_cache(template_cache_path: &str, keep: &HashSet<NixHash>) -> Result<Reaped> {
+    let entries = std::fs::read_dir(template_cache_path).map_err(|e| {
+        AppError::CmdError(format!(
+            "could not read template cache {}: {}",
+            template_cache_path, e
+        ))
+    })?;
+
+    Ok(entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let bytes = entry.metadata().ok()?.len();
+            let name = entry.file_name().to_string_lossy().to_string();
+            cached_template(entry.path(), &name, bytes)
+        })
+        .filter(|template| !keep.contains(&template.nix_hash))
+        .fold(Reaped::default(), |acc, template| {
+            match std::fs::remove_file(&template.path) {
+                Ok(()) => {
+                    info!("reaped stale template {}", template.path.display());
+                    acc.plus(template.bytes)
+                }
+                Err(e) => {
+                    warn!(
+                        "could not reap stale template {}: {}",
+                        template.path.display(),
+                        e
+                    );
+                    acc
+                }
+            }
+        }))
+}
 
 fn prepare_bind_mount(mount: &crate::types::BindMount, privileged: bool) -> Result<()> {
     let path = Path::new(&mount.host_path);
@@ -289,4 +365,72 @@ pub fn pct_set_resources(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash(s: &str) -> NixHash {
+        NixHash::try_from(s).unwrap()
+    }
+
+    const LIVE: &str = "k8whj0lg7k95jn6h57k99kvikc0zrpp3";
+    const STALE: &str = "qd7rhsd030gx35sqx1bfh9kbq5na28ir";
+
+    fn template_name(prefix: &str) -> String {
+        format!("{}-nixos-image-lxc-26.05.20260505.549bd84-x86_64-linux.tar.xz", prefix)
+    }
+
+    #[test]
+    fn a_template_we_wrote_is_recognised_by_its_nix_hash() {
+        let name = template_name(STALE);
+        match cached_template(PathBuf::from(&name), &name, 42) {
+            Some(t) => {
+                assert_eq!(t.nix_hash, hash(STALE));
+                assert_eq!(t.bytes, 42);
+            }
+            None => panic!("our own template should be recognised"),
+        }
+    }
+
+    #[test]
+    fn templates_the_user_downloaded_are_never_reaped() {
+        let foreign = [
+            "debian-12-standard_12.7-1_amd64.tar.zst",
+            "ubuntu-24.04-standard_24.04-2_amd64.tar.zst",
+            "nixos-image-lxc-26.05-x86_64-linux.tar.xz",
+        ];
+        foreign.iter().for_each(|name| {
+            assert!(
+                cached_template(PathBuf::from(*name), name, 1).is_none(),
+                "{} is not ours and must not be reaped",
+                name
+            )
+        });
+    }
+
+    #[test]
+    fn a_prefix_that_is_not_a_store_hash_is_left_alone() {
+        let name = template_name("tooshort");
+        assert!(cached_template(PathBuf::from(&name), &name, 1).is_none());
+    }
+
+    #[test]
+    fn reaping_counts_files_and_bytes() {
+        let empty = Reaped::default();
+        assert_eq!(empty, Reaped { files: 0, bytes: 0 });
+        assert_eq!(empty.plus(100).plus(50), Reaped { files: 2, bytes: 150 });
+    }
+
+    #[test]
+    fn the_live_hash_is_kept_and_the_stale_one_is_not() {
+        let keep: HashSet<NixHash> = HashSet::from([hash(LIVE)]);
+        let live_name = template_name(LIVE);
+        let stale_name = template_name(STALE);
+        let live = cached_template(PathBuf::from(&live_name), &live_name, 1).unwrap();
+        let stale = cached_template(PathBuf::from(&stale_name), &stale_name, 1).unwrap();
+        assert!(keep.contains(&live.nix_hash), "the current build must survive");
+        assert!(!keep.contains(&stale.nix_hash), "an older build must be reaped");
+    }
 }
