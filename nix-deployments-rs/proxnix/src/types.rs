@@ -43,6 +43,16 @@ pub enum AppError {
     IpTimeoutError(u32),
     #[error("Health check failed for {0}")]
     HealthCheckError(std::net::SocketAddr),
+    #[error("{0} is not a MAC address")]
+    MacParseError(String),
+    #[error("Service address {address} is already answered on {bridge} by {responder}")]
+    ServiceAddressConflict {
+        address: std::net::Ipv4Addr,
+        bridge: String,
+        responder: String,
+    },
+    #[error("Service address {0} is declared by more than one workload")]
+    DuplicateServiceAddress(std::net::Ipv4Addr),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

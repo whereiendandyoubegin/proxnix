@@ -1,14 +1,17 @@
 use std::collections::{HashMap, HashSet};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
     build::build_image_types,
-    context::{CommitHash, ImageType, NixHash, PoolFit, ReconcileContext, RepoPath, SozuSocketPath, TemplateCachePath},
+    context::{BackendPool, CommitHash, ImageType, NixHash, PoolFit, ReconcileContext, RepoPath, SozuSocketPath, TemplateCachePath},
     deployments,
     git::{git_ensure_commit, git_head_commit},
-    host_net::{ServiceBinding, by_bridge, ensure_service_addresses},
+    host_net::{
+        AddressesHeld, ServiceBinding, Uniqueness, by_bridge, check_uniqueness, choose_prober,
+        ensure_service_addresses,
+    },
     materialise::Materialise,
     nix::{BASE_REPO_PATH, eval_config},
     pct::reap_template_cache,
@@ -124,24 +127,52 @@ pub fn run_local(app_config: &AppConfig) -> Result<()> {
     }
 }
 
-pub fn hold_service_addresses(groups: &[WorkloadGroup]) {
+pub fn hold_service_addresses(
+    groups: &[WorkloadGroup],
+    backend_pool: Option<&BackendPool>,
+) -> Result<()> {
     let bindings: Vec<ServiceBinding> =
         groups.iter().flat_map(|g| g.service_addresses()).collect();
 
+    match check_uniqueness(&bindings) {
+        Uniqueness::Clashing { duplicates } => {
+            duplicates.iter().for_each(|address| {
+                error!("service address {} is declared by more than one workload", address)
+            });
+            return match duplicates.first() {
+                Some(first) => Err(AppError::DuplicateServiceAddress(*first)),
+                None => Ok(()),
+            };
+        }
+        Uniqueness::Unique => {}
+    }
+
+    if let Some(pool) = backend_pool {
+        bindings
+            .iter()
+            .filter(|b| pool.contains(b.address))
+            .for_each(|b| {
+                error!(
+                    "service address {} sits inside the backend pool {}-{}, so DHCP can hand the same address to a guest",
+                    b.address, pool.start, pool.end
+                )
+            });
+    }
+
+    let prober = choose_prober();
+
     by_bridge(&bindings).iter().for_each(|b| {
-        match ensure_service_addresses(&b.bridge, &b.addresses) {
-            Ok(held) if held.added > 0 => info!(
-                "{}: now holding {} new service addresses ({} already held, {} failed)",
-                b.bridge, held.added, held.already, held.failed
-            ),
-            Ok(held) if held.failed > 0 => warn!(
-                "{}: could not hold {} declared service addresses",
-                b.bridge, held.failed
-            ),
-            Ok(_) => {}
+        match ensure_service_addresses(prober, &b.bridge, &b.addresses) {
             Err(e) => warn!("could not inspect {}: {}", b.bridge, e),
+            Ok(AddressesHeld { added: 0, conflicted: 0, failed: 0, .. }) => {}
+            Ok(held) => info!(
+                "{}: {} service addresses newly held, {} already held, {} refused because another host answers for them, {} otherwise unclaimed",
+                b.bridge, held.added, held.already, held.conflicted, held.failed
+            ),
         }
     });
+
+    Ok(())
 }
 
 fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
@@ -163,7 +194,7 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
         .flat_map(|g| g.image_type_attrs())
         .collect();
 
-    hold_service_addresses(&groups);
+    hold_service_addresses(&groups, app_config.backend_pool.as_ref())?;
 
     let (built, image_type_errors) = build_image_types(&image_type_attrs, &dest_path);
 

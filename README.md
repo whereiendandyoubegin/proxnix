@@ -98,7 +98,7 @@ proxnix = import ./proxnix.nix;
 
 `image_type` maps a workload to the nixosConfiguration that builds its image. Multiple workloads can share the same image type.
 
-`blue_id` and `green_id` are the two Proxmox IDs a workload alternates between. `service_address` is the stable address sozu fronts, and `backend_port` is the port the service listens on inside the instance. Omit `service_address` to leave a workload unproxied. `containers` takes the same shape as `vms` and additionally accepts `bind_mounts` for state that must survive a rebuild.
+`blue_id` and `green_id` are the two Proxmox IDs a workload alternates between. `backend_port` is the port the service listens on inside the instance. Routing is by name: sozu listens on `0.0.0.0:80` and picks a cluster from the `Host:` header, so `hostname` is what decides where a request lands. Setting `service_address` marks a workload as proxied and gives it a stable address that proxnix holds on the bridge as an alias; it is not what sozu matches on. Before claiming one, proxnix ARP probes it and refuses to take an address another host already answers for, so pick addresses outside your DHCP range. Omit `service_address` to leave a workload unproxied. `containers` takes the same shape as `vms` and additionally accepts `bind_mounts` for state that must survive a rebuild.
 
 Verify the config evaluates correctly before pushing:
 
@@ -106,7 +106,7 @@ Verify the config evaluates correctly before pushing:
 nix eval .#proxnix --json | jq .
 ```
 
-There is an example repo at https://github.com/whereiendandyoubegin/proxnix-example.
+The nix definitions live in their own repo, separate from proxnix itself. https://github.com/whereiendandyoubegin/proxnix-template is a complete working one — Postgres, Forgejo, Prometheus and Grafana, a binary cache and a flake updater, with sops-nix for secrets. Clone it as your starting point; its README lists everything you need to replace.
 
 ## State of development
 
