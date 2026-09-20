@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use crate::{
     context::{BackendId, BackendPool, NixHash, ReconcileContext, SozuSocketPath, StorePath, Tags},
     materialise::Materialise,
-    pct::{pct_destroy, pct_list, pct_set_protection, pct_set_resources, pct_set_tags, pct_start, pct_stop},
+    pct::{ExecOutcome, pct_destroy, pct_exec, pct_list, pct_set_protection, pct_set_resources, pct_set_tags, pct_start, pct_stop},
     qm::{qm_destroy, qm_get_running_ip, qm_set_protection, qm_set_resources, qm_set_tags, qm_start, qm_stop},
     sozu::{Proxied, Settled, SozuClient},
     state::{
@@ -23,6 +23,15 @@ use crate::{
         FieldChange, Outcome, OutcomeKind, Result, SkipReason, VMConfig,
     },
 };
+
+const GUEST_SHELL: &str = "/run/current-system/sw/bin/bash";
+const GUEST_CHECK: &str = "/run/current-system/sw/bin/proxnix-health-check";
+const GUEST_CHECK_POLL: Duration = Duration::from_secs(3);
+const GUEST_CHECK_RUN_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn guest_check_script() -> String {
+    format!("if [ -x {check} ]; then exec {check}; fi", check = GUEST_CHECK)
+}
 
 enum Phase {
     Initial,
@@ -173,6 +182,8 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         let addr = SocketAddr::from((new_ip, config.backend_port()));
         info!("[{}] health checking {}", config.name(), addr);
         config.health_check(addr)?;
+        info!("[{}] port {} is open, running the guest health check", config.name(), addr);
+        T::guest_check(config.name(), target.inner(), config.health_check_timeout())?;
         info!("[{}] healthy at {}", config.name(), addr);
         Ok(Self {
             config,
@@ -667,6 +678,14 @@ pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync 
 
     fn load_deployed() -> Result<HashMap<String, Self::Deployed>>;
 
+    fn guest_check(name: &str, _id: u32, _timeout: Duration) -> Result<()> {
+        info!(
+            "[{}] guest health checks are only supported for containers; only the port check ran",
+            name
+        );
+        Ok(())
+    }
+
     fn compute_changes(
         &self,
         deployed: &Self::Deployed,
@@ -756,6 +775,42 @@ impl Deployments for VMConfig {
 impl Deployments for ContainerConfig {
     type Deployed = DeployedContainer;
     type FieldChange = ContainerFieldChange;
+
+    fn guest_check(name: &str, id: u32, timeout: Duration) -> Result<()> {
+        let script = guest_check_script();
+        let argv = [GUEST_SHELL, "-c", script.as_str()];
+        let started = Instant::now();
+        (0_u32..)
+            .take_while(|_| started.elapsed() < timeout)
+            .find_map(|attempt| match pct_exec(id, &argv, GUEST_CHECK_RUN_TIMEOUT) {
+                Ok(ExecOutcome::Succeeded { .. }) => Some(Ok(())),
+                Ok(ExecOutcome::Failed { code, output }) => {
+                    match attempt % 5 {
+                        0 => info!(
+                            "[{}] guest health check not passing yet after {}s (exit {:?}): {}",
+                            name,
+                            started.elapsed().as_secs(),
+                            code,
+                            output
+                        ),
+                        _ => {}
+                    }
+                    std::thread::sleep(
+                        GUEST_CHECK_POLL.min(timeout.saturating_sub(started.elapsed())),
+                    );
+                    None
+                }
+                Err(e) => Some(Err(e)),
+            })
+            .unwrap_or_else(|| {
+                Err(AppError::CmdError(format!(
+                    "{} guest health check did not pass within {}s",
+                    name,
+                    timeout.as_secs()
+                )))
+            })
+    }
+
     fn load_deployed() -> Result<HashMap<String, Self::Deployed>> {
         let pct_raw = pct_list()?;
         let pct_entries = parse_pct_list(&pct_raw)?;
@@ -1131,6 +1186,24 @@ mod tests {
             Upkeep::Undeployed => {}
             _ => panic!("nothing is deployed, nothing to do"),
         }
+    }
+
+    #[test]
+    fn a_guest_without_a_check_script_passes_rather_than_erroring() {
+        let script = guest_check_script();
+        assert!(script.contains(GUEST_CHECK));
+        assert!(
+            script.starts_with("if [ -x "),
+            "a guest that declares no check must not fail the deploy"
+        );
+    }
+
+    #[test]
+    fn the_check_replaces_the_shell_so_its_exit_code_is_the_verdict() {
+        assert!(
+            guest_check_script().contains(&format!("exec {}", GUEST_CHECK)),
+            "the script's exit status must be what proxnix sees"
+        );
     }
 
     #[test]

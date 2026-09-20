@@ -3,10 +3,12 @@ use crate::types::{AppError, ContainerConfig, ContainerFieldChange, MountMode, R
 use proxnix_core::SlotId;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 const UNPRIVILEGED_ROOT: u32 = 100000;
+const PCT_EXEC_POLL: Duration = Duration::from_millis(250);
 const NIX_STORE_HASH_LEN: usize = 32;
 const TEMPLATE_MARKER: &str = "-nixos-image-";
 const TEMPLATE_SUFFIX: &str = ".tar.xz";
@@ -303,6 +305,59 @@ pub fn pct_destroy(ct_id: u32) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ExecOutcome {
+    Succeeded { stdout: String },
+    Failed { code: Option<i32>, output: String },
+}
+
+pub fn pct_exec(ct_id: u32, argv: &[&str], timeout: Duration) -> Result<ExecOutcome> {
+    let mut child = Command::new("pct")
+        .arg("exec")
+        .arg(ct_id.to_string())
+        .arg("--")
+        .args(argv)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(_) => {
+                let out = child.wait_with_output()?;
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                return match out.status.success() {
+                    true => Ok(ExecOutcome::Succeeded { stdout }),
+                    false => Ok(ExecOutcome::Failed {
+                        code: out.status.code(),
+                        output: format!(
+                            "{}{}",
+                            stdout,
+                            String::from_utf8_lossy(&out.stderr)
+                        )
+                        .trim()
+                        .to_string(),
+                    }),
+                };
+            }
+            None => match started.elapsed() >= timeout {
+                true => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AppError::CmdError(format!(
+                        "pct exec {} {:?} did not return within {}s",
+                        ct_id,
+                        argv,
+                        timeout.as_secs()
+                    )));
+                }
+                false => std::thread::sleep(PCT_EXEC_POLL),
+            },
+        }
+    }
 }
 
 pub fn pct_list() -> Result<String> {
