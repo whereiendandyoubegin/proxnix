@@ -21,6 +21,7 @@ mod build;
 mod context;
 mod deployments;
 mod git;
+mod host_net;
 mod materialise;
 mod nix;
 mod parsing;

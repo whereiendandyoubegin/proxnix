@@ -8,6 +8,7 @@ use crate::{
     context::{CommitHash, ImageType, NixHash, PoolFit, ReconcileContext, RepoPath, SozuSocketPath, TemplateCachePath},
     deployments,
     git::{git_ensure_commit, git_head_commit},
+    host_net::{ServiceBinding, by_bridge, ensure_service_addresses},
     materialise::Materialise,
     nix::{BASE_REPO_PATH, eval_config},
     pct::reap_template_cache,
@@ -47,6 +48,29 @@ impl WorkloadGroup {
         match self {
             WorkloadGroup::Vms(configs) => configs.len(),
             WorkloadGroup::Containers(configs) => configs.len(),
+        }
+    }
+
+    pub fn service_addresses(&self) -> Vec<ServiceBinding> {
+        match self {
+            WorkloadGroup::Vms(configs) => configs
+                .iter()
+                .filter_map(|c| {
+                    c.service_address.map(|address| ServiceBinding {
+                        bridge: c.network_bridge.clone(),
+                        address,
+                    })
+                })
+                .collect(),
+            WorkloadGroup::Containers(configs) => configs
+                .iter()
+                .filter_map(|c| {
+                    c.service_address.map(|address| ServiceBinding {
+                        bridge: c.network_bridge.clone(),
+                        address,
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -100,6 +124,26 @@ pub fn run_local(app_config: &AppConfig) -> Result<()> {
     }
 }
 
+pub fn hold_service_addresses(groups: &[WorkloadGroup]) {
+    let bindings: Vec<ServiceBinding> =
+        groups.iter().flat_map(|g| g.service_addresses()).collect();
+
+    by_bridge(&bindings).iter().for_each(|b| {
+        match ensure_service_addresses(&b.bridge, &b.addresses) {
+            Ok(held) if held.added > 0 => info!(
+                "{}: now holding {} new service addresses ({} already held, {} failed)",
+                b.bridge, held.added, held.already, held.failed
+            ),
+            Ok(held) if held.failed > 0 => warn!(
+                "{}: could not hold {} declared service addresses",
+                b.bridge, held.failed
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("could not inspect {}: {}", b.bridge, e),
+        }
+    });
+}
+
 fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
     let (dest_path, commit_hash) = source.resolve(&app_config.ssh_key_candidates)?;
     let commit_hash = commit_hash.as_str();
@@ -118,6 +162,8 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
         .iter()
         .flat_map(|g| g.image_type_attrs())
         .collect();
+
+    hold_service_addresses(&groups);
 
     let (built, image_type_errors) = build_image_types(&image_type_attrs, &dest_path);
 
