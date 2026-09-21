@@ -28,6 +28,9 @@ const GUEST_SHELL: &str = "/run/current-system/sw/bin/bash";
 const GUEST_CHECK: &str = "/run/current-system/sw/bin/proxnix-health-check";
 const GUEST_CHECK_POLL: Duration = Duration::from_secs(3);
 const GUEST_CHECK_RUN_TIMEOUT: Duration = Duration::from_secs(60);
+const PROVISION_STAGGER: Duration = Duration::from_millis(150);
+
+static PROVISION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn guest_check_script() -> String {
     format!("if [ -x {check} ]; then exec {check}; fi", check = GUEST_CHECK)
@@ -147,12 +150,15 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             self.new_slot,
             target.inner()
         );
-        self.config.provision_inactive(
-            &self.artifact,
-            &self.tags,
-            self.template_cache_path,
-            target,
-        )?;
+        {
+            let _storage = PROVISION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            self.config.provision_inactive(
+                &self.artifact,
+                &self.tags,
+                self.template_cache_path,
+                target,
+            )?;
+        }
         Ok(Self {
             phase: Phase::Provisioned { target, new_backend_id },
             ..self
@@ -949,7 +955,13 @@ pub fn reconcile<T: Deployments>(
     let actions = plan(configs, &deployed, ctx.image_hashes);
     Ok(actions
         .into_par_iter()
-        .map(|action| match action {
+        .enumerate()
+        .map(|(index, action)| {
+        std::thread::sleep(match u32::try_from(index) {
+            Ok(nth) => PROVISION_STAGGER.saturating_mul(nth),
+            Err(_) => Duration::ZERO,
+        });
+        match action {
             Action::Create { config } => {
                 let result = (|| -> Result<()> {
                     let artifact = get_artifact(config, ctx)?;
@@ -1014,6 +1026,7 @@ pub fn reconcile<T: Deployments>(
                 Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(()))
             }
             Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
+        }
         })
         .collect())
 }
