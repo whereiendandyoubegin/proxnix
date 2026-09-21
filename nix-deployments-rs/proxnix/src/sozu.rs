@@ -5,10 +5,11 @@ use sozu_command_lib::{
     channel::Channel,
     proto::command::{
         AddBackend, Cluster, IpAddress, RemoveBackend, Request, RequestHttpFrontend, Response,
-        ResponseStatus, SocketAddress, request::RequestType,
+        ResponseContent, ResponseStatus, SocketAddress, request::RequestType,
+        response_content::ContentType,
     },
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 
@@ -79,6 +80,61 @@ const ALREADY_EXISTS: &str = "already exists";
 pub enum Settled {
     Changed,
     AlreadyApplied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleBackend {
+    pub backend_id: String,
+    pub address: SocketAddress,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pruned {
+    pub removed: usize,
+    pub failed: usize,
+}
+
+impl Pruned {
+    fn removed(self) -> Self {
+        Self { removed: self.removed + 1, ..self }
+    }
+    fn failed(self) -> Self {
+        Self { failed: self.failed + 1, ..self }
+    }
+}
+
+pub fn backends_in(content: &ResponseContent) -> Vec<AddBackend> {
+    match &content.content_type {
+        Some(ContentType::Clusters(clusters)) => clusters
+            .vec
+            .iter()
+            .flat_map(|info| info.backends.iter().cloned())
+            .collect(),
+        Some(ContentType::WorkerResponses(responses)) => responses
+            .map
+            .values()
+            .flat_map(backends_in)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub fn stale_backends(
+    existing: &[AddBackend],
+    cluster_id: &str,
+    keep: &SocketAddress,
+) -> Vec<StaleBackend> {
+    existing
+        .iter()
+        .filter(|b| b.cluster_id == cluster_id && b.address != *keep)
+        .map(|b| StaleBackend {
+            backend_id: b.backend_id.clone(),
+            address: b.address,
+        })
+        .fold(Vec::new(), |acc, stale| match acc.contains(&stale) {
+            true => acc,
+            false => [acc, vec![stale]].concat(),
+        })
 }
 
 pub struct SozuClient {
@@ -194,6 +250,69 @@ impl SozuClient {
         )?;
         self.expect_applied("add backend")
     }
+    fn cluster_backends(&mut self, cluster_id: &str) -> Result<Vec<AddBackend>> {
+        self.channel.write_message(
+            &RequestType::QueryClusterById(cluster_id.to_string()).into(),
+        )?;
+        let response = self.settled_response()?;
+        match ResponseStatus::try_from(response.status) {
+            Ok(ResponseStatus::Ok) => Ok(response
+                .content
+                .as_ref()
+                .map(backends_in)
+                .unwrap_or_default()),
+            _ => Err(AppError::SozuError(format!(
+                "could not query cluster {}: {}",
+                cluster_id, response.message
+            ))),
+        }
+    }
+
+    pub fn prune_backends<T: Proxied>(&mut self, config: &T, keep: Ipv4Addr) -> Result<Pruned> {
+        let wanted = config.backend_address(keep);
+        let existing = self.cluster_backends(config.cluster_id())?;
+        let stale = stale_backends(&existing, config.cluster_id(), &wanted);
+
+        Ok(stale.iter().fold(Pruned::default(), |acc, backend| {
+            info!(
+                "sozu: dropping stale backend '{}' at {:?} from cluster '{}'",
+                backend.backend_id,
+                backend.address,
+                config.cluster_id()
+            );
+            match self.remove_backend_at(config.cluster_id(), &backend.backend_id, &backend.address)
+            {
+                Ok(()) => acc.removed(),
+                Err(e) => {
+                    warn!(
+                        "sozu: could not drop stale backend '{}' from cluster '{}': {}",
+                        backend.backend_id,
+                        config.cluster_id(),
+                        e
+                    );
+                    acc.failed()
+                }
+            }
+        }))
+    }
+
+    fn remove_backend_at(
+        &mut self,
+        cluster_id: &str,
+        backend_id: &str,
+        address: &SocketAddress,
+    ) -> Result<()> {
+        self.channel.write_message(
+            &RequestType::RemoveBackend(RemoveBackend {
+                cluster_id: cluster_id.to_string(),
+                backend_id: backend_id.to_string(),
+                address: *address,
+            })
+            .into(),
+        )?;
+        self.expect_applied("remove backend").map(|_| ())
+    }
+
     pub fn remove_backend<T: Proxied>(
         &mut self,
         config: &T,
@@ -229,5 +348,133 @@ impl SozuClient {
             .write_message(&RequestType::RemoveCluster(cluster_id.to_string()).into())?;
         self.expect_applied("remove cluster")?;
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sozu_command_lib::proto::command::{ClusterInformation, ClusterInformations, WorkerResponses};
+    use std::collections::BTreeMap;
+
+    fn addr(last: u8, port: u16) -> SocketAddress {
+        socket_address(Ipv4Addr::new(192, 168, 1, last), port)
+    }
+
+    fn backend(cluster: &str, id: &str, last: u8, port: u16) -> AddBackend {
+        AddBackend {
+            cluster_id: cluster.to_string(),
+            backend_id: id.to_string(),
+            address: addr(last, port),
+            sticky_id: None,
+            load_balancing_parameters: None,
+            backup: None,
+        }
+    }
+
+    fn clusters(backends: Vec<AddBackend>) -> ResponseContent {
+        ResponseContent {
+            content_type: Some(ContentType::Clusters(ClusterInformations {
+                vec: vec![ClusterInformation {
+                    configuration: None,
+                    http_frontends: vec![],
+                    https_frontends: vec![],
+                    tcp_frontends: vec![],
+                    backends,
+                }],
+            })),
+        }
+    }
+
+    #[test]
+    fn the_live_backend_is_never_stale() {
+        let existing = vec![backend("test-website", "new", 178, 3000)];
+        assert_eq!(
+            stale_backends(&existing, "test-website", &addr(178, 3000)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_backend_at_a_retired_address_is_stale() {
+        let existing = vec![
+            backend("test-website", "new", 178, 3000),
+            backend("test-website", "old", 113, 3000),
+        ];
+        assert_eq!(
+            stale_backends(&existing, "test-website", &addr(178, 3000)),
+            vec![StaleBackend { backend_id: "old".to_string(), address: addr(113, 3000) }]
+        );
+    }
+
+    #[test]
+    fn the_same_address_on_a_different_port_is_stale() {
+        let existing = vec![backend("test-website", "port80", 178, 80)];
+        assert_eq!(
+            stale_backends(&existing, "test-website", &addr(178, 3000)),
+            vec![StaleBackend { backend_id: "port80".to_string(), address: addr(178, 80) }]
+        );
+    }
+
+    #[test]
+    fn backends_of_other_clusters_are_left_alone() {
+        let existing = vec![
+            backend("monitoring", "other", 232, 3000),
+            backend("test-website", "old", 113, 3000),
+        ];
+        assert_eq!(
+            stale_backends(&existing, "test-website", &addr(178, 3000)),
+            vec![StaleBackend { backend_id: "old".to_string(), address: addr(113, 3000) }]
+        );
+    }
+
+    #[test]
+    fn a_cluster_with_nothing_registered_has_nothing_to_prune() {
+        assert_eq!(stale_backends(&[], "test-website", &addr(178, 3000)), vec![]);
+    }
+
+    #[test]
+    fn a_backend_reported_by_several_workers_is_removed_once() {
+        let existing = vec![
+            backend("test-website", "old", 113, 3000),
+            backend("test-website", "old", 113, 3000),
+        ];
+        assert_eq!(
+            stale_backends(&existing, "test-website", &addr(178, 3000)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn backends_are_read_out_of_a_direct_cluster_response() {
+        let content = clusters(vec![backend("test-website", "old", 113, 3000)]);
+        assert_eq!(backends_in(&content), vec![backend("test-website", "old", 113, 3000)]);
+    }
+
+    #[test]
+    fn backends_are_read_out_of_every_worker_response() {
+        let content = ResponseContent {
+            content_type: Some(ContentType::WorkerResponses(WorkerResponses {
+                map: BTreeMap::from([
+                    ("0".to_string(), clusters(vec![backend("test-website", "old", 113, 3000)])),
+                    ("1".to_string(), clusters(vec![backend("test-website", "new", 178, 3000)])),
+                ]),
+            })),
+        };
+        assert_eq!(backends_in(&content).len(), 2);
+    }
+
+    #[test]
+    fn a_response_carrying_something_else_yields_no_backends() {
+        let content = ResponseContent { content_type: None };
+        assert_eq!(backends_in(&content), vec![]);
+    }
+
+    #[test]
+    fn prune_outcomes_are_counted_separately() {
+        assert_eq!(
+            Pruned::default().removed().removed().failed(),
+            Pruned { removed: 2, failed: 1 }
+        );
     }
 }

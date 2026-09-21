@@ -12,7 +12,7 @@ use crate::{
     materialise::Materialise,
     pct::{ExecOutcome, pct_destroy, pct_exec, pct_list, pct_set_protection, pct_set_resources, pct_set_tags, pct_start, pct_stop},
     qm::{qm_destroy, qm_get_running_ip, qm_set_protection, qm_set_resources, qm_set_tags, qm_start, qm_stop},
-    sozu::{Proxied, Settled, SozuClient},
+    sozu::{Proxied, Pruned, Settled, SozuClient},
     state::{
         container_exists, container_tags, enrich_container_info, enrich_cpu_info,
         is_proxnix_managed, list_to_deployed_vm, parse_pct_list, parse_qm_list, qm_list, vm_exists,
@@ -221,6 +221,17 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
                 );
                 sozu.ensure_cluster(config)?;
                 sozu.register_backend(config, &new_backend_id, new_ip)?;
+                match sozu.prune_backends(config, new_ip) {
+                    Ok(Pruned { removed: 0, failed: 0 }) => {}
+                    Ok(pruned) => info!(
+                        "[{}] dropped {} stale backends ({} could not be dropped)",
+                        config.name(), pruned.removed, pruned.failed
+                    ),
+                    Err(e) => warn!(
+                        "[{}] could not check for stale backends, traffic may still reach a retired instance: {}",
+                        config.name(), e
+                    ),
+                }
                 if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
                     match sozu.remove_backend(config, old_bid, old_ip_val) {
                         Ok(()) => {}
@@ -443,6 +454,20 @@ fn restore_routes<T: Deployments>(
             Ok(Settled::AlreadyApplied) => {}
             Err(e) => warn!(
                 "periodic reconcile: could not restore sozu route for {}: {}",
+                config.name(),
+                e
+            ),
+        }
+        match sozu.prune_backends(*config, *ip) {
+            Ok(Pruned { removed: 0, failed: 0 }) => {}
+            Ok(pruned) => info!(
+                "periodic reconcile: dropped {} stale backends for {} ({} could not be dropped)",
+                pruned.removed,
+                config.name(),
+                pruned.failed
+            ),
+            Err(e) => warn!(
+                "periodic reconcile: could not check {} for stale backends: {}",
                 config.name(),
                 e
             ),
