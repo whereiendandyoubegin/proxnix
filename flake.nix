@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixology.url = "git+ssh://git@ssh.dan-gilmour.com:2222/dan/nixology.git";
+    nixology.url = "git+ssh://git@forgejo.lan:2222/dan/nixology.git";
   };
 
   outputs = { self, nixpkgs, nixology }:
