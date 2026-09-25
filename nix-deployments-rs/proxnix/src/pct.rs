@@ -1,7 +1,10 @@
 use crate::context::{NixHash, Tags};
 use crate::types::{AppError, ContainerConfig, ContainerFieldChange, MountMode, Result};
+use crate::zfs::{BaseImage, DiskSize, Ownership, RootfsVolume, Sealed, Tarball, ZfsImages};
 use proxnix_core::SlotId;
 use std::collections::HashSet;
+use std::fmt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -140,24 +143,12 @@ pub fn pct_set_tags(ct_id: u32, tags: &Tags) -> Result<()> {
     Ok(())
 }
 
-// Finds the .tar.xz inside the nix build result tarball directory,
-// copies it to Proxmox template storage, and returns the storage reference
-// for use with pct create (e.g. "local:vztmpl/nixos-image-lxc-....tar.xz")
 pub fn copy_to_template_storage(
-    result_path: &str,
+    tarball: &Tarball,
     template_cache_path: &str,
     nix_hash: &NixHash,
 ) -> Result<String> {
-    let tarball_dir = std::path::Path::new(result_path).join("tarball");
-    let entry = std::fs::read_dir(&tarball_dir)
-        .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", tarball_dir.display(), e)))?
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().extension().map(|ext| ext == "xz").unwrap_or(false))
-        .ok_or_else(|| {
-            AppError::CmdError(format!("no .tar.xz found in {}", tarball_dir.display()))
-        })?;
-
-    let src = entry.path();
+    let src = tarball.path();
     let filename = src
         .file_name()
         .ok_or_else(|| AppError::CmdError("tarball has no filename".to_string()))?
@@ -166,10 +157,91 @@ pub fn copy_to_template_storage(
 
     let unique = format!("{}-{}", nix_hash, filename);
     let dest = format!("{}{}", template_cache_path, unique);
-    std::fs::copy(&src, &dest)
+    std::fs::copy(src, &dest)
         .map_err(|e| AppError::CmdError(format!("failed to copy {} to {}: {}", src.display(), dest, e)))?;
 
     Ok(format!("local:vztmpl/{}", unique))
+}
+
+struct PctArgs(Vec<String>);
+
+impl PctArgs {
+    fn settings(config: &ContainerConfig, tags: &Tags) -> PctArgs {
+        let base = [
+            "--hostname".to_string(),
+            config.name.clone(),
+            "--memory".to_string(),
+            config.memory_mb.to_string(),
+            "--cores".to_string(),
+            config.cores.to_string(),
+            "--net0".to_string(),
+            format!("name=eth0,bridge={}", config.network_bridge),
+            "--features".to_string(),
+            "nesting=1".to_string(),
+            "--tags".to_string(),
+            tags.render(),
+        ];
+        let mounts = config.bind_mounts.iter().enumerate().flat_map(|(i, mount)| {
+            let suffix = match mount.mode {
+                MountMode::ReadOnly => ",ro=1",
+                MountMode::ReadWrite => "",
+            };
+            [
+                format!("--mp{}", i),
+                format!("{},mp={}{}", mount.host_path, mount.container_path, suffix),
+            ]
+        });
+        PctArgs(base.into_iter().chain(mounts).collect())
+    }
+}
+
+struct ConfPath(PathBuf);
+
+impl ConfPath {
+    fn of(target: SlotId) -> ConfPath {
+        ConfPath(PathBuf::from(format!("/etc/pve/lxc/{}.conf", target.inner())))
+    }
+}
+
+struct LxcConf<'a> {
+    rootfs: &'a RootfsVolume,
+    ownership: Ownership,
+}
+
+impl fmt::Display for LxcConf<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let unprivileged = match self.ownership {
+            Ownership::Unprivileged => 1,
+            Ownership::Privileged => 0,
+        };
+        write!(
+            f,
+            "arch: amd64\nostype: unmanaged\nrootfs: {}\nunprivileged: {}\n",
+            self.rootfs, unprivileged
+        )
+    }
+}
+
+fn write_conf(path: &ConfPath, conf: &LxcConf<'_>) -> Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path.0)?
+        .write_all(conf.to_string().as_bytes())
+        .map_err(AppError::from)
+}
+
+fn pct(cmd: &mut Command, what: &str) -> Result<String> {
+    let output = cmd.output()?;
+    match output.status.success() {
+        true => Ok(String::from_utf8(output.stdout)?),
+        false => Err(AppError::CmdError(format!(
+            "{} failed (exit: {:?}): {}",
+            what,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ))),
+    }
 }
 
 pub fn pct_create(
@@ -183,52 +255,65 @@ pub fn pct_create(
         .iter()
         .try_for_each(|mount| prepare_bind_mount(mount, config.privileged))?;
 
-    let mut cmd = Command::new("pct");
-    cmd.arg("create")
-        .arg(target.inner().to_string())
-        .arg(ostemplate)
-        .arg("--hostname")
-        .arg(&config.name)
-        .arg("--memory")
-        .arg(config.memory_mb.to_string())
-        .arg("--cores")
-        .arg(config.cores.to_string())
-        .arg("--rootfs")
-        .arg(format!("{}:{}", config.storage_location, config.disk_gb))
-        .arg("--net0")
-        .arg(format!("name=eth0,bridge={}", config.network_bridge))
-        .arg("--ostype")
-        .arg("unmanaged")
-        .arg("--unprivileged")
-        .arg(if config.privileged { "0" } else { "1" })
-        .arg("--features")
-        .arg("nesting=1")
-        .arg("--protection")
-        .arg(if config.protected { "1" } else { "0" })
-        .arg("--tags")
-        .arg(tags.render());
+    pct(
+        Command::new("pct")
+            .arg("create")
+            .arg(target.inner().to_string())
+            .arg(ostemplate)
+            .arg("--rootfs")
+            .arg(format!("{}:{}", config.storage_location, config.disk_gb))
+            .arg("--ostype")
+            .arg("unmanaged")
+            .arg("--unprivileged")
+            .arg(if config.privileged { "0" } else { "1" })
+            .arg("--protection")
+            .arg(if config.protected { "1" } else { "0" })
+            .args(PctArgs::settings(config, tags).0),
+        "pct create",
+    )
+}
 
-    for (i, mount) in config.bind_mounts.iter().enumerate() {
-        let suffix = match mount.mode {
-            MountMode::ReadOnly => ",ro=1",
-            MountMode::ReadWrite => "",
-        };
-        cmd.arg(format!("--mp{}", i)).arg(format!(
-            "{},mp={}{}",
-            mount.host_path, mount.container_path, suffix
-        ));
+pub fn pct_create_from_clone(
+    config: &ContainerConfig,
+    zfs: &ZfsImages,
+    image: &BaseImage<Sealed>,
+    tags: &Tags,
+    target: SlotId,
+) -> Result<()> {
+    config
+        .bind_mounts
+        .iter()
+        .try_for_each(|mount| prepare_bind_mount(mount, config.privileged))?;
+
+    let clone = image.clone_rootfs(zfs, target, DiskSize::gib(config.disk_gb))?;
+    let conf = LxcConf {
+        rootfs: clone.volume(),
+        ownership: Ownership::of(config.privileged),
+    };
+    if let Err(e) = write_conf(&ConfPath::of(target), &conf) {
+        if let Err(cleanup) = clone.discard() {
+            warn!("could not discard rootfs clone for {}: {}", target.inner(), cleanup);
+        }
+        return Err(e);
     }
 
-    let output = cmd.output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::CmdError(format!(
-            "pct create failed (exit: {:?}): {}",
-            output.status.code(),
-            stderr
-        )));
+    let configured = pct(
+        Command::new("pct")
+            .arg("set")
+            .arg(target.inner().to_string())
+            .args(PctArgs::settings(config, tags).0),
+        "pct set",
+    )
+    .and_then(|_| pct_set_protection(target.inner(), config.protected));
+    match configured {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Err(cleanup) = pct_destroy(target.inner()) {
+                warn!("could not remove half-configured container {}: {}", target.inner(), cleanup);
+            }
+            Err(e)
+        }
     }
-    Ok(String::from_utf8(output.stdout)?)
 }
 
 pub fn pct_set_protection(ct_id: u32, protected: bool) -> Result<()> {
@@ -428,6 +513,24 @@ mod tests {
 
     fn hash(s: &str) -> NixHash {
         NixHash::try_from(s).unwrap()
+    }
+
+    #[test]
+    fn a_cloned_rootfs_is_described_by_a_minimal_lxc_conf() {
+        let rootfs = RootfsVolume::for_slot(
+            crate::zfs::StorageId::try_from("ZFS".to_string()).unwrap(),
+            SlotId::Green(946),
+            DiskSize::gib(150),
+        );
+        let conf = LxcConf {
+            rootfs: &rootfs,
+            ownership: Ownership::Unprivileged,
+        };
+        assert_eq!(
+            conf.to_string(),
+            "arch: amd64\nostype: unmanaged\nrootfs: ZFS:subvol-946-disk-0,size=150G\nunprivileged: 1\n"
+        );
+        assert_eq!(ConfPath::of(SlotId::Green(946)).0, PathBuf::from("/etc/pve/lxc/946.conf"));
     }
 
     const LIVE: &str = "k8whj0lg7k95jn6h57k99kvikc0zrpp3";

@@ -4,9 +4,10 @@ use crate::context::BackendId;
 use sozu_command_lib::{
     channel::Channel,
     proto::command::{
-        AddBackend, Cluster, IpAddress, RemoveBackend, Request, RequestHttpFrontend, Response,
-        ResponseContent, ResponseStatus, SocketAddress, request::RequestType,
-        response_content::ContentType,
+        ActivateListener, AddBackend, Cluster, IpAddress, ListListeners, ListenerType,
+        QueryClustersHashes, RemoveBackend, Request, RequestHttpFrontend, RequestTcpFrontend,
+        Response, ResponseContent, ResponseStatus, SocketAddress, TcpListenerConfig,
+        request::RequestType, response_content::ContentType,
     },
 };
 use tracing::{debug, info, warn};
@@ -27,6 +28,7 @@ fn socket_address(ip: Ipv4Addr, port: u16) -> SocketAddress {
 pub trait Proxied {
     fn backend_port(&self) -> u16;
     fn service_address(&self) -> Option<Ipv4Addr>;
+    fn tcp_ports(&self) -> &[u16];
     fn cluster_id(&self) -> &str;
     fn hostname(&self) -> &str;
 
@@ -43,9 +45,61 @@ pub trait Proxied {
 pub const FRONTEND_PORT: u16 = 80;
 pub const SOZU_LISTENER_IP: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 
+const TCP_IDLE_TIMEOUT: u32 = 3600;
+
+pub fn tcp_cluster_id(name: &str, port: u16) -> String {
+    format!("{}-tcp-{}", name, port)
+}
+
+fn is_tcp_cluster_of(cluster_id: &str, name: &str) -> bool {
+    cluster_id
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix("-tcp-"))
+        .is_some_and(|port| port.parse::<u16>().is_ok())
+}
+
+pub fn tcp_clusters_in(content: &ResponseContent, name: &str) -> Vec<String> {
+    let mut ids: Vec<String> = match &content.content_type {
+        Some(ContentType::ClusterHashes(hashes)) => hashes
+            .map
+            .keys()
+            .filter(|id| is_tcp_cluster_of(id, name))
+            .cloned()
+            .collect(),
+        Some(ContentType::WorkerResponses(responses)) => responses
+            .map
+            .values()
+            .flat_map(|r| tcp_clusters_in(r, name))
+            .collect(),
+        _ => Vec::new(),
+    };
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+pub fn tcp_listener_in(content: &ResponseContent, address: &SocketAddress) -> Option<bool> {
+    match &content.content_type {
+        Some(ContentType::ListenersList(list)) => list
+            .tcp_listeners
+            .values()
+            .find(|l| l.address == *address)
+            .map(|l| l.active),
+        Some(ContentType::WorkerResponses(responses)) => responses
+            .map
+            .values()
+            .filter_map(|r| tcp_listener_in(r, address))
+            .reduce(|a, b| a && b),
+        _ => None,
+    }
+}
+
 impl Proxied for VMConfig {
     fn backend_port(&self) -> u16 {
         self.backend_port
+    }
+    fn tcp_ports(&self) -> &[u16] {
+        &self.tcp_ports
     }
     fn service_address(&self) -> Option<Ipv4Addr> {
         self.service_address
@@ -61,6 +115,9 @@ impl Proxied for VMConfig {
 impl Proxied for ContainerConfig {
     fn backend_port(&self) -> u16 {
         self.backend_port
+    }
+    fn tcp_ports(&self) -> &[u16] {
+        &self.tcp_ports
     }
     fn service_address(&self) -> Option<Ipv4Addr> {
         self.service_address
@@ -80,6 +137,15 @@ const ALREADY_EXISTS: &str = "already exists";
 pub enum Settled {
     Changed,
     AlreadyApplied,
+}
+
+impl Settled {
+    fn and(self, other: Settled) -> Settled {
+        match (self, other) {
+            (Settled::AlreadyApplied, Settled::AlreadyApplied) => Settled::AlreadyApplied,
+            _ => Settled::Changed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +316,168 @@ impl SozuClient {
         )?;
         self.expect_applied("add backend")
     }
+    fn ensure_tcp_listener(&mut self, port: u16) -> Result<Settled> {
+        let address = socket_address(SOZU_LISTENER_IP, port);
+        self.channel
+            .write_message(&RequestType::ListListeners(ListListeners {}).into())?;
+        let response = self.settled_response()?;
+        let existing = match ResponseStatus::try_from(response.status) {
+            Ok(ResponseStatus::Ok) => response
+                .content
+                .as_ref()
+                .and_then(|c| tcp_listener_in(c, &address)),
+            _ => {
+                return Err(AppError::SozuError(format!(
+                    "could not list listeners: {}",
+                    response.message
+                )));
+            }
+        };
+
+        let added = match existing {
+            Some(_) => Settled::AlreadyApplied,
+            None => {
+                info!("sozu: adding tcp listener on {}:{}", SOZU_LISTENER_IP, port);
+                self.channel.write_message(
+                    &RequestType::AddTcpListener(TcpListenerConfig {
+                        address,
+                        front_timeout: TCP_IDLE_TIMEOUT,
+                        back_timeout: TCP_IDLE_TIMEOUT,
+                        ..Default::default()
+                    })
+                    .into(),
+                )?;
+                self.expect_applied("add tcp listener")?
+            }
+        };
+
+        match existing {
+            Some(true) => Ok(added),
+            _ => {
+                info!("sozu: activating tcp listener on {}:{}", SOZU_LISTENER_IP, port);
+                self.channel.write_message(
+                    &RequestType::ActivateListener(ActivateListener {
+                        address,
+                        proxy: ListenerType::Tcp as i32,
+                        from_scm: false,
+                    })
+                    .into(),
+                )?;
+                self.expect_applied("activate tcp listener")
+                    .map(|activated| added.and(activated))
+            }
+        }
+    }
+
+    pub fn register_tcp_backends<T: Proxied>(
+        &mut self,
+        config: &T,
+        backend_id: &BackendId,
+        ip: Ipv4Addr,
+    ) -> Result<Settled> {
+        config.tcp_ports().iter().try_fold(Settled::AlreadyApplied, |acc, &port| {
+            let cluster_id = tcp_cluster_id(config.cluster_id(), port);
+            let listener = self.ensure_tcp_listener(port)?;
+
+            debug!("sozu: adding tcp cluster '{}'", cluster_id);
+            self.channel.write_message(
+                &RequestType::AddCluster(Cluster {
+                    cluster_id: cluster_id.clone(),
+                    ..Default::default()
+                })
+                .into(),
+            )?;
+            self.expect_applied("add tcp cluster")?;
+
+            self.channel.write_message(
+                &RequestType::AddTcpFrontend(RequestTcpFrontend {
+                    cluster_id: cluster_id.clone(),
+                    address: socket_address(SOZU_LISTENER_IP, port),
+                    ..Default::default()
+                })
+                .into(),
+            )?;
+            let frontend = self.expect_applied("add tcp frontend")?;
+
+            debug!(
+                "sozu: registering tcp backend '{}' at {}:{} for cluster '{}'",
+                backend_id, ip, port, cluster_id
+            );
+            self.channel.write_message(
+                &RequestType::AddBackend(AddBackend {
+                    cluster_id: cluster_id.clone(),
+                    backend_id: backend_id.as_str().to_string(),
+                    address: socket_address(ip, port),
+                    ..Default::default()
+                })
+                .into(),
+            )?;
+            self.expect_applied("add tcp backend")?;
+
+            Ok(acc.and(listener).and(frontend))
+        })
+    }
+
+    pub fn prune_tcp_backends<T: Proxied>(&mut self, config: &T, keep: Ipv4Addr) -> Result<Pruned> {
+        config.tcp_ports().iter().try_fold(Pruned::default(), |acc, &port| {
+            let cluster_id = tcp_cluster_id(config.cluster_id(), port);
+            let wanted = socket_address(keep, port);
+            let existing = self.cluster_backends(&cluster_id)?;
+            Ok(stale_backends(&existing, &cluster_id, &wanted)
+                .iter()
+                .fold(acc, |acc, backend| {
+                    info!(
+                        "sozu: dropping stale tcp backend '{}' at {:?} from cluster '{}'",
+                        backend.backend_id, backend.address, cluster_id
+                    );
+                    match self.remove_backend_at(&cluster_id, &backend.backend_id, &backend.address) {
+                        Ok(()) => acc.removed(),
+                        Err(e) => {
+                            warn!(
+                                "sozu: could not drop stale tcp backend '{}' from cluster '{}': {}",
+                                backend.backend_id, cluster_id, e
+                            );
+                            acc.failed()
+                        }
+                    }
+                }))
+        })
+    }
+
+    pub fn remove_tcp_backends<T: Proxied>(&mut self, config: &T, backend_id: &BackendId, ip: Ipv4Addr) {
+        config.tcp_ports().iter().for_each(|&port| {
+            let cluster_id = tcp_cluster_id(config.cluster_id(), port);
+            match self.remove_backend_at(&cluster_id, backend_id.as_str(), &socket_address(ip, port)) {
+                Ok(()) => {}
+                Err(e) => warn!(
+                    "sozu: could not deregister tcp backend '{}' from cluster '{}': {}",
+                    backend_id, cluster_id, e
+                ),
+            }
+        });
+    }
+
+    pub fn remove_tcp_clusters(&mut self, name: &str) -> Result<usize> {
+        self.channel
+            .write_message(&RequestType::QueryClustersHashes(QueryClustersHashes {}).into())?;
+        let response = self.settled_response()?;
+        let ids = match ResponseStatus::try_from(response.status) {
+            Ok(ResponseStatus::Ok) => response
+                .content
+                .as_ref()
+                .map(|c| tcp_clusters_in(c, name))
+                .unwrap_or_default(),
+            _ => {
+                return Err(AppError::SozuError(format!(
+                    "could not list clusters: {}",
+                    response.message
+                )));
+            }
+        };
+        ids.iter().try_for_each(|id| self.remove_cluster(id).map(|_| ()))?;
+        Ok(ids.len())
+    }
+
     fn cluster_backends(&mut self, cluster_id: &str) -> Result<Vec<AddBackend>> {
         self.channel.write_message(
             &RequestType::QueryClusterById(cluster_id.to_string()).into(),
@@ -468,6 +696,78 @@ mod tests {
     fn a_response_carrying_something_else_yields_no_backends() {
         let content = ResponseContent { content_type: None };
         assert_eq!(backends_in(&content), vec![]);
+    }
+
+    fn hashes(ids: &[&str]) -> ResponseContent {
+        ResponseContent {
+            content_type: Some(ContentType::ClusterHashes(
+                sozu_command_lib::proto::command::ClusterHashes {
+                    map: ids.iter().map(|id| (id.to_string(), 0)).collect(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn tcp_clusters_are_named_after_workload_and_port() {
+        assert_eq!(tcp_cluster_id("forgejo", 2222), "forgejo-tcp-2222");
+    }
+
+    #[test]
+    fn only_this_workloads_tcp_clusters_are_found() {
+        let content = hashes(&[
+            "forgejo",
+            "forgejo-tcp-2222",
+            "forgejo-tcp-22",
+            "forgejo-staging-tcp-2222",
+            "forgejo-tcp-notaport",
+            "monitoring-tcp-2222",
+        ]);
+        assert_eq!(
+            tcp_clusters_in(&content, "forgejo"),
+            vec!["forgejo-tcp-22".to_string(), "forgejo-tcp-2222".to_string()]
+        );
+    }
+
+    #[test]
+    fn tcp_clusters_reported_by_several_workers_are_found_once() {
+        let content = ResponseContent {
+            content_type: Some(ContentType::WorkerResponses(WorkerResponses {
+                map: BTreeMap::from([
+                    ("0".to_string(), hashes(&["forgejo-tcp-2222"])),
+                    ("1".to_string(), hashes(&["forgejo-tcp-2222"])),
+                ]),
+            })),
+        };
+        assert_eq!(tcp_clusters_in(&content, "forgejo"), vec!["forgejo-tcp-2222".to_string()]);
+    }
+
+    fn listeners(port: u16, active: bool) -> ResponseContent {
+        ResponseContent {
+            content_type: Some(ContentType::ListenersList(
+                sozu_command_lib::proto::command::ListenersList {
+                    tcp_listeners: BTreeMap::from([(
+                        format!("0.0.0.0:{}", port),
+                        TcpListenerConfig {
+                            address: socket_address(SOZU_LISTENER_IP, port),
+                            active,
+                            ..Default::default()
+                        },
+                    )])
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn a_tcp_listener_is_found_by_address() {
+        let wanted = socket_address(SOZU_LISTENER_IP, 2222);
+        assert_eq!(tcp_listener_in(&listeners(2222, true), &wanted), Some(true));
+        assert_eq!(tcp_listener_in(&listeners(2222, false), &wanted), Some(false));
+        assert_eq!(tcp_listener_in(&listeners(2223, true), &wanted), None);
     }
 
     #[test]

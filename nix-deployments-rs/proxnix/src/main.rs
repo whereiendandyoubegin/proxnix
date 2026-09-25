@@ -31,6 +31,7 @@ mod qm;
 mod sozu;
 mod state;
 mod types;
+mod zfs;
 
 #[axum::debug_handler]
 async fn webhook_handler(

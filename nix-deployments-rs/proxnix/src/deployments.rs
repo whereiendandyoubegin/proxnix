@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::{
-    context::{BackendId, BackendPool, NixHash, ReconcileContext, SozuSocketPath, StorePath, Tags},
+    context::{BackendId, BackendPool, ImageStore, NixHash, ReconcileContext, SozuSocketPath, StorePath, Tags},
     materialise::Materialise,
     pct::{ExecOutcome, pct_destroy, pct_exec, pct_list, pct_set_protection, pct_set_resources, pct_set_tags, pct_start, pct_stop},
     qm::{qm_destroy, qm_get_running_ip, qm_set_protection, qm_set_resources, qm_set_tags, qm_start, qm_stop},
@@ -59,7 +59,7 @@ pub struct DeployContext<'a, T: Deployments> {
     sozu: SozuClient,
     artifact: StorePath,
     tags: Tags,
-    template_cache_path: &'a str,
+    image_store: ImageStore<'a>,
     backend_pool: Option<&'a BackendPool>,
     phase: Phase,
 }
@@ -69,7 +69,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         config: &'a T,
         artifact: StorePath,
         commit_hash: &'a str,
-        template_cache_path: &'a str,
+        image_store: ImageStore<'a>,
         sozu_socket_path: &str,
         backend_pool: Option<&'a BackendPool>,
     ) -> Result<Self> {
@@ -85,7 +85,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             sozu,
             artifact,
             tags,
-            template_cache_path,
+            image_store,
             backend_pool,
             phase: Phase::Initial,
         })
@@ -97,7 +97,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         deployed_id: u32,
         artifact: StorePath,
         commit_hash: &'a str,
-        template_cache_path: &'a str,
+        image_store: ImageStore<'a>,
         sozu_socket_path: &str,
         backend_pool: Option<&'a BackendPool>,
     ) -> Result<Self> {
@@ -134,7 +134,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             sozu,
             artifact,
             tags,
-            template_cache_path,
+            image_store,
             backend_pool,
             phase: Phase::Initial,
         })
@@ -155,7 +155,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             self.config.provision_inactive(
                 &self.artifact,
                 &self.tags,
-                self.template_cache_path,
+                self.image_store,
                 target,
             )?;
         }
@@ -166,7 +166,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     }
 
     fn start_and_check(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, sozu, artifact, tags, template_cache_path, backend_pool } = self;
+        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, sozu, artifact, tags, image_store, backend_pool } = self;
         let (target, new_backend_id) = match phase {
             Phase::Provisioned { target, new_backend_id } => (target, new_backend_id),
             _ => unreachable!("start_and_check called outside Provisioned phase"),
@@ -200,18 +200,28 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             sozu,
             artifact,
             tags,
-            template_cache_path,
+            image_store,
             backend_pool,
             phase: Phase::Healthy { new_backend_id, new_ip },
         })
     }
 
     fn register_and_switch(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, mut sozu, artifact, tags, template_cache_path, backend_pool } = self;
+        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, mut sozu, artifact, tags, image_store, backend_pool } = self;
         let (new_backend_id, new_ip) = match phase {
             Phase::Healthy { new_backend_id, new_ip, .. } => (new_backend_id, new_ip),
             _ => unreachable!("register_and_switch called outside Healthy phase"),
         };
+        if !config.tcp_ports().is_empty() {
+            info!(
+                "[{}] forwarding tcp ports {:?} to {}",
+                config.name(),
+                config.tcp_ports(),
+                new_ip
+            );
+            sozu.register_tcp_backends(config, &new_backend_id, new_ip)?;
+        }
+        let switched = (|| -> Result<()> {
         match config.service_address() {
             None => info!(
                 "{} has no service address, leaving it unproxied",
@@ -259,6 +269,23 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
                 }
             }
         }
+        Ok(())
+        })();
+        if let Err(e) = switched {
+            sozu.remove_tcp_backends(config, &new_backend_id, new_ip);
+            return Err(e);
+        }
+        match sozu.prune_tcp_backends(config, new_ip) {
+            Ok(Pruned { removed: 0, failed: 0 }) => {}
+            Ok(pruned) => info!(
+                "[{}] dropped {} stale tcp backends ({} could not be dropped)",
+                config.name(), pruned.removed, pruned.failed
+            ),
+            Err(e) => warn!(
+                "[{}] could not check for stale tcp backends, tcp traffic may still reach a retired instance: {}",
+                config.name(), e
+            ),
+        }
         Ok(Self {
             config,
             new_slot,
@@ -268,7 +295,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             sozu,
             artifact,
             tags,
-            template_cache_path,
+            image_store,
             backend_pool,
             phase: Phase::BackendRegistered,
         })
@@ -416,9 +443,9 @@ fn upkeep<T: Deployments>(config: &T, deployed: Option<&T::Deployed>) -> Upkeep 
     match deployed {
         None => Upkeep::Undeployed,
         Some(d) => match d.status() {
-            "running" => match config.service_address() {
-                None => Upkeep::Unproxied,
-                Some(_) => match (d.service_ip(), d.nix_hash()) {
+            "running" => match (config.service_address(), config.tcp_ports().is_empty()) {
+                (None, true) => Upkeep::Unproxied,
+                _ => match (d.service_ip(), d.nix_hash()) {
                     (Some(ip), Some(hash)) => Upkeep::Route {
                         backend_id: BackendId::new(config.name(), hash),
                         ip,
@@ -447,6 +474,10 @@ fn restore_routes<T: Deployments>(
         }
     };
     routes.iter().for_each(|(config, backend_id, ip)| {
+        restore_tcp_routes(&mut sozu, *config, backend_id, *ip);
+        if config.service_address().is_none() {
+            return;
+        }
         let restored = sozu
             .ensure_cluster(*config)
             .and_then(|routing| sozu.register_backend(*config, backend_id, *ip).map(|_| routing));
@@ -479,6 +510,45 @@ fn restore_routes<T: Deployments>(
             ),
         }
     });
+}
+
+fn restore_tcp_routes<T: Deployments>(
+    sozu: &mut SozuClient,
+    config: &T,
+    backend_id: &BackendId,
+    ip: Ipv4Addr,
+) {
+    if config.tcp_ports().is_empty() {
+        return;
+    }
+    match sozu.register_tcp_backends(config, backend_id, ip) {
+        Ok(Settled::Changed) => info!(
+            "periodic reconcile: restored tcp forwarding for {} ports {:?} -> {}",
+            config.name(),
+            config.tcp_ports(),
+            ip
+        ),
+        Ok(Settled::AlreadyApplied) => {}
+        Err(e) => warn!(
+            "periodic reconcile: could not restore tcp forwarding for {}: {}",
+            config.name(),
+            e
+        ),
+    }
+    match sozu.prune_tcp_backends(config, ip) {
+        Ok(Pruned { removed: 0, failed: 0 }) => {}
+        Ok(pruned) => info!(
+            "periodic reconcile: dropped {} stale tcp backends for {} ({} could not be dropped)",
+            pruned.removed,
+            config.name(),
+            pruned.failed
+        ),
+        Err(e) => warn!(
+            "periodic reconcile: could not check {} for stale tcp backends: {}",
+            config.name(),
+            e
+        ),
+    }
 }
 
 pub fn ensure_running<T: Deployments>(configs: &[T], sozu_socket_path: SozuSocketPath<'_>) {
@@ -969,7 +1039,7 @@ pub fn reconcile<T: Deployments>(
                         config,
                         artifact,
                         ctx.commit_hash.as_str(),
-                        ctx.template_cache_path.as_str(),
+                        ctx.image_store,
                         ctx.sozu_socket_path.as_str(),
                         ctx.backend_pool,
                     )?.run()
@@ -985,7 +1055,7 @@ pub fn reconcile<T: Deployments>(
                         deployed_id,
                         artifact,
                         ctx.commit_hash.as_str(),
-                        ctx.template_cache_path.as_str(),
+                        ctx.image_store,
                         ctx.sozu_socket_path.as_str(),
                         ctx.backend_pool,
                     )?.run()
@@ -1013,6 +1083,14 @@ pub fn reconcile<T: Deployments>(
                         Ok(_) => {}
                         Err(e) => info!(
                             "[{}] sozu had no cluster to remove ({}), continuing with teardown",
+                            name, e
+                        ),
+                    }
+                    match sozu.remove_tcp_clusters(&name) {
+                        Ok(0) => {}
+                        Ok(n) => info!("[{}] removed {} tcp clusters", name, n),
+                        Err(e) => warn!(
+                            "[{}] could not remove tcp clusters ({}), continuing with teardown",
                             name, e
                         ),
                     }
@@ -1111,6 +1189,7 @@ mod tests {
             hostname: "test-website".to_string(),
             service_address: Some(Ipv4Addr::new(192, 168, 1, 23)),
             backend_port: 80,
+            tcp_ports: vec![],
             dhcp_timeout_seconds: 240,
             health_check_timeout_seconds: 180,
             image_type: ImageType::from("build-qcow2-website"),

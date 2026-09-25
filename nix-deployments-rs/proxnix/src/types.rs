@@ -23,6 +23,10 @@ pub enum AppError {
     UTF8Error(#[from] FromUtf8Error),
     #[error("Command error: {0}")]
     CmdError(String),
+    #[error("ZFS error: {0}")]
+    ZfsError(String),
+    #[error("{0} is not a valid ZFS or storage name")]
+    InvalidZfsName(String),
     #[error("Parsing int error: {0}")]
     ParseIntError(#[from] std::num::ParseIntError),
     #[error("Parsing float error: {0}")]
@@ -67,6 +71,8 @@ pub struct VMConfig {
     pub service_address: Option<std::net::Ipv4Addr>,
     #[serde(default = "default_backend_port")]
     pub backend_port: u16,
+    #[serde(default)]
+    pub tcp_ports: Vec<u16>,
     pub dhcp_timeout_seconds: u64,
     pub health_check_timeout_seconds: u64,
     pub image_type: ImageType,
@@ -128,6 +134,8 @@ pub struct ContainerConfig {
     pub service_address: Option<std::net::Ipv4Addr>,
     #[serde(default = "default_backend_port")]
     pub backend_port: u16,
+    #[serde(default)]
+    pub tcp_ports: Vec<u16>,
     pub dhcp_timeout_seconds: u64,
     pub health_check_timeout_seconds: u64,
     pub blue_id: u32,
@@ -311,6 +319,8 @@ pub struct AppConfig {
     pub backend_pool: Option<crate::context::BackendPool>,
     #[serde(default)]
     pub local_repo: Option<String>,
+    #[serde(default)]
+    pub zfs_images: Option<crate::zfs::ZfsImages>,
 }
 
 fn default_sozu_socket_path() -> String {

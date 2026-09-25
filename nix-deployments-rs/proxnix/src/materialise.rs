@@ -1,7 +1,8 @@
-use crate::context::{StorePath, Tags};
+use crate::context::{ImageStore, StorePath, Tags};
 use crate::nix::find_in_repo;
 use proxnix_core::{SlotId, Workload};
-use crate::pct::{copy_to_template_storage, pct_create};
+use crate::pct::{copy_to_template_storage, pct_create, pct_create_from_clone};
+use crate::zfs::{BaseImage, ImageKey, Ownership, Tarball};
 use crate::qm::{qm_create, qm_importdisk, qm_resize, qm_set_agent, qm_set_disk};
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 use std::path::{Path, PathBuf};
@@ -81,7 +82,7 @@ pub trait Materialise: Workload {
     fn nix_build_attr(&self) -> &str;
     fn impure(&self) -> bool;
     fn image_type(&self) -> &str;
-    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()>;
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, image_store: ImageStore<'_>, target: SlotId) -> Result<()>;
 
     fn nix_build(&self, repo_path: &str) -> Result<StorePath> {
         let nix_dir = find_flake_dir(repo_path)?;
@@ -101,7 +102,7 @@ impl Materialise for VMConfig {
     fn image_type(&self) -> &str {
         self.image_type.as_str()
     }
-    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, _template_cache_path: &str, target: SlotId) -> Result<()> {
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, _image_store: ImageStore<'_>, target: SlotId) -> Result<()> {
         let id = target.inner();
         qm_create(self, tags, target)?;
         let disk_ref = qm_importdisk(id, &qcow2_path(artifact.as_str()), &self.storage_location)?;
@@ -122,10 +123,22 @@ impl Materialise for ContainerConfig {
     fn image_type(&self) -> &str {
         self.image_type.as_str()
     }
-    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, template_cache_path: &str, target: SlotId) -> Result<()> {
-        let ostemplate =
-            copy_to_template_storage(artifact.as_str(), template_cache_path, &tags.nix_hash)?;
-        pct_create(self, &ostemplate, tags, target)?;
-        Ok(())
+    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, image_store: ImageStore<'_>, target: SlotId) -> Result<()> {
+        let tarball = Tarball::find(artifact.as_str())?;
+        match image_store.zfs.filter(|zfs| zfs.storage.is(&self.storage_location)) {
+            Some(zfs) => {
+                let key = ImageKey::new(tags.nix_hash.clone(), Ownership::of(self.privileged));
+                let image = BaseImage::ensure(zfs, &key, &tarball)?;
+                pct_create_from_clone(self, zfs, &image, tags, target)
+            }
+            None => {
+                let ostemplate = copy_to_template_storage(
+                    &tarball,
+                    image_store.template_cache_path.as_str(),
+                    &tags.nix_hash,
+                )?;
+                pct_create(self, &ostemplate, tags, target).map(|_| ())
+            }
+        }
     }
 }

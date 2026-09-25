@@ -3,6 +3,7 @@ use std::{borrow::Borrow, collections::HashMap, fmt, net::Ipv4Addr};
 use proxnix_core::Slot;
 
 use crate::types::{AppError, Result};
+use crate::zfs::ZfsImages;
 
 /// The hash segment extracted from a nix store path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -233,6 +234,12 @@ impl<'a> TryFrom<&'a str> for TemplateCachePath<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ImageStore<'a> {
+    pub template_cache_path: TemplateCachePath<'a>,
+    pub zfs: Option<&'a ZfsImages>,
+}
+
 /// Path to the cloned nix repository, borrowed from the pipeline.
 #[derive(Debug, Clone, Copy)]
 pub struct RepoPath<'a>(&'a str);
@@ -264,7 +271,7 @@ pub struct ReconcileContext<'a> {
     pub image_type_errors: &'a HashMap<ImageType, String>,
     pub repo_path: RepoPath<'a>,
     pub commit_hash: CommitHash<'a>,
-    pub template_cache_path: TemplateCachePath<'a>,
+    pub image_store: ImageStore<'a>,
     pub sozu_socket_path: SozuSocketPath<'a>,
     pub backend_pool: Option<&'a BackendPool>,
 }

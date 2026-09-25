@@ -5,7 +5,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
     build::build_image_types,
-    context::{BackendPool, CommitHash, ImageType, NixHash, PoolFit, ReconcileContext, RepoPath, SozuSocketPath, TemplateCachePath},
+    context::{BackendPool, CommitHash, ImageStore, ImageType, NixHash, PoolFit, ReconcileContext, RepoPath, SozuSocketPath, TemplateCachePath},
     deployments,
     git::{git_ensure_commit, git_head_commit},
     host_net::{
@@ -17,6 +17,7 @@ use crate::{
     pct::reap_template_cache,
     state::parse_config,
     types::{AppConfig, AppError, ContainerConfig, Outcome, Result, VMConfig},
+    zfs::{ReapedImages, reap_images},
 };
 
 pub enum WorkloadGroup {
@@ -209,7 +210,10 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
         image_type_errors: &image_type_errors,
         repo_path: RepoPath::try_from(dest_path.as_str())?,
         commit_hash: CommitHash::try_from(commit_hash)?,
-        template_cache_path: TemplateCachePath::try_from(app_config.template_cache_path.as_str())?,
+        image_store: ImageStore {
+            template_cache_path: TemplateCachePath::try_from(app_config.template_cache_path.as_str())?,
+            zfs: app_config.zfs_images.as_ref(),
+        },
         sozu_socket_path: SozuSocketPath::try_from(app_config.sozu_socket_path.as_str())?,
         backend_pool: app_config.backend_pool.as_ref(),
     };
@@ -239,6 +243,11 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
         ),
         Ok(_) => {}
         Err(e) => warn!("could not reap the template cache: {}", e),
+    }
+    match app_config.zfs_images.as_ref().map(|zfs| reap_images(zfs, &live)) {
+        Some(Ok(ReapedImages(0))) | None => {}
+        Some(Ok(ReapedImages(n))) => info!("reaped {} stale base images", n),
+        Some(Err(e)) => warn!("could not reap base images: {}", e),
     }
     Ok(())
 }
