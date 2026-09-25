@@ -66,22 +66,21 @@ async fn webhook_handler(
         }
     };
 
-    {
-        let mut guard = state.last_repo.write().await;
-        *guard = Some((git_repo_url.clone(), current_git_commit.clone()));
-    }
-
     let appconfig = state.appconfig.clone();
+    let last_repo = state.last_repo.clone();
     tokio::task::spawn_blocking(move || {
         info!(
             "Pipeline started for repo: {}, commit: {}",
             git_repo_url, current_git_commit
         );
         match pipeline::run_pipeline(&git_repo_url, &current_git_commit, &appconfig) {
-            Ok(_) => info!(
-                "Pipeline finished for repo: {}, commit: {}",
-                git_repo_url, current_git_commit
-            ),
+            Ok(_) => {
+                *last_repo.blocking_write() = Some((git_repo_url.clone(), current_git_commit.clone()));
+                info!(
+                    "Pipeline finished for repo: {}, commit: {}",
+                    git_repo_url, current_git_commit
+                )
+            }
             Err(e) => error!(
                 "Pipeline failed for repo: {}, commit: {}, error: {:?}",
                 git_repo_url, current_git_commit, e
