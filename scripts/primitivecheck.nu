@@ -22,11 +22,17 @@ export def findprimitive [dir?: path] {
   let current_dir = $dir | default ("~/cloned/proxnix/nix-deployments-rs/" | path expand)
   ls $current_dir | each --flatten {|entry| match $entry.type {
       file => {
-        if ($entry.name | str contains ".rs") {
+        if ($entry.name | str ends-with ".rs") {
           let content = (open $entry.name)
           return {
             name: $entry.name,
-            output: ($primitives | each --flatten {|type| $content | find $type}  )
+            output: ($primitives | each --flatten {|type|
+              $content
+              | ^ast-grep run --lang rust --stdin --json=compact --pattern $"struct S { $NAME: ($type) }" --selector field_declaration
+              | complete
+              | get stdout
+              | from json
+            })
           }
         }
       }   
@@ -40,5 +46,5 @@ export def findprimitive [dir?: path] {
 }
 
 export def main [] {
-  findprimitive | where ($in | each --flatten {|e| $e | is-not-empty})
+  findprimitive | where {|row| $row.output | is-not-empty}
 }
