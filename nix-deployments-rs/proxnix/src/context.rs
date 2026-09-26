@@ -5,7 +5,6 @@ use proxnix_core::Slot;
 use crate::types::{AppError, Result};
 use crate::zfs::ZfsImages;
 
-/// The hash segment extracted from a nix store path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NixHash(String);
 
@@ -32,7 +31,6 @@ impl TryFrom<&str> for NixHash {
     }
 }
 
-/// A full path to a nix build output (e.g. /nix/store/abc123...-name).
 #[derive(Debug, Clone)]
 pub struct StorePath(String);
 
@@ -181,7 +179,9 @@ impl<'a> TryFrom<&'a str> for CommitHash<'a> {
     type Error = AppError;
     fn try_from(s: &'a str) -> Result<Self> {
         if s.is_empty() {
-            Err(AppError::CmdError("commit hash cannot be empty".to_string()))
+            Err(AppError::CmdError(
+                "commit hash cannot be empty".to_string(),
+            ))
         } else {
             Ok(CommitHash(s))
         }
@@ -396,10 +396,16 @@ mod tests {
 
     #[test]
     fn four_services_need_eight_addresses() {
-        assert_eq!(pool("192.168.1.200", "192.168.1.207").fits(4), PoolFit::Sufficient);
+        assert_eq!(
+            pool("192.168.1.200", "192.168.1.207").fits(4),
+            PoolFit::Sufficient
+        );
         assert_eq!(
             pool("192.168.1.200", "192.168.1.206").fits(4),
-            PoolFit::TooSmall { capacity: 7, required: 8 }
+            PoolFit::TooSmall {
+                capacity: 7,
+                required: 8
+            }
         );
     }
 

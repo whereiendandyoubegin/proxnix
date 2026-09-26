@@ -57,6 +57,8 @@ pub enum AppError {
     },
     #[error("Service address {0} is declared by more than one workload")]
     DuplicateServiceAddress(std::net::Ipv4Addr),
+    #[error("unable to deserialize: {0}")]
+    DeserializationError(#[from] serde::de::value::Error),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

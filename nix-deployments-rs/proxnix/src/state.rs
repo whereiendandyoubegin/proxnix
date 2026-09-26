@@ -6,6 +6,8 @@ use crate::types::{
 };
 use proxnix_core::Slot;
 use rayon::prelude::*;
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -44,7 +46,7 @@ pub(crate) fn vm_tags(vm_id: u32) -> Result<Option<String>> {
 }
 
 pub(crate) fn container_tags(ct_id: u32) -> Result<Option<String>> {
-    Ok(parse_pct_config(&pct_config(ct_id)?)?.tags)
+    Ok(parse_pct_config(pct_config(ct_id)?)?.tags)
 }
 
 pub fn parse_config(json: &str) -> Result<DesiredState> {
@@ -72,9 +74,8 @@ pub fn qm_list() -> Result<String> {
 }
 
 pub(crate) fn vm_exists(vm_id: u32) -> Result<bool> {
-    qm_list().and_then(|raw| {
-        parse_qm_list(&raw).map(|vms| vms.into_iter().any(|vm| vm.vm_id == vm_id))
-    })
+    qm_list()
+        .and_then(|raw| parse_qm_list(&raw).map(|vms| vms.into_iter().any(|vm| vm.vm_id == vm_id)))
 }
 
 pub fn qm_config(vm_id: u32) -> Result<String> {
@@ -258,6 +259,7 @@ pub(crate) struct PctListEntry {
     ct_name: String,
 }
 
+#[derive(Deserialize)]
 struct PctConfigData {
     hostname: String,
     memory_mb: u32,
@@ -290,71 +292,161 @@ pub fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
         .collect()
 }
 
-fn parse_pct_config(output: &str) -> Result<PctConfigData> {
-    let mut hostname = String::new();
-    let mut memory_mb = 0u32;
-    let mut cores = 0u16;
-    let mut rootfs_gb = 0.0f64;
-    let mut tags: Option<String> = None;
-    let mut unprivileged = false;
-    let mut bind_mounts: Vec<BindMount> = Vec::new();
+fn parse_pct_config(output: String) -> Result<PctConfigData> {
+    let fields: BTreeMap<&str, &str> = output
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k, v.trim()))
+        .collect();
 
-    for line in output.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim();
-            let value = value.trim();
-            match key {
-                "hostname" => hostname = value.to_string(),
-                "memory" => memory_mb = value.parse()?,
-                "cores" => cores = value.parse()?,
-                "unprivileged" => unprivileged = value.trim() == "1",
-                "rootfs" => {
-                    // Format: "local-lvm:vm-200-disk-0,size=8G"
-                    if let Some(size_part) =
-                        value.split(',').find(|s| s.trim().starts_with("size="))
-                    {
-                        let size_str = size_part.trim().trim_start_matches("size=");
-                        if let Some(gb) = size_str.strip_suffix('G') {
-                            rootfs_gb = gb.parse().unwrap_or(0.0);
-                        } else if let Some(mb) = size_str.strip_suffix('M') {
-                            rootfs_gb = mb.parse::<f64>().unwrap_or(0.0) / 1024.0;
-                        }
-                    }
-                }
-                "tags" => tags = Some(value.to_string()),
-                k if k.starts_with("mp") && k[2..].parse::<u32>().is_ok() => {
-                    // Format: "/host/path,mp=/container/path"
-                    let parts: Vec<&str> = value.split(',').collect();
-                    if let (Some(host_path), Some(mp_part)) = (
-                        parts.first(),
-                        parts.iter().find(|p| p.trim().starts_with("mp=")),
-                    ) {
-                        let container_path = mp_part.trim().trim_start_matches("mp=");
-                        bind_mounts.push(BindMount {
-                            host_path: host_path.to_string(),
-                            container_path: container_path.to_string(),
-                            mode: match value.contains("ro=1") {
-                                true => MountMode::ReadOnly,
-                                false => MountMode::ReadWrite,
-                            },
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    let get = |key: &str| {
+        fields
+            .get(key)
+            .copied()
+            .ok_or_else(|| AppError::ProxmoxError(format!("pct config is missing `{key}`")))
+    };
+
+    let bind_mounts = fields
+        .iter()
+        .filter(|(k, _)| {
+            k.strip_prefix("mp")
+                .is_some_and(|n| n.parse::<u8>().is_ok())
+        })
+        .map(|(_, v)| parse_mount(v))
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(PctConfigData {
-        hostname,
-        memory_mb,
-        cores,
-        rootfs_gb,
-        tags,
-        unprivileged,
+        hostname: get("hostname")?.to_string(),
+        memory_mb: get("memory")?.parse()?,
+        cores: get("cores")?.parse()?,
+        rootfs_gb: rootfs_size_gb(get("rootfs")?)?,
+        tags: fields.get("tags").map(|t| t.to_string()),
+        unprivileged: match fields.get("unprivileged").copied() {
+            Some("1") => true,
+            None | Some("0") => false,
+            Some(other) => {
+                return Err(AppError::ProxmoxError(format!(
+                    "pct config has unexpected unprivileged value `{other}`"
+                )));
+            }
+        },
         bind_mounts,
     })
 }
+
+fn parse_mount(value: &str) -> Result<BindMount> {
+    let (host_path, rest) = value
+        .split_once(',')
+        .ok_or_else(|| AppError::ProxmoxError(format!("mount point `{value}` has no options")))?;
+    let opts: BTreeMap<&str, &str> = rest.split(',').filter_map(|s| s.split_once('=')).collect();
+
+    let container_path = opts
+        .get("mp")
+        .ok_or_else(|| AppError::ProxmoxError(format!("mount point `{value}` has no mp=")))?;
+
+    let mode = match opts.get("ro").copied() {
+        Some("1") => MountMode::ReadOnly,
+        None | Some("0") => MountMode::ReadWrite,
+        Some(other) => {
+            return Err(AppError::ProxmoxError(format!(
+                "mount point `{value}` has unexpected ro={other}"
+            )));
+        }
+    };
+
+    Ok(BindMount {
+        host_path: host_path.to_string(),
+        container_path: container_path.to_string(),
+        mode,
+    })
+}
+
+fn rootfs_size_gb(rootfs: &str) -> Result<f64> {
+    let size = rootfs
+        .split(',')
+        .find_map(|s| s.strip_prefix("size="))
+        .ok_or_else(|| AppError::ProxmoxError(format!("rootfs `{rootfs}` has no size=")))?;
+    let (n, unit) = size
+        .char_indices()
+        .last()
+        .map(|(i, _)| size.split_at(i))
+        .ok_or_else(|| AppError::ProxmoxError(format!("rootfs `{rootfs}` has an empty size")))?;
+
+    match unit {
+        "T" => Ok(n.parse::<f64>()? * 1024.0),
+        "G" => Ok(n.parse::<f64>()?),
+        "M" => Ok(n.parse::<f64>()? / 1024.0),
+        _ => Err(AppError::ProxmoxError(format!(
+            "rootfs `{rootfs}` has unknown size unit `{unit}`"
+        ))),
+    }
+}
+
+// fn parse_pct_config(output: &str) -> Result<PctConfigData> {
+//     let mut hostname = String::new();
+//     let mut memory_mb = 0u32;
+//     let mut cores = 0u16;
+//     let mut rootfs_gb = 0.0f64;
+//     let mut tags: Option<String> = None;
+//     let mut unprivileged = false;
+//     let mut bind_mounts: Vec<BindMount> = Vec::new();
+
+//     for line in output.lines() {
+//         if let Some((key, value)) = line.split_once(':') {
+//             let key = key.trim();
+//             let value = value.trim();
+//             match key {
+//                 "hostname" => hostname = value.to_string(),
+//                 "memory" => memory_mb = value.parse()?,
+//                 "cores" => cores = value.parse()?,
+//                 "unprivileged" => unprivileged = value.trim() == "1",
+//                 "rootfs" => {
+//                     // Format: "local-lvm:vm-200-disk-0,size=8G"
+//                     if let Some(size_part) =
+//                         value.split(',').find(|s| s.trim().starts_with("size="))
+//                     {
+//                         let size_str = size_part.trim().trim_start_matches("size=");
+//                         if let Some(gb) = size_str.strip_suffix('G') {
+//                             rootfs_gb = gb.parse().unwrap_or(0.0);
+//                         } else if let Some(mb) = size_str.strip_suffix('M') {
+//                             rootfs_gb = mb.parse::<f64>().unwrap_or(0.0) / 1024.0;
+//                         }
+//                     }
+//                 }
+//                 "tags" => tags = Some(value.to_string()),
+//                 k if k.starts_with("mp") && k[2..].parse::<u32>().is_ok() => {
+//                     // Format: "/host/path,mp=/container/path"
+//                     let parts: Vec<&str> = value.split(',').collect();
+//                     if let (Some(host_path), Some(mp_part)) = (
+//                         parts.first(),
+//                         parts.iter().find(|p| p.trim().starts_with("mp=")),
+//                     ) {
+//                         let container_path = mp_part.trim().trim_start_matches("mp=");
+//                         bind_mounts.push(BindMount {
+//                             host_path: host_path.to_string(),
+//                             container_path: container_path.to_string(),
+//                             mode: match value.contains("ro=1") {
+//                                 true => MountMode::ReadOnly,
+//                                 false => MountMode::ReadWrite,
+//                             },
+//                         });
+//                     }
+//                 }
+//                 _ => {}
+//             }
+//         }
+//     }
+
+//     Ok(PctConfigData {
+//         hostname,
+//         memory_mb,
+//         cores,
+//         rootfs_gb,
+//         tags,
+//         unprivileged,
+//         bind_mounts,
+//     })
+// }
 
 pub fn enrich_container_info(
     entries: Vec<PctListEntry>,
@@ -363,7 +455,7 @@ pub fn enrich_container_info(
         .into_par_iter()
         .map(|entry| -> Result<Option<(String, DeployedContainer)>> {
             let config_raw = pct_config(entry.ct_id)?;
-            let config = parse_pct_config(&config_raw)?;
+            let config = parse_pct_config(config_raw)?;
             if !is_proxnix_managed(config.tags.as_deref()) {
                 return Ok(None);
             }
@@ -495,9 +587,13 @@ mod tests {
     #[test]
     fn a_registered_service_ip_survives_a_tag_round_trip() {
         let ip = Ipv4Addr::new(10, 42, 0, 7);
-        let rendered = Tags::new(NixHash::try_from("abc123").unwrap(), "deadbeef", Slot::Green)
-            .with_service_ip(ip)
-            .render();
+        let rendered = Tags::new(
+            NixHash::try_from("abc123").unwrap(),
+            "deadbeef",
+            Slot::Green,
+        )
+        .with_service_ip(ip)
+        .render();
 
         assert_eq!(service_ip_from_tags(Some(&rendered)), Some(ip));
         assert_eq!(slot_from_tags(Some(&rendered)), Slot::Green);
@@ -523,7 +619,10 @@ mod tests {
             service_ip_from_tags(Some(&rendered)),
             Some(Ipv4Addr::new(192, 168, 1, 50))
         );
-        assert_eq!(nix_hash_from_tags(Some(&rendered)).unwrap().as_str(), "abc123");
+        assert_eq!(
+            nix_hash_from_tags(Some(&rendered)).unwrap().as_str(),
+            "abc123"
+        );
     }
 
     #[test]
@@ -570,9 +669,7 @@ mod tests {
         assert!(is_proxnix_managed(Some(
             "proxnix;nix-somethingelse;commit-x;slot-green"
         )));
-        assert!(!is_proxnix_managed(Some(
-            "nix-abc123;commit-x;slot-green"
-        )));
+        assert!(!is_proxnix_managed(Some("nix-abc123;commit-x;slot-green")));
         assert!(!is_proxnix_managed(Some("a-hand-made-vm")));
         assert!(!is_proxnix_managed(None));
     }
@@ -581,7 +678,9 @@ mod tests {
     fn tags_tolerate_surrounding_whitespace() {
         assert_eq!(slot_from_tags(Some("proxnix; slot-green ")), Slot::Green);
         assert_eq!(
-            nix_hash_from_tags(Some("proxnix; nix-abc123 ")).unwrap().as_str(),
+            nix_hash_from_tags(Some("proxnix; nix-abc123 "))
+                .unwrap()
+                .as_str(),
             "abc123"
         );
     }

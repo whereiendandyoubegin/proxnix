@@ -16,3 +16,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rayon = "1"
 sozu-command-lib = "1.1.1"
+serde_with = "3.23.0"
