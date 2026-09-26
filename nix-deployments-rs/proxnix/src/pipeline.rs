@@ -229,7 +229,7 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
         })
         .collect();
 
-    for o in outcomes.iter() { if let Some(e) = &o.error { warn!("{}: {:?} failed: {}", o.name, o.kind, e) } else { info!("{}: {:?}", o.name, o.kind) }; }
+    for o in &outcomes { if let Some(e) = &o.error { warn!("{}: {:?} failed: {}", o.name, o.kind, e) } else { info!("{}: {:?}", o.name, o.kind) } }
 
     let live: HashSet<NixHash> = image_hashes.values().cloned().collect();
     match reap_template_cache(app_config.template_cache_path.as_str(), &live) {
