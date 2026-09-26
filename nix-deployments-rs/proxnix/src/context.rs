@@ -60,8 +60,7 @@ impl TryFrom<String> for StorePath {
             Ok(StorePath(s))
         } else {
             Err(AppError::CmdError(format!(
-                "not a valid nix store path: {}",
-                s
+                "not a valid nix store path: {s}"
             )))
         }
     }
@@ -159,7 +158,7 @@ impl Tags {
             self.nix_hash, self.commit, self.slot
         );
         match self.service_ip {
-            Some(ip) => format!("{};ip-{}", base, ip),
+            Some(ip) => format!("{base};ip-{ip}"),
             None => base,
         }
     }
@@ -292,16 +291,13 @@ pub struct BackendPool {
 impl TryFrom<RawBackendPool> for BackendPool {
     type Error = String;
     fn try_from(raw: RawBackendPool) -> std::result::Result<Self, Self::Error> {
-        match u32::from(raw.start) > u32::from(raw.end) {
-            true => Err(format!(
-                "backend pool start {} is above its end {}",
-                raw.start, raw.end
-            )),
-            false => Ok(BackendPool {
-                start: raw.start,
-                end: raw.end,
-            }),
-        }
+        if u32::from(raw.start) > u32::from(raw.end) { Err(format!(
+            "backend pool start {} is above its end {}",
+            raw.start, raw.end
+        )) } else { Ok(BackendPool {
+            start: raw.start,
+            end: raw.end,
+        }) }
     }
 }
 
@@ -322,13 +318,10 @@ impl BackendPool {
 
     pub fn fits(&self, service_count: u32) -> PoolFit {
         let required = service_count * 2;
-        match self.capacity() >= required {
-            true => PoolFit::Sufficient,
-            false => PoolFit::TooSmall {
-                capacity: self.capacity(),
-                required,
-            },
-        }
+        if self.capacity() >= required { PoolFit::Sufficient } else { PoolFit::TooSmall {
+            capacity: self.capacity(),
+            required,
+        } }
     }
 }
 

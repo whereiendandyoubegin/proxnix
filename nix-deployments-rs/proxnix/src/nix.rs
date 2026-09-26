@@ -20,10 +20,7 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<BuildOutcom
     loop {
         match child.try_wait()? {
             Some(status) => return Ok(BuildOutcome::Finished(status)),
-            None => match started.elapsed() >= timeout {
-                true => return Ok(BuildOutcome::TimedOut),
-                false => std::thread::sleep(NIX_POLL_INTERVAL),
-            },
+            None => if started.elapsed() >= timeout { return Ok(BuildOutcome::TimedOut) } else { std::thread::sleep(NIX_POLL_INTERVAL) },
         }
     }
 }
@@ -33,10 +30,10 @@ fn walk_for_file(dir: &Path, filename: &str, results: &mut Vec<PathBuf>) -> Resu
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().map(|n| n != ".git").unwrap_or(true) {
+            if path.file_name().is_none_or(|n| n != ".git") {
                 walk_for_file(&path, filename, results)?;
             }
-        } else if path.file_name().map(|n| n == filename).unwrap_or(false) {
+        } else if path.file_name().is_some_and(|n| n == filename) {
             results.push(path);
         }
     }
@@ -48,25 +45,23 @@ pub fn find_in_repo(repo_path: &str, filename: &str) -> Result<String> {
     walk_for_file(Path::new(repo_path), filename, &mut results)?;
     match results.len() {
         0 => Err(AppError::CmdError(format!(
-            "'{}' not found in repo",
-            filename
+            "'{filename}' not found in repo"
         ))),
         1 => Ok(results.remove(0).to_string_lossy().to_string()),
         n => Err(AppError::CmdError(format!(
-            "Found {} copies of '{}' in repo, expected exactly 1",
-            n, filename
+            "Found {n} copies of '{filename}' in repo, expected exactly 1"
         ))),
     }
 }
 
 pub fn eval_appconfig(nixology_path: &str) -> Result<String> {
-    let installable = format!("{}#proxnixcfg", nixology_path);
+    let installable = format!("{nixology_path}#proxnixcfg");
     let nix_eval = Command::new("nix")
         .arg("eval")
         .arg(&installable)
         .arg("--json")
         .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {e}")))?;
     if !nix_eval.status.success() {
         let stderr = String::from_utf8_lossy(&nix_eval.stderr);
         return Err(AppError::CmdError(format!(
@@ -92,7 +87,7 @@ pub fn eval_config(repo_path: &str) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {e}")))?;
 
     let drain = |stream: Option<std::process::ChildStdout>| {
         stream.map(|s| {
@@ -108,7 +103,7 @@ pub fn eval_config(repo_path: &str) -> Result<String> {
         std::thread::spawn(move || {
             BufReader::new(s)
                 .lines()
-                .map_while(|l| l.ok())
+                .map_while(std::result::Result::ok)
                 .filter(|l| !l.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("; ")
@@ -132,14 +127,11 @@ pub fn eval_config(repo_path: &str) -> Result<String> {
                 NIX_EVAL_TIMEOUT.as_secs()
             )))
         }
-        BuildOutcome::Finished(status) => match status.success() {
-            false => Err(AppError::NixError(format!(
-                "eval of .#proxnix failed (exit: {:?}): {}",
-                status.code(),
-                stderr
-            ))),
-            true => Ok(stdout),
-        },
+        BuildOutcome::Finished(status) => if status.success() { Ok(stdout) } else { Err(AppError::NixError(format!(
+            "eval of .#proxnix failed (exit: {:?}): {}",
+            status.code(),
+            stderr
+        ))) },
     }
 }
 
@@ -159,7 +151,7 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
         .arg("builtins.attrNames")
         .arg("--json")
         .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {e}")))?;
     if !nix_eval.status.success() {
         let stderr = String::from_utf8_lossy(&nix_eval.stderr);
         return Err(AppError::CmdError(format!(
@@ -187,7 +179,7 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
         build_attr,
         nix_dir.display()
     );
-    let installable = format!(".#nixosConfigurations.{}.{}", config_name, build_attr);
+    let installable = format!(".#nixosConfigurations.{config_name}.{build_attr}");
     let mut child = Command::new("nix")
         .current_dir(nix_dir)
         .arg("build")
@@ -196,7 +188,7 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {e}")))?;
 
     let pump = child.stderr.take().map(|stderr| {
         let label = config_name.to_string();
@@ -204,7 +196,7 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
             BufReader::new(stderr).lines().for_each(|line| match line {
                 Ok(text) if !text.trim().is_empty() => info!("[nix {}] {}", label, text.trim()),
                 _ => {}
-            })
+            });
         })
     });
 
@@ -243,7 +235,7 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
         .arg("path-info")
         .arg(&installable)
         .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {e}")))?;
     if !path_output.status.success() {
         let stderr = String::from_utf8_lossy(&path_output.stderr);
         return Err(AppError::CmdError(format!(
@@ -255,7 +247,7 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
     }
     let stdout = String::from_utf8(path_output.stdout)?;
     let store_path = stdout.lines().find(|l| !l.trim().is_empty())
-        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{}'", config_name)))?
+        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{config_name}'")))?
         .trim()
         .to_string();
     info!("Nix build succeeded for '{}': {}", config_name, store_path);

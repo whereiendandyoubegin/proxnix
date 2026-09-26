@@ -43,10 +43,7 @@ impl TryFrom<String> for Dataset {
             && !s.contains("//")
             && !s.contains('@')
             && !s.contains(char::is_whitespace);
-        match valid {
-            true => Ok(Dataset(s)),
-            false => Err(AppError::InvalidZfsName(s)),
-        }
+        if valid { Ok(Dataset(s)) } else { Err(AppError::InvalidZfsName(s)) }
     }
 }
 
@@ -82,10 +79,7 @@ impl StorageId {
 impl TryFrom<String> for StorageId {
     type Error = AppError;
     fn try_from(s: String) -> Result<Self> {
-        match s.is_empty() || s.contains(':') || s.contains(char::is_whitespace) {
-            true => Err(AppError::InvalidZfsName(s)),
-            false => Ok(StorageId(s)),
-        }
+        if s.is_empty() || s.contains(':') || s.contains(char::is_whitespace) { Err(AppError::InvalidZfsName(s)) } else { Ok(StorageId(s)) }
     }
 }
 
@@ -140,8 +134,7 @@ impl TryFrom<&str> for Mountpoint {
         match s.trim() {
             path if path.starts_with('/') => Ok(Mountpoint(PathBuf::from(path))),
             other => Err(AppError::ZfsError(format!(
-                "dataset has no usable mountpoint ({}); give the images dataset a real mountpoint",
-                other
+                "dataset has no usable mountpoint ({other}); give the images dataset a real mountpoint"
             ))),
         }
     }
@@ -155,10 +148,7 @@ pub enum Ownership {
 
 impl Ownership {
     pub fn of(privileged: bool) -> Ownership {
-        match privileged {
-            true => Ownership::Privileged,
-            false => Ownership::Unprivileged,
-        }
+        if privileged { Ownership::Privileged } else { Ownership::Unprivileged }
     }
 
     fn suffix(self) -> &'static str {
@@ -211,10 +201,7 @@ impl TryFrom<&str> for ImageKey {
             Some(hash) => (hash, Ownership::Privileged),
             None => (s, Ownership::Unprivileged),
         };
-        match hash.len() == NIX_HASH_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) {
-            true => Ok(ImageKey { hash: NixHash::try_from(hash)?, ownership }),
-            false => Err(AppError::InvalidZfsName(s.to_string())),
-        }
+        if hash.len() == NIX_HASH_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) { Ok(ImageKey { hash: NixHash::try_from(hash)?, ownership }) } else { Err(AppError::InvalidZfsName(s.to_string())) }
     }
 }
 
@@ -366,16 +353,13 @@ impl BaseImage<Sealed> {
     pub fn clone_rootfs(&self, zfs: &ZfsImages, target: SlotId, size: DiskSize) -> Result<RootfsClone> {
         let volume = RootfsVolume::for_slot(zfs.storage.clone(), target, size);
         let dataset = zfs.pool.child(&volume.volume);
-        match exists(dataset.as_str())? {
-            true => Err(AppError::ZfsError(format!(
-                "{} already exists; destroy the leftover volume before provisioning {}",
-                dataset,
-                target.inner()
-            ))),
-            false => {
-                zfs_clone(&Snapshot::base(&self.dataset), &dataset, size)?;
-                Ok(RootfsClone { dataset, volume })
-            }
+        if exists(dataset.as_str())? { Err(AppError::ZfsError(format!(
+            "{} already exists; destroy the leftover volume before provisioning {}",
+            dataset,
+            target.inner()
+        ))) } else {
+            zfs_clone(&Snapshot::base(&self.dataset), &dataset, size)?;
+            Ok(RootfsClone { dataset, volume })
         }
     }
 }
@@ -404,7 +388,7 @@ impl Tarball {
         let dir = Path::new(result_path).join("tarball");
         std::fs::read_dir(&dir)
             .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", dir.display(), e)))?
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.path())
             .find(|p| p.extension().is_some_and(|ext| ext == "xz"))
             .map(Tarball)
@@ -420,20 +404,17 @@ impl Tarball {
 pub struct ReapedImages(pub usize);
 
 pub fn reap_images(zfs: &ZfsImages, keep: &HashSet<NixHash>) -> Result<ReapedImages> {
-    match exists(zfs.images.as_str())? {
-        false => Ok(ReapedImages::default()),
-        true => Ok(image_datasets(zfs)?
-            .into_iter()
-            .filter(|(key, _)| !keep.contains(&key.hash))
-            .fold(ReapedImages::default(), |acc, (_, dataset)| match reap_image(&dataset) {
-                Ok(true) => ReapedImages(acc.0 + 1),
-                Ok(false) => acc,
-                Err(e) => {
-                    warn!("could not reap base image {}: {}", dataset, e);
-                    acc
-                }
-            })),
-    }
+    if exists(zfs.images.as_str())? { Ok(image_datasets(zfs)?
+    .into_iter()
+    .filter(|(key, _)| !keep.contains(&key.hash))
+    .fold(ReapedImages::default(), |acc, (_, dataset)| match reap_image(&dataset) {
+        Ok(true) => ReapedImages(acc.0 + 1),
+        Ok(false) => acc,
+        Err(e) => {
+            warn!("could not reap base image {}: {}", dataset, e);
+            acc
+        }
+    })) } else { Ok(ReapedImages::default()) }
 }
 
 fn image_datasets(zfs: &ZfsImages) -> Result<Vec<(ImageKey, Dataset)>> {
@@ -447,12 +428,9 @@ fn image_datasets(zfs: &ZfsImages) -> Result<Vec<(ImageKey, Dataset)>> {
 
 fn reap_image(dataset: &Dataset) -> Result<bool> {
     let clones = zfs_cmd(&["get", "-H", "-o", "value", "clones", &Snapshot::base(dataset).to_string()])?;
-    match has_clones(&clones) {
-        true => Ok(false),
-        false => {
-            info!("reaping base image {}", dataset);
-            destroy_recursive(dataset).map(|_| true)
-        }
+    if has_clones(&clones) { Ok(false) } else {
+        info!("reaping base image {}", dataset);
+        destroy_recursive(dataset).map(|()| true)
     }
 }
 
@@ -504,7 +482,7 @@ fn zfs_clone(origin: &Snapshot, dataset: &Dataset, size: DiskSize) -> Result<()>
     zfs_cmd(&[
         "clone",
         "-o",
-        &format!("refquota={}", size),
+        &format!("refquota={size}"),
         "-o",
         "acltype=posixacl",
         "-o",
@@ -533,15 +511,12 @@ fn zfs_cmd(args: &[&str]) -> Result<String> {
 
 fn run(cmd: &mut Command, what: &str) -> Result<String> {
     let output = cmd.output()?;
-    match output.status.success() {
-        true => Ok(String::from_utf8(output.stdout)?),
-        false => Err(AppError::ZfsError(format!(
-            "{} failed (exit: {:?}): {}",
-            what,
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))),
-    }
+    if output.status.success() { Ok(String::from_utf8(output.stdout)?) } else { Err(AppError::ZfsError(format!(
+        "{} failed (exit: {:?}): {}",
+        what,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))) }
 }
 
 #[cfg(test)]

@@ -78,9 +78,9 @@ pub fn qm_get_running_ip(vm_id: &u32) -> Result<String> {
               iface["ip-addresses"].as_array()?.iter()
                   .find(|addr| addr["ip-address-type"] == "ipv4")
                   .and_then(|addr| addr["ip-address"].as_str())
-                  .map(|s| s.to_string())
+                  .map(std::string::ToString::to_string)
           }))
-      .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {}", vm_id)))
+      .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {vm_id}")))
 }
 
 pub fn qm_stop(vm_id: &u32) -> Result<()> {
@@ -124,8 +124,7 @@ fn parse_importdisk_output(output: &str) -> Result<String> {
         })
         .ok_or_else(|| {
             AppError::CmdError(format!(
-                "could not find disk reference in qm importdisk output: {}",
-                output
+                "could not find disk reference in qm importdisk output: {output}"
             ))
         })?;
 
@@ -156,7 +155,7 @@ pub fn qm_importdisk(vm_id: u32, qcow_path: &str, storage: &str) -> Result<Strin
     let disk_ref = if disk_id.contains(':') {
         disk_id
     } else {
-        format!("{}:{}", storage, disk_id)
+        format!("{storage}:{disk_id}")
     };
 
     Ok(disk_ref)
@@ -166,10 +165,10 @@ pub fn qm_set_disk(vm_id: u32, disk_ref: &str, disk_slot: &str) -> Result<String
     let qm_set_disk = Command::new("qm")
         .arg("set")
         .arg(vm_id.to_string())
-        .arg(format!("--{}", disk_slot))
+        .arg(format!("--{disk_slot}"))
         .arg(disk_ref)
         .arg("--boot")
-        .arg(format!("order={}", disk_slot))
+        .arg(format!("order={disk_slot}"))
         .output()?;
     if !qm_set_disk.status.success() {
         let stderr = String::from_utf8_lossy(&qm_set_disk.stderr);
@@ -270,7 +269,7 @@ pub fn qm_resize(vm_id: u32, disk_slot: &str, size_gb: u32) -> Result<String> {
         .arg("resize")
         .arg(vm_id.to_string())
         .arg(disk_slot)
-        .arg(format!("{}G", size_gb))
+        .arg(format!("{size_gb}G"))
         .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

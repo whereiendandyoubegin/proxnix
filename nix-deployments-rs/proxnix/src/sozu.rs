@@ -43,12 +43,12 @@ pub trait Proxied {
 }
 
 pub const FRONTEND_PORT: u16 = 80;
-pub const SOZU_LISTENER_IP: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
+pub const SOZU_LISTENER_IP: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 
 const TCP_IDLE_TIMEOUT: u32 = 3600;
 
 pub fn tcp_cluster_id(name: &str, port: u16) -> String {
-    format!("{}-tcp-{}", name, port)
+    format!("{name}-tcp-{port}")
 }
 
 fn is_tcp_cluster_of(cluster_id: &str, name: &str) -> bool {
@@ -197,10 +197,7 @@ pub fn stale_backends(
             backend_id: b.backend_id.clone(),
             address: b.address,
         })
-        .fold(Vec::new(), |acc, stale| match acc.contains(&stale) {
-            true => acc,
-            false => [acc, vec![stale]].concat(),
-        })
+        .fold(Vec::new(), |acc, stale| if acc.contains(&stale) { acc } else { [acc, vec![stale]].concat() })
 }
 
 pub struct SozuClient {
@@ -250,7 +247,7 @@ impl SozuClient {
             (_, message) if message.contains(NO_CHANGE) || message.contains(ALREADY_EXISTS) => {
                 Ok(Settled::AlreadyApplied)
             }
-            (_, message) => Err(AppError::SozuError(format!("{}: {}", what, message))),
+            (_, message) => Err(AppError::SozuError(format!("{what}: {message}"))),
         }
     }
 
@@ -334,38 +331,32 @@ impl SozuClient {
             }
         };
 
-        let added = match existing {
-            Some(_) => Settled::AlreadyApplied,
-            None => {
-                info!("sozu: adding tcp listener on {}:{}", SOZU_LISTENER_IP, port);
-                self.channel.write_message(
-                    &RequestType::AddTcpListener(TcpListenerConfig {
-                        address,
-                        front_timeout: TCP_IDLE_TIMEOUT,
-                        back_timeout: TCP_IDLE_TIMEOUT,
-                        ..Default::default()
-                    })
-                    .into(),
-                )?;
-                self.expect_applied("add tcp listener")?
-            }
+        let added = if existing.is_some() { Settled::AlreadyApplied } else {
+            info!("sozu: adding tcp listener on {}:{}", SOZU_LISTENER_IP, port);
+            self.channel.write_message(
+                &RequestType::AddTcpListener(TcpListenerConfig {
+                    address,
+                    front_timeout: TCP_IDLE_TIMEOUT,
+                    back_timeout: TCP_IDLE_TIMEOUT,
+                    ..Default::default()
+                })
+                .into(),
+            )?;
+            self.expect_applied("add tcp listener")?
         };
 
-        match existing {
-            Some(true) => Ok(added),
-            _ => {
-                info!("sozu: activating tcp listener on {}:{}", SOZU_LISTENER_IP, port);
-                self.channel.write_message(
-                    &RequestType::ActivateListener(ActivateListener {
-                        address,
-                        proxy: ListenerType::Tcp as i32,
-                        from_scm: false,
-                    })
-                    .into(),
-                )?;
-                self.expect_applied("activate tcp listener")
-                    .map(|activated| added.and(activated))
-            }
+        if let Some(true) = existing { Ok(added) } else {
+            info!("sozu: activating tcp listener on {}:{}", SOZU_LISTENER_IP, port);
+            self.channel.write_message(
+                &RequestType::ActivateListener(ActivateListener {
+                    address,
+                    proxy: ListenerType::Tcp as i32,
+                    from_scm: false,
+                })
+                .into(),
+            )?;
+            self.expect_applied("activate tcp listener")
+                .map(|activated| added.and(activated))
         }
     }
 

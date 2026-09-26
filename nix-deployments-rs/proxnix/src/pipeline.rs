@@ -82,7 +82,7 @@ impl WorkloadGroup {
         match self {
             WorkloadGroup::Vms(configs) => deployments::ensure_running(configs, sozu_socket_path),
             WorkloadGroup::Containers(configs) => {
-                deployments::ensure_running(configs, sozu_socket_path)
+                deployments::ensure_running(configs, sozu_socket_path);
             }
         }
     }
@@ -93,7 +93,7 @@ enum RepoSource<'a> {
     Local { path: &'a str },
 }
 
-impl<'a> RepoSource<'a> {
+impl RepoSource<'_> {
     fn resolve(&self, ssh_key_candidates: &[String]) -> Result<(String, String)> {
         match self {
             RepoSource::Local { path } => {
@@ -102,7 +102,7 @@ impl<'a> RepoSource<'a> {
                 Ok((path.to_string(), commit))
             }
             RepoSource::Remote { url, commit } => {
-                let dest_path = format!("{}/{}", BASE_REPO_PATH, commit);
+                let dest_path = format!("{BASE_REPO_PATH}/{commit}");
                 info!("Cloning {} at commit {} to {}", url, commit, dest_path);
                 git_ensure_commit(url, &dest_path, commit, ssh_key_candidates)?;
                 Ok((dest_path, commit.to_string()))
@@ -133,12 +133,12 @@ pub fn hold_service_addresses(
     backend_pool: Option<&BackendPool>,
 ) -> Result<()> {
     let bindings: Vec<ServiceBinding> =
-        groups.iter().flat_map(|g| g.service_addresses()).collect();
+        groups.iter().flat_map(WorkloadGroup::service_addresses).collect();
 
     match check_uniqueness(&bindings) {
         Uniqueness::Clashing { duplicates } => {
             duplicates.iter().for_each(|address| {
-                error!("service address {} is declared by more than one workload", address)
+                error!("service address {} is declared by more than one workload", address);
             });
             return match duplicates.first() {
                 Some(first) => Err(AppError::DuplicateServiceAddress(*first)),
@@ -156,7 +156,7 @@ pub fn hold_service_addresses(
                 error!(
                     "service address {} sits inside the backend pool {}-{}, so DHCP can hand the same address to a guest",
                     b.address, pool.start, pool.end
-                )
+                );
             });
     }
 
@@ -192,7 +192,7 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
 
     let image_type_attrs: HashMap<ImageType, String> = groups
         .iter()
-        .flat_map(|g| g.image_type_attrs())
+        .flat_map(WorkloadGroup::image_type_attrs)
         .collect();
 
     hold_service_addresses(&groups, app_config.backend_pool.as_ref())?;
@@ -229,10 +229,7 @@ fn run_from(source: RepoSource<'_>, app_config: &AppConfig) -> Result<()> {
         })
         .collect();
 
-    outcomes.iter().for_each(|o: &Outcome| match &o.error {
-        Some(e) => warn!("{}: {:?} failed: {}", o.name, o.kind, e),
-        None => info!("{}: {:?}", o.name, o.kind),
-    });
+    for o in outcomes.iter() { if let Some(e) = &o.error { warn!("{}: {:?} failed: {}", o.name, o.kind, e) } else { info!("{}: {:?}", o.name, o.kind) }; }
 
     let live: HashSet<NixHash> = image_hashes.values().cloned().collect();
     match reap_template_cache(app_config.template_cache_path.as_str(), &live) {

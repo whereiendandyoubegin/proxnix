@@ -37,8 +37,7 @@ pub(crate) fn service_ip_from_tags(tags: Option<&str>) -> Option<std::net::Ipv4A
 }
 
 pub(crate) fn is_proxnix_managed(tags: Option<&str>) -> bool {
-    tags.map(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-        .unwrap_or(false)
+    tags.is_some_and(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
 }
 
 pub(crate) fn vm_tags(vm_id: u32) -> Result<Option<String>> {
@@ -164,8 +163,7 @@ pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
             let col = |n: usize| -> crate::types::Result<&str> {
                 parts.get(n).copied().ok_or_else(|| {
                     AppError::ParsingModuleError(format!(
-                        "qm list line has fewer columns than expected: '{}'",
-                        line
+                        "qm list line has fewer columns than expected: '{line}'"
                     ))
                 })
             };
@@ -206,7 +204,7 @@ pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
                     bootdisk_gb: vm.bootdisk_gb,
                     status: vm.status,
                     pid: vm.pid,
-                    cores: parsed.cores as u16,
+                    cores: u16::from(parsed.cores),
                     sockets: parsed.sockets,
                     active_slot,
                     service_ip,
@@ -279,8 +277,7 @@ pub fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() < 3 {
                 return Err(AppError::ParsingModuleError(format!(
-                    "pct list line has fewer columns than expected: '{}'",
-                    line
+                    "pct list line has fewer columns than expected: '{line}'"
                 )));
             }
             Ok(PctListEntry {
@@ -320,7 +317,7 @@ fn parse_pct_config(output: String) -> Result<PctConfigData> {
         memory_mb: get("memory")?.parse()?,
         cores: get("cores")?.parse()?,
         rootfs_gb: rootfs_size_gb(get("rootfs")?)?,
-        tags: fields.get("tags").map(|t| t.to_string()),
+        tags: fields.get("tags").map(std::string::ToString::to_string),
         unprivileged: match fields.get("unprivileged").copied() {
             Some("1") => true,
             None | Some("0") => false,

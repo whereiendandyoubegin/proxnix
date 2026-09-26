@@ -12,10 +12,10 @@ const DEFAULT_KEY_CANDIDATES: &[&str] = &[
 fn find_ssh_key(candidates: &[String]) -> Option<String> {
     candidates
         .iter()
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .chain(DEFAULT_KEY_CANDIDATES.iter().copied())
         .find(|p| Path::new(p).exists())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 pub fn git_clone(repo_url: &str, dest_path: &str, ssh_key_candidates: &[String]) -> Result<Repository> {
@@ -67,12 +67,12 @@ pub fn git_ensure_commit(repo_url: &str, dest_path: &str, commit_hash: &str, ssh
 
 pub fn git_head_commit(repo_path: &str) -> Result<String> {
     let repo = Repository::open(repo_path)
-        .map_err(|e| AppError::GitError(format!("could not open {}: {}", repo_path, e)))?;
+        .map_err(|e| AppError::GitError(format!("could not open {repo_path}: {e}")))?;
     let head = repo
         .head()
-        .map_err(|e| AppError::GitError(format!("could not read HEAD of {}: {}", repo_path, e)))?;
+        .map_err(|e| AppError::GitError(format!("could not read HEAD of {repo_path}: {e}")))?;
     let commit = head
         .peel_to_commit()
-        .map_err(|e| AppError::GitError(format!("HEAD of {} is not a commit: {}", repo_path, e)))?;
+        .map_err(|e| AppError::GitError(format!("HEAD of {repo_path} is not a commit: {e}")))?;
     Ok(commit.id().to_string())
 }

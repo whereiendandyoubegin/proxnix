@@ -159,16 +159,13 @@ pub struct ContainerConfig {
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MountMode {
+    #[default]
     ReadWrite,
     ReadOnly,
 }
 
-impl Default for MountMode {
-    fn default() -> Self {
-        MountMode::ReadWrite
-    }
-}
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct BindMount {

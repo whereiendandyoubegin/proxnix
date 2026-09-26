@@ -57,13 +57,12 @@ fn cached_template(path: PathBuf, file_name: &str, bytes: u64) -> Option<CachedT
 pub fn reap_template_cache(template_cache_path: &str, keep: &HashSet<NixHash>) -> Result<Reaped> {
     let entries = std::fs::read_dir(template_cache_path).map_err(|e| {
         AppError::CmdError(format!(
-            "could not read template cache {}: {}",
-            template_cache_path, e
+            "could not read template cache {template_cache_path}: {e}"
         ))
     })?;
 
     Ok(entries
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter_map(|entry| {
             let bytes = entry.metadata().ok()?.len();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -90,36 +89,33 @@ pub fn reap_template_cache(template_cache_path: &str, keep: &HashSet<NixHash>) -
 
 fn prepare_bind_mount(mount: &crate::types::BindMount, privileged: bool) -> Result<()> {
     let path = Path::new(&mount.host_path);
-    match path.exists() {
-        true => Ok(()),
-        false => {
-            info!("creating bind mount host directory {}", mount.host_path);
-            std::fs::create_dir_all(path).map_err(|e| {
-                AppError::CmdError(format!(
-                    "could not create bind mount directory {}: {}",
-                    mount.host_path, e
-                ))
-            })?;
-            match (privileged, mount.mode) {
-                (false, MountMode::ReadWrite) => {
-                    info!(
-                        "chowning {} to {} for unprivileged container access",
-                        mount.host_path, UNPRIVILEGED_ROOT
-                    );
-                    std::os::unix::fs::chown(
-                        path,
-                        Some(UNPRIVILEGED_ROOT),
-                        Some(UNPRIVILEGED_ROOT),
-                    )
-                    .map_err(|e| {
-                        AppError::CmdError(format!(
-                            "could not chown bind mount directory {}: {}",
-                            mount.host_path, e
-                        ))
-                    })
-                }
-                _ => Ok(()),
+    if path.exists() { Ok(()) } else {
+        info!("creating bind mount host directory {}", mount.host_path);
+        std::fs::create_dir_all(path).map_err(|e| {
+            AppError::CmdError(format!(
+                "could not create bind mount directory {}: {}",
+                mount.host_path, e
+            ))
+        })?;
+        match (privileged, mount.mode) {
+            (false, MountMode::ReadWrite) => {
+                info!(
+                    "chowning {} to {} for unprivileged container access",
+                    mount.host_path, UNPRIVILEGED_ROOT
+                );
+                std::os::unix::fs::chown(
+                    path,
+                    Some(UNPRIVILEGED_ROOT),
+                    Some(UNPRIVILEGED_ROOT),
+                )
+                .map_err(|e| {
+                    AppError::CmdError(format!(
+                        "could not chown bind mount directory {}: {}",
+                        mount.host_path, e
+                    ))
+                })
             }
+            _ => Ok(()),
         }
     }
 }
@@ -155,12 +151,12 @@ pub fn copy_to_template_storage(
         .to_string_lossy()
         .to_string();
 
-    let unique = format!("{}-{}", nix_hash, filename);
-    let dest = format!("{}{}", template_cache_path, unique);
+    let unique = format!("{nix_hash}-{filename}");
+    let dest = format!("{template_cache_path}{unique}");
     std::fs::copy(src, &dest)
         .map_err(|e| AppError::CmdError(format!("failed to copy {} to {}: {}", src.display(), dest, e)))?;
 
-    Ok(format!("local:vztmpl/{}", unique))
+    Ok(format!("local:vztmpl/{unique}"))
 }
 
 struct PctArgs(Vec<String>);
@@ -187,7 +183,7 @@ impl PctArgs {
                 MountMode::ReadWrite => "",
             };
             [
-                format!("--mp{}", i),
+                format!("--mp{i}"),
                 format!("{},mp={}{}", mount.host_path, mount.container_path, suffix),
             ]
         });
@@ -233,15 +229,12 @@ fn write_conf(path: &ConfPath, conf: &LxcConf<'_>) -> Result<()> {
 
 fn pct(cmd: &mut Command, what: &str) -> Result<String> {
     let output = cmd.output()?;
-    match output.status.success() {
-        true => Ok(String::from_utf8(output.stdout)?),
-        false => Err(AppError::CmdError(format!(
-            "{} failed (exit: {:?}): {}",
-            what,
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ))),
-    }
+    if output.status.success() { Ok(String::from_utf8(output.stdout)?) } else { Err(AppError::CmdError(format!(
+        "{} failed (exit: {:?}): {}",
+        what,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    ))) }
 }
 
 pub fn pct_create(
@@ -414,33 +407,27 @@ pub fn pct_exec(ct_id: u32, argv: &[&str], timeout: Duration) -> Result<ExecOutc
             Some(_) => {
                 let out = child.wait_with_output()?;
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                return match out.status.success() {
-                    true => Ok(ExecOutcome::Succeeded { stdout }),
-                    false => Ok(ExecOutcome::Failed {
-                        code: out.status.code(),
-                        output: format!(
-                            "{}{}",
-                            stdout,
-                            String::from_utf8_lossy(&out.stderr)
-                        )
-                        .trim()
-                        .to_string(),
-                    }),
-                };
+                return if out.status.success() { Ok(ExecOutcome::Succeeded { stdout }) } else { Ok(ExecOutcome::Failed {
+                    code: out.status.code(),
+                    output: format!(
+                        "{}{}",
+                        stdout,
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                    .trim()
+                    .to_string(),
+                }) };
             }
-            None => match started.elapsed() >= timeout {
-                true => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(AppError::CmdError(format!(
-                        "pct exec {} {:?} did not return within {}s",
-                        ct_id,
-                        argv,
-                        timeout.as_secs()
-                    )));
-                }
-                false => std::thread::sleep(PCT_EXEC_POLL),
-            },
+            None => if started.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AppError::CmdError(format!(
+                    "pct exec {} {:?} did not return within {}s",
+                    ct_id,
+                    argv,
+                    timeout.as_secs()
+                )));
+            } else { std::thread::sleep(PCT_EXEC_POLL) },
         }
     }
 }

@@ -33,7 +33,7 @@ const PROVISION_STAGGER: Duration = Duration::from_millis(150);
 static PROVISION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn guest_check_script() -> String {
-    format!("if [ -x {check} ]; then exec {check}; fi", check = GUEST_CHECK)
+    format!("if [ -x {GUEST_CHECK} ]; then exec {GUEST_CHECK}; fi")
 }
 
 enum Phase {
@@ -109,15 +109,12 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             .map(|h| BackendId::new(config.name(), h));
         let old_ip = match deployed.service_ip() {
             Some(ip) => Some(ip),
-            None => match T::get_ip(deployed_id).ok().and_then(|raw| raw.trim().parse().ok()) {
-                Some(ip) => Some(ip),
-                None => {
-                    warn!(
-                        "{} has no recorded service ip and its address could not be read; its backend cannot be deregistered by address",
-                        config.name()
-                    );
-                    None
-                }
+            None => if let Some(ip) = T::get_ip(deployed_id).ok().and_then(|raw| raw.trim().parse().ok()) { Some(ip) } else {
+                warn!(
+                    "{} has no recorded service ip and its address could not be read; its backend cannot be deregistered by address",
+                    config.name()
+                );
+                None
             },
         };
         let old_slot_id = match deployed_slot {
@@ -151,7 +148,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             target.inner()
         );
         {
-            let _storage = PROVISION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _storage = PROVISION_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             self.config.provision_inactive(
                 &self.artifact,
                 &self.tags,
@@ -231,7 +228,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
                 info!(
                     "[{}] cutting traffic over: {} -> {} (service address {})",
                     config.name(),
-                    old_ip.map(|i| i.to_string()).unwrap_or_else(|| "nothing".to_string()),
+                    old_ip.map_or_else(|| "nothing".to_string(), |i| i.to_string()),
                     new_ip,
                     service
                 );
@@ -330,9 +327,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             new_hash,
             self.new_slot,
             target.inner(),
-            self.old_slot_id
-                .map(|s| s.inner().to_string())
-                .unwrap_or_else(|| "none".to_string())
+            self.old_slot_id.map_or_else(|| "none".to_string(), |s| s.inner().to_string())
         );
 
         let switched = self
@@ -365,7 +360,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
 
 fn nix_hash_of(artifact: &StorePath) -> Result<NixHash> {
     artifact.nix_hash().ok_or_else(|| {
-        AppError::CmdError(format!("could not extract nix hash from {}", artifact))
+        AppError::CmdError(format!("could not extract nix hash from {artifact}"))
     })
 }
 
@@ -381,7 +376,7 @@ fn await_ip<T: Deployments>(config: &T, id: u32) -> Result<Ipv4Addr> {
     (0_u32..)
         .take_while(|_| started.elapsed() < timeout)
         .find_map(|attempt| {
-            match T::get_ip(id)
+            if let Some(ip) = T::get_ip(id)
                 .ok()
                 .and_then(|raw| raw.trim().parse::<Ipv4Addr>().ok())
                 .filter(|ip| {
@@ -393,25 +388,21 @@ fn await_ip<T: Deployments>(config: &T, id: u32) -> Result<Ipv4Addr> {
                         );
                     }
                     usable
-                })
-            {
-                Some(ip) => Some(ip),
-                None => {
-                    if attempt > 0 && attempt % 5 == 0 {
-                        info!(
-                            "[{}] still no address on {} after {}s (attempt {}, timeout {}s)",
-                            config.name(),
-                            id,
-                            started.elapsed().as_secs(),
-                            attempt,
-                            timeout.as_secs()
-                        );
-                    }
-                    std::thread::sleep(
-                        Duration::from_secs(2).min(timeout.saturating_sub(started.elapsed())),
+                }) { Some(ip) } else {
+                if attempt > 0 && attempt % 5 == 0 {
+                    info!(
+                        "[{}] still no address on {} after {}s (attempt {}, timeout {}s)",
+                        config.name(),
+                        id,
+                        started.elapsed().as_secs(),
+                        attempt,
+                        timeout.as_secs()
                     );
-                    None
                 }
+                std::thread::sleep(
+                    Duration::from_secs(2).min(timeout.saturating_sub(started.elapsed())),
+                );
+                None
             }
         })
         .ok_or(AppError::IpTimeoutError(id))
@@ -603,10 +594,7 @@ pub fn ensure_running<T: Deployments>(configs: &[T], sozu_socket_path: SozuSocke
 }
 
 fn target_state<T: Deployments>(id: u32) -> Result<TargetState> {
-    match T::exists(id)? {
-        false => Ok(TargetState::Vacant),
-        true => T::tags(id).map(|tags| classify_target(true, tags.as_deref())),
-    }
+    if T::exists(id)? { T::tags(id).map(|tags| classify_target(true, tags.as_deref())) } else { Ok(TargetState::Vacant) }
 }
 
 fn classify_target(exists: bool, tags: Option<&str>) -> TargetState {
@@ -635,8 +623,7 @@ fn prepare_target<T: Deployments>(name: &str, target: SlotId) -> Result<()> {
             destroy_managed::<T>(id)
         }
         TargetState::Unmanaged => Err(AppError::CmdError(format!(
-            "refusing to replace instance {} because it is not tagged 'proxnix'",
-            id
+            "refusing to replace instance {id} because it is not tagged 'proxnix'"
         ))),
     }
 }
@@ -825,8 +812,7 @@ impl Deployments for VMConfig {
         let desired_nix_hash = image_hashes.get(self.image_type());
         let image_changed = desired_nix_hash
             .zip(deployed.nix_hash.as_ref())
-            .map(|(desired, deployed)| desired != deployed)
-            .unwrap_or(true);
+            .is_none_or(|(desired, deployed)| desired != deployed);
         [
             (self.memory_mb != deployed.mem_mb, FieldChange::Memory),
             (self.disk_gb > deployed.bootdisk_gb.round() as u32, FieldChange::Disk),
@@ -886,16 +872,13 @@ impl Deployments for ContainerConfig {
             .find_map(|attempt| match pct_exec(id, &argv, GUEST_CHECK_RUN_TIMEOUT) {
                 Ok(ExecOutcome::Succeeded { .. }) => Some(Ok(())),
                 Ok(ExecOutcome::Failed { code, output }) => {
-                    match attempt % 5 {
-                        0 => info!(
-                            "[{}] guest health check not passing yet after {}s (exit {:?}): {}",
-                            name,
-                            started.elapsed().as_secs(),
-                            code,
-                            output
-                        ),
-                        _ => {}
-                    }
+                    if attempt % 5 == 0 { info!(
+                        "[{}] guest health check not passing yet after {}s (exit {:?}): {}",
+                        name,
+                        started.elapsed().as_secs(),
+                        code,
+                        output
+                    ); }
                     std::thread::sleep(
                         GUEST_CHECK_POLL.min(timeout.saturating_sub(started.elapsed())),
                     );
@@ -925,8 +908,7 @@ impl Deployments for ContainerConfig {
         let desired_nix_hash = image_hashes.get(self.image_type());
         let image_changed = desired_nix_hash
             .zip(deployed.nix_hash.as_ref())
-            .map(|(desired, deployed)| desired != deployed)
-            .unwrap_or(true);
+            .is_none_or(|(desired, deployed)| desired != deployed);
         [
             (self.memory_mb != deployed.mem_mb, ContainerFieldChange::Memory),
             (self.disk_gb > deployed.bootdisk_gb.round() as u32, ContainerFieldChange::Disk),
@@ -953,15 +935,14 @@ impl Deployments for ContainerConfig {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(AppError::CmdError(format!(
-                "lxc-info failed for container {}: {}",
-                id, stderr
+                "lxc-info failed for container {id}: {stderr}"
             )));
         }
         String::from_utf8(output.stdout)?
             .lines()
             .find_map(|line| line.trim().parse::<Ipv4Addr>().ok())
             .map(|ip| ip.to_string())
-            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {}", id)))
+            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {id}")))
     }
     fn exists(id: u32) -> Result<bool> {
         container_exists(id)
@@ -1131,7 +1112,7 @@ fn plan<'a, T: Deployments>(
     deployed: &'a HashMap<String, T::Deployed>,
     image_hashes: &HashMap<crate::context::ImageType, NixHash>,
 ) -> Vec<Action<'a, T>> {
-    let desired: HashSet<&str> = configs.iter().map(|c| c.name()).collect();
+    let desired: HashSet<&str> = configs.iter().map(proxnix_core::Workload::name).collect();
 
     configs
         .iter()

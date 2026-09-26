@@ -10,11 +10,11 @@ use std::process::Command;
 use tracing::info;
 
 fn flake_installable(config_name: &str, build_attr: &str) -> String {
-    format!(".#nixosConfigurations.{}.{}", config_name, build_attr)
+    format!(".#nixosConfigurations.{config_name}.{build_attr}")
 }
 
 fn qcow2_path(artifact_path: &str) -> String {
-    format!("{}/nixos.qcow2", artifact_path)
+    format!("{artifact_path}/nixos.qcow2")
 }
 
 // --- Side effects ---
@@ -23,7 +23,7 @@ fn find_flake_dir(repo_path: &str) -> Result<PathBuf> {
     let flake_path = find_in_repo(repo_path, "flake.nix")?;
     Path::new(&flake_path)
         .parent()
-        .map(|p| p.to_path_buf())
+        .map(std::path::Path::to_path_buf)
         .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))
 }
 
@@ -39,7 +39,7 @@ fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<Stri
     }
     let build_output = cmd
         .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {e}")))?;
 
     if !build_output.status.success() {
         let stderr = String::from_utf8_lossy(&build_output.stderr);
@@ -58,7 +58,7 @@ fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<Stri
     }
     let path_output = path_cmd
         .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {e}")))?;
     if !path_output.status.success() {
         let stderr = String::from_utf8_lossy(&path_output.stderr);
         return Err(AppError::CmdError(format!(
@@ -70,7 +70,7 @@ fn run_nix_build(nix_dir: &Path, installable: &str, impure: bool) -> Result<Stri
     }
     let stdout = String::from_utf8(path_output.stdout)?;
     let store_path = stdout.lines().find(|l| !l.trim().is_empty())
-        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{}'", installable)))?
+        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{installable}'")))?
         .trim()
         .to_string();
     Ok(store_path)
@@ -93,7 +93,7 @@ pub trait Materialise: Workload {
 }
 
 impl Materialise for VMConfig {
-    fn nix_build_attr(&self) -> &str {
+    fn nix_build_attr(&self) -> &'static str {
         "config.system.build.qcow2"
     }
     fn impure(&self) -> bool {
@@ -114,7 +114,7 @@ impl Materialise for VMConfig {
 }
 
 impl Materialise for ContainerConfig {
-    fn nix_build_attr(&self) -> &str {
+    fn nix_build_attr(&self) -> &'static str {
         "config.system.build.tarball"
     }
     fn impure(&self) -> bool {
@@ -125,20 +125,17 @@ impl Materialise for ContainerConfig {
     }
     fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, image_store: ImageStore<'_>, target: SlotId) -> Result<()> {
         let tarball = Tarball::find(artifact.as_str())?;
-        match image_store.zfs.filter(|zfs| zfs.storage.is(&self.storage_location)) {
-            Some(zfs) => {
-                let key = ImageKey::new(tags.nix_hash.clone(), Ownership::of(self.privileged));
-                let image = BaseImage::ensure(zfs, &key, &tarball)?;
-                pct_create_from_clone(self, zfs, &image, tags, target)
-            }
-            None => {
-                let ostemplate = copy_to_template_storage(
-                    &tarball,
-                    image_store.template_cache_path.as_str(),
-                    &tags.nix_hash,
-                )?;
-                pct_create(self, &ostemplate, tags, target).map(|_| ())
-            }
+        if let Some(zfs) = image_store.zfs.filter(|zfs| zfs.storage.is(&self.storage_location)) {
+            let key = ImageKey::new(tags.nix_hash.clone(), Ownership::of(self.privileged));
+            let image = BaseImage::ensure(zfs, &key, &tarball)?;
+            pct_create_from_clone(self, zfs, &image, tags, target)
+        } else {
+            let ostemplate = copy_to_template_storage(
+                &tarball,
+                image_store.template_cache_path.as_str(),
+                &tags.nix_hash,
+            )?;
+            pct_create(self, &ostemplate, tags, target).map(|_| ())
         }
     }
 }

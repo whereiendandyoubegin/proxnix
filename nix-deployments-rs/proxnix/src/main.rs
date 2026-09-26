@@ -49,21 +49,17 @@ async fn webhook_handler(
     let git_repo_url = parsed.repository.clone();
     let current_git_commit = parsed.hash.clone();
 
-    let permit = match tokio::time::timeout(
+    let permit = if let Ok(Ok(permit)) = tokio::time::timeout(
         WEBHOOK_LOCK_WAIT,
         state.semaphore.clone().acquire_owned(),
     )
-    .await
-    {
-        Ok(Ok(permit)) => permit,
-        _ => {
-            warn!(
-                "Pipeline still busy after {}s, rejecting webhook for commit {}",
-                WEBHOOK_LOCK_WAIT.as_secs(),
-                current_git_commit
-            );
-            return StatusCode::TOO_MANY_REQUESTS;
-        }
+    .await { permit } else {
+        warn!(
+            "Pipeline still busy after {}s, rejecting webhook for commit {}",
+            WEBHOOK_LOCK_WAIT.as_secs(),
+            current_git_commit
+        );
+        return StatusCode::TOO_MANY_REQUESTS;
     };
 
     let appconfig = state.appconfig.clone();
@@ -74,12 +70,12 @@ async fn webhook_handler(
             git_repo_url, current_git_commit
         );
         match pipeline::run_pipeline(&git_repo_url, &current_git_commit, &appconfig) {
-            Ok(_) => {
+            Ok(()) => {
                 *last_repo.blocking_write() = Some((git_repo_url.clone(), current_git_commit.clone()));
                 info!(
                     "Pipeline finished for repo: {}, commit: {}",
                     git_repo_url, current_git_commit
-                )
+                );
             }
             Err(e) => error!(
                 "Pipeline failed for repo: {}, commit: {}, error: {:?}",
@@ -99,10 +95,7 @@ enum Mode {
 
 impl Mode {
     fn from_args() -> Self {
-        match std::env::args().any(|a| a == "--deploy-once") {
-            true => Mode::DeployOnce,
-            false => Mode::Serve,
-        }
+        if std::env::args().any(|a| a == "--deploy-once") { Mode::DeployOnce } else { Mode::Serve }
     }
 }
 
@@ -146,12 +139,9 @@ async fn main() {
         let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
         loop {
             interval.tick().await;
-            let permit = match periodic_state.semaphore.clone().try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => {
-                    debug!("Pipeline is running, skipping periodic reconcile");
-                    continue;
-                }
+            let permit = if let Ok(p) = periodic_state.semaphore.clone().try_acquire_owned() { p } else {
+                debug!("Pipeline is running, skipping periodic reconcile");
+                continue;
             };
             let pushed = periodic_state.last_repo.read().await.clone();
             let dest_path = match pushed {
@@ -176,5 +166,5 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(server_address).await.unwrap();
     info!("Listening on {}", server_address);
-    axum::serve(listener, app).await.unwrap_or_default()
+    axum::serve(listener, app).await.unwrap_or_default();
 }
