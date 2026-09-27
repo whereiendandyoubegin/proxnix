@@ -272,7 +272,7 @@ where
                 self.retag(
                     guest.guest().kind(),
                     guest.id(),
-                    &ManagedTags { generation: Some(promotion.generation()), ..guest.tags().clone() },
+                    &ManagedTags { generation: Some(promotion.generation()), pending: false, ..guest.tags().clone() },
                 )
             }
             GuestEffect::Update { guest, changes } => match guest.guest().kind() {
@@ -713,6 +713,7 @@ mod tests {
         let variants = [
             serving.tags().clone(),
             ManagedTags { service_ip: None, generation: None, role: None, ..serving.tags().clone() },
+            ManagedTags { service_ip: None, generation: None, pending: true, ..serving.tags().clone() },
             ManagedTags { role: Some("reader".parse().unwrap()), ..serving.tags().clone() },
         ];
         for tags in variants {

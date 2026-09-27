@@ -336,6 +336,7 @@ mod tests {
             }],
             network_bridge: "vmbr0".to_string(),
             impure: false,
+            cutover: None,
         }
     }
 

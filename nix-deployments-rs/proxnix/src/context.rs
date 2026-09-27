@@ -135,6 +135,7 @@ pub struct Tags {
     pub commit: String,
     pub slot: Slot,
     pub service_ip: Option<Ipv4Addr>,
+    pub pending: bool,
     pub role: Option<String>,
 }
 
@@ -145,6 +146,7 @@ impl Tags {
             commit: commit.to_string(),
             slot,
             service_ip: None,
+            pending: false,
             role: None,
         }
     }
@@ -152,6 +154,7 @@ impl Tags {
     pub fn fresh(fresh: &proxnix_core::Fresh) -> Result<Self> {
         Ok(Self {
             role: fresh.role().map(|role| role.as_ref().to_string()),
+            pending: true,
             ..Self::new(NixHash::try_from(fresh.nix().as_ref())?, fresh.commit().as_ref(), fresh.slot())
         })
     }
@@ -176,6 +179,7 @@ impl Tags {
         [
             Some(base),
             self.service_ip.map(|ip| format!("ip-{ip}")),
+            self.pending.then(|| String::from("pending")),
             self.role.as_ref().map(|role| format!("role-{role}")),
         ]
         .into_iter()
@@ -196,6 +200,7 @@ pub fn render_managed(tags: &proxnix_core::ManagedTags) -> String {
         })),
         tags.service_ip.map(|ip| format!("ip-{ip}")),
         tags.generation.map(|generation| format!("gen-{}", generation.get())),
+        tags.pending.then(|| String::from("pending")),
         tags.role.as_ref().map(|role| format!("role-{}", role.as_ref())),
     ]
     .into_iter()

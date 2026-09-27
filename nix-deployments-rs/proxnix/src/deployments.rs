@@ -978,6 +978,7 @@ mod tests {
             scsi_hw: qemu::Scsihw::VirtioScsiPci,
             disk_slot: "scsi0".parse().unwrap(),
             impure: false,
+            cutover: None,
         }
     }
 
@@ -1002,6 +1003,7 @@ mod tests {
             bind_mounts: vec![],
             network_bridge: "vmbr0".to_string(),
             impure: false,
+            cutover: None,
         }
     }
 

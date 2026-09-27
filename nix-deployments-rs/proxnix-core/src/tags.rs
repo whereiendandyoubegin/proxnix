@@ -17,6 +17,7 @@ pub enum TagFault {
     BadServiceIp,
     BadGeneration,
     BadRole,
+    PendingAndCommitted,
 }
 
 #[pure_only]
@@ -171,6 +172,7 @@ pub struct ManagedTags {
     pub slot: Slot,
     pub service_ip: Option<Ipv4Addr>,
     pub generation: Option<Generation>,
+    pub pending: bool,
     pub role: Option<RoleName>,
 }
 
@@ -179,6 +181,7 @@ impl TryFrom<&RawTags> for ManagedTags {
     type Error = TagFault;
 
     fn try_from(raw: &RawTags) -> Result<ManagedTags, TagFault> {
+        let pending = raw.0.split(';').map(str::trim).any(|tag| tag == "pending");
         let tag = |prefix| raw.0.split(';').map(str::trim).find_map(|tag| tag.strip_prefix(prefix));
         Ok(ManagedTags {
             nix: tag("nix-")
@@ -195,9 +198,13 @@ impl TryFrom<&RawTags> for ManagedTags {
             service_ip: tag("ip-")
                 .map(|ip| ip.parse().map_err(|_| TagFault::BadServiceIp))
                 .transpose()?,
-            generation: tag("gen-")
-                .map(|generation| generation.parse().map_err(|BadGeneration| TagFault::BadGeneration))
-                .transpose()?,
+            generation: match (tag("gen-"), pending) {
+                (Some(_), true) => return Err(TagFault::PendingAndCommitted),
+                (found, _) => found
+                    .map(|generation| generation.parse().map_err(|BadGeneration| TagFault::BadGeneration))
+                    .transpose()?,
+            },
+            pending,
             role: tag("role-")
                 .map(|role| role.parse().map_err(|BadRole| TagFault::BadRole))
                 .transpose()?,
@@ -268,6 +275,7 @@ mod tests {
                 slot: Slot::Blue,
                 service_ip: Some(Ipv4Addr::new(192, 168, 1, 214)),
                 generation: None,
+                pending: false,
                 role: None,
             })
         );
@@ -334,6 +342,12 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_guest_is_uncommitted_and_cannot_also_claim_a_generation() {
+        assert!(matches!(ownership(&format!("{};pending", managed("blue"))), Ownership::Managed(ManagedTags { pending: true, generation: None, .. })));
+        assert_eq!(ownership(&format!("{};pending;gen-2", managed("blue"))), Ownership::Malformed(TagFault::PendingAndCommitted));
+    }
+
+    #[test]
     fn generations_only_move_forward() {
         assert!(Generation::FIRST.after() > Generation::FIRST);
         assert_eq!(Generation(u64::MAX).after(), Generation(u64::MAX));
@@ -349,6 +363,7 @@ mod tests {
                 slot: Slot::Green,
                 service_ip: None,
                 generation: None,
+                pending: false,
                 role: None,
             })
         );

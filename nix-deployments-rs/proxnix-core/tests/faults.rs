@@ -98,6 +98,7 @@ fn parsed(tags: &str) -> Option<SimTags> {
         slot: if parts["slot"] == "blue" { Slot::Blue } else { Slot::Green },
         ip: parts.get("ip").map(|ip| ip.parse().unwrap()),
         generation: parts.get("gen").map(|generation| generation.parse().unwrap()),
+        pending: false,
         role: None,
     })
 }
@@ -237,6 +238,49 @@ fn the_plan_for_the_incident_push_adopts_then_rebuilds_each_workload_into_its_fr
                     .collect();
                 assert!(touched.iter().all(|id| world.guests.get(id).is_none_or(|guest| guest.tags.is_some())), "{} touches an unmanaged guest", name.0);
             }
+        }
+    }
+}
+
+#[test]
+fn a_first_deploy_that_never_passed_its_checks_is_never_served_even_after_a_crash() {
+    for (kind, cutover) in cases() {
+        let workload = spec("forgejo", 844, 944, kind, cutover, true);
+        let desired = Desired::validate(vec![workload.clone()]);
+        let images = images(vec![built(&workload, NIX_A)]);
+        let broken = World { faults: Faults { unhealthy: [Vmid::new(844)].into(), ..Faults::default() }, ..World::default() };
+        let clean = run::<Builtin>(broken.clone(), &desired, &images, &push(COMMIT_B), None);
+        for crash in 0..=clean.steps {
+            let pushed = run::<Builtin>(broken.clone(), &desired, &images, &push(COMMIT_B), Some(crash));
+            let after = run::<Builtin>(pushed.world, &desired, &Images::default(), &Tick::Periodic, None);
+            assert!(
+                after.world.serving("forgejo").is_none(),
+                "{cutover:?}: a guest that never passed its checks became serving after a crash at step {crash}: {:?}",
+                kinds(&after.effects)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_first_deploy_survives_any_single_failure_lie_or_crash_with_exactly_one_serving_guest() {
+    for (kind, cutover) in cases() {
+        let workload = spec("forgejo", 844, 944, kind, cutover, true);
+        let desired = Desired::validate(vec![workload.clone()]);
+        let images = images(vec![built(&workload, NIX_A)]);
+        let clean = run::<Builtin>(World::default(), &desired, &images, &push(COMMIT_B), None);
+        let schedules = (0..=clean.effects.len())
+            .map(|index| (Faults { fail: [index].into(), ..Faults::default() }, None))
+            .chain((0..clean.effects.len()).map(|index| (Faults { lying: [index].into(), ..Faults::default() }, None)))
+            .chain((0..=clean.steps).map(|crash| (Faults::default(), Some(crash))));
+        for (faults, crash) in schedules {
+            let label = format!("{cutover:?} {faults:?} crash {crash:?}");
+            let pushed = run::<Builtin>(World { faults, ..World::default() }, &desired, &images, &push(COMMIT_B), crash);
+            let again = run::<Builtin>(World { faults: Faults::default(), ..pushed.world }, &desired, &images, &push(COMMIT_B), None);
+            let world = settle(again, &desired);
+            settled(&world, &desired);
+            assert_eq!(world.members("forgejo").len(), 1, "{label}");
+            assert!(world.serving("forgejo").is_some(), "{label}");
         }
     }
 }

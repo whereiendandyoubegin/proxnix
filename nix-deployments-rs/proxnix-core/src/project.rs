@@ -107,6 +107,7 @@ fn assume_guest(observed: &Observation, effect: &GuestEffect) -> Observation {
                     slot: fresh.slot(),
                     service_ip: None,
                     generation: None,
+                    pending: true,
                     role: fresh.role().cloned(),
                 }),
             )),
@@ -116,7 +117,7 @@ fn assume_guest(observed: &Observation, effect: &GuestEffect) -> Observation {
         GuestEffect::Record { guest, address } => retag(observed, guest.id(), |tags| ManagedTags { service_ip: Some(*address), ..tags }),
         GuestEffect::Role { guest, role } => retag(observed, guest.id(), |tags| ManagedTags { role: Some(role.clone()), ..tags }),
         GuestEffect::Commit(promotion) => {
-            retag(observed, promotion.guest().id(), |tags| ManagedTags { generation: Some(promotion.generation()), ..tags })
+            retag(observed, promotion.guest().id(), |tags| ManagedTags { generation: Some(promotion.generation()), pending: false, ..tags })
         }
         GuestEffect::Update { guest, changes } => revise(observed, guest.id(), |seen| {
             seen.revised(seen.status(), resized(seen.resources(), changes), seen.ownership().clone())

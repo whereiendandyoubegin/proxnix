@@ -93,8 +93,12 @@ fn slots(blue: Vmid, green: Vmid) -> std::result::Result<SlotPair, ConfigFault> 
     SlotPair::new(blue, green).map_err(|same| ConfigFault::SameIdInBothSlots(same.0))
 }
 
-fn cutover(protected: bool) -> Cutover {
-    if protected { Cutover::Protected } else { Cutover::Overlap }
+fn cutover(protected: bool, choice: Option<crate::types::CutoverChoice>) -> Cutover {
+    match (protected, choice) {
+        (true, _) => Cutover::Protected,
+        (false, None | Some(crate::types::CutoverChoice::Overlap)) => Cutover::Overlap,
+        (false, Some(crate::types::CutoverChoice::StopStart)) => Cutover::StopStart,
+    }
 }
 
 fn purity(impure: bool) -> Purity {
@@ -107,7 +111,7 @@ fn vm_spec(config: &VMConfig) -> std::result::Result<WorkloadSpec, ConfigFault> 
         slots: slots(config.blue_id, config.green_id)?,
         image: ImageType(config.image_type.as_str().to_string()),
         resources: proxnix_core::Resources { memory: MemoryMb(config.memory_mb), disk: DiskGib(config.disk_gb), cores: Cores(config.cores) },
-        cutover: cutover(config.protected),
+        cutover: cutover(config.protected, config.cutover),
         purity: purity(config.impure),
         proxy: proxy(&config.hostname, config.service_address, config.backend_port, &config.tcp_ports, &config.network_bridge),
         timeouts: Timeouts { dhcp: millis(config.dhcp_timeout_seconds), health_check: millis(config.health_check_timeout_seconds) },
@@ -121,7 +125,7 @@ fn container_spec(config: &ContainerConfig) -> std::result::Result<WorkloadSpec,
         slots: slots(config.blue_id, config.green_id)?,
         image: ImageType(config.image_type.as_str().to_string()),
         resources: proxnix_core::Resources { memory: MemoryMb(config.memory_mb), disk: DiskGib(config.disk_gb), cores: Cores(config.cores) },
-        cutover: cutover(config.protected),
+        cutover: cutover(config.protected, config.cutover),
         purity: purity(config.impure),
         proxy: proxy(&config.hostname, config.service_address, config.backend_port, &config.tcp_ports, &config.network_bridge),
         timeouts: Timeouts { dhcp: millis(config.dhcp_timeout_seconds), health_check: millis(config.health_check_timeout_seconds) },
@@ -565,5 +569,26 @@ mod tests {
     fn pacing_comes_from_the_nixology_timings() {
         let settings = parse_appconfig(&crate::state::tests_support::NIXOLOGY_APPCONFIG.replace("\"port_poll\":2000", "\"port_poll\":2500")).unwrap();
         assert_eq!(pacing(&settings), Pacing { address: DurationMs(2000), port: DurationMs(2500), guest: DurationMs(3000) });
+    }
+
+    #[test]
+    fn a_workload_can_ask_for_stop_start_but_protection_still_wins() {
+        let container = |extra: serde_json::Value| -> ContainerConfig {
+            let base = serde_json::json!({
+                "name": "nixflix", "hostname": "media.thesta.rs", "dhcp_timeout_seconds": 240, "health_check_timeout_seconds": 900,
+                "blue_id": 847, "green_id": 947, "image_type": "build-lxc-nixflix", "cores": 4, "memory_mb": 4096,
+                "storage_location": "ZFS", "disk_gb": 16, "protected": false, "impure": false
+            });
+            let merged: serde_json::Map<String, serde_json::Value> =
+                base.as_object().unwrap().clone().into_iter().chain(extra.as_object().unwrap().clone()).collect();
+            serde_json::from_value(serde_json::Value::Object(merged)).unwrap()
+        };
+        assert_eq!(container_spec(&container(serde_json::json!({}))).unwrap().cutover, Cutover::Overlap);
+        assert_eq!(container_spec(&container(serde_json::json!({"cutover": "stop_start"}))).unwrap().cutover, Cutover::StopStart);
+        assert_eq!(
+            container_spec(&container(serde_json::json!({"cutover": "stop_start", "protected": true}))).unwrap().cutover,
+            Cutover::Protected
+        );
+        assert!(serde_json::from_value::<ContainerConfig>(serde_json::json!({"cutover": "sometimes"})).is_err());
     }
 }

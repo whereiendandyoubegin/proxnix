@@ -117,6 +117,15 @@ pub struct VMConfig {
     #[serde(default = "default_disk_slot")]
     pub disk_slot: DiskSlot,
     pub impure: bool,
+    #[serde(default)]
+    pub cutover: Option<CutoverChoice>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutoverChoice {
+    Overlap,
+    StopStart,
 }
 
 impl Workload for VMConfig {
@@ -235,6 +244,8 @@ pub struct ContainerConfig {
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
     pub impure: bool,
+    #[serde(default)]
+    pub cutover: Option<CutoverChoice>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq)]

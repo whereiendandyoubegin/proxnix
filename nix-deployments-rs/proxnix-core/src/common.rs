@@ -115,7 +115,7 @@ pub fn abort(ctx: &Context<'_>, member: &Member, failure: Failure) -> Plan {
     match (
         refused(ctx, member, &[Action::Undo, Action::Reclaim]),
         ctx.provisioned(member),
-        Expendable::outranked(ctx.cohort, member),
+        Expendable::outranked(ctx.cohort, member).or_else(|| Expendable::unproven(ctx.cohort, member)),
     ) {
         (Some(refusal), _, _) => Plan::idle(Stage::Failed(refusal)),
         (None, Some(provisioned), _) => Plan::act(Stage::Aborting(failure), Effect::Guest(GuestEffect::Undo(provisioned))),

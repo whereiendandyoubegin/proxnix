@@ -22,6 +22,7 @@ pub struct SimTags {
     pub slot: Slot,
     pub ip: Option<Ipv4Addr>,
     pub generation: Option<u64>,
+    pub pending: bool,
     pub role: Option<String>,
 }
 
@@ -83,6 +84,7 @@ pub fn render(tags: &SimTags) -> String {
         Some(format!("slot-{slot}")),
         tags.ip.map(|ip| format!("ip-{ip}")),
         tags.generation.map(|generation| format!("gen-{generation}")),
+        tags.pending.then(|| String::from("pending")),
         tags.role.as_ref().map(|role| format!("role-{role}")),
     ]
     .into_iter()
@@ -171,6 +173,7 @@ impl World {
                     slot,
                     ip: Some(lease(id)),
                     generation: None,
+                    pending: false,
                     role: None,
                 }),
                 running: true,
@@ -253,6 +256,7 @@ impl World {
                     slot: fresh.slot(),
                     ip: None,
                     generation: None,
+                    pending: true,
                     role: fresh.role().map(|role| String::from(role.as_ref())),
                 };
                 let guest = SimGuest { name: spec.name.0.clone(), tags: Some(tags), running: false, resources: spec.resources, facts: facts(&spec.kind) };
@@ -265,7 +269,7 @@ impl World {
                 (self.retag(guest.id(), |tags| SimTags { role: Some(String::from(role.as_ref())), ..tags }), Outcome::Done)
             }
             GuestEffect::Commit(promotion) => (
-                self.retag(promotion.guest().id(), |tags| SimTags { generation: Some(promotion.generation().get()), ..tags }),
+                self.retag(promotion.guest().id(), |tags| SimTags { generation: Some(promotion.generation().get()), pending: false, ..tags }),
                 Outcome::Done,
             ),
             GuestEffect::Update { guest, changes } => (

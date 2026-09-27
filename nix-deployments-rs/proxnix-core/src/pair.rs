@@ -35,7 +35,7 @@ pub fn pair_phase(ctx: &Context<'_>) -> PairPhase {
     match ctx.cohort.highest() {
         None => match ctx.cohort.members() {
             [] => PairPhase::Absent,
-            [only] if ctx.in_flight(only) => PairPhase::Deploying { serving: None, fresh: only.clone() },
+            [only] if only.pending() || ctx.in_flight(only) => PairPhase::Deploying { serving: None, fresh: only.clone() },
             [only] => PairPhase::Legacy(only.clone()),
             _ => PairPhase::Ambiguous,
         },

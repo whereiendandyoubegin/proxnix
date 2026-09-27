@@ -46,6 +46,11 @@ impl Member {
     }
 
     #[must_use]
+    pub fn pending(&self) -> bool {
+        self.tags().pending
+    }
+
+    #[must_use]
     pub fn role(&self) -> Option<&RoleName> {
         self.tags().role.as_ref()
     }
@@ -206,6 +211,12 @@ impl Expendable {
             other.generation().is_some() && other.generation() > member.generation()
         });
         (cohort.holds(member) && outranked).then(|| Expendable { doom: Doom::Outranked(member.clone()) })
+    }
+
+    #[must_use]
+    pub fn unproven(cohort: &Cohort, member: &Member) -> Option<Expendable> {
+        (cohort.holds(member) && member.pending() && member.generation().is_none())
+            .then(|| Expendable { doom: Doom::Outranked(member.clone()) })
     }
 
     pub(crate) fn orphaned(managed: Managed) -> Expendable {
