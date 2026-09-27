@@ -1,0 +1,17 @@
+{
+  "tags": "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.214;nix-78s0iadvjz6s48aqvx4rw78lwrzkjzlw;proxnix;slot-blue",
+  "digest": "8d90458b1d8e13e499c1f22f47914011fe466d38",
+  "rootfs": "ZFS:subvol-844-disk-0,size=20G",
+  "ostype": "unmanaged",
+  "mp0": "/var/lib/proxnix/forgejo,mp=/var/lib/forgejo",
+  "features": "nesting=1",
+  "hostname": "forgejo",
+  "protection": 1,
+  "mp1": "/var/lib/proxnix/sops,mp=/var/lib/sops-key,ro=1",
+  "cores": 2,
+  "memory": 2048,
+  "unprivileged": 1,
+  "mp2": "/var/lib/proxnix/logs/forgejo,mp=/var/log/journal",
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:E1:8E:31,type=veth",
+  "arch": "amd64"
+}

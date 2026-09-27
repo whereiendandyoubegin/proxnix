@@ -1,0 +1,12 @@
+{
+  "type": "vzstop",
+  "pstart": 1554650720,
+  "node": "pve01",
+  "starttime": 1790529654,
+  "user": "root@pam",
+  "upid": "UPID:pve01:000EAA5B:5CAA1660:6AB95076:vzstop:946:root@pam:",
+  "status": "stopped",
+  "pid": 961115,
+  "id": "946",
+  "exitstatus": "OK"
+}

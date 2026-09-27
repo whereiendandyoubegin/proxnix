@@ -47,6 +47,9 @@ pub struct Faults {
     pub unhealthy: BTreeSet<Vmid>,
     pub silent: BTreeSet<Vmid>,
     pub die_after: Option<usize>,
+    pub lying: BTreeSet<usize>,
+    pub address_after: BTreeMap<Vmid, usize>,
+    pub failing_checks: BTreeSet<Vmid>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -55,6 +58,17 @@ pub struct World {
     pub routes: BTreeMap<(String, Endpoint), SimRoute>,
     pub faults: Faults,
     pub applied: usize,
+    pub reads: BTreeMap<Vmid, usize>,
+    pub costed: bool,
+}
+
+pub fn cost(effect: &Effect, outcome: &Outcome) -> u64 {
+    match (effect, outcome) {
+        (Effect::Guest(GuestEffect::Create { .. }), _) => 120_000,
+        (Effect::Probe(ProbeEffect::GuestCheck(_)), Outcome::Failed(_)) => 60_000,
+        (Effect::Probe(ProbeEffect::PortOpen { .. }), Outcome::Failed(_)) => 2_000,
+        _ => 1_000,
+    }
 }
 
 pub fn render(tags: &SimTags) -> String {
@@ -276,19 +290,25 @@ impl World {
 
     fn apply_probe(self, probe: &ProbeEffect) -> (World, Outcome) {
         let id = probe.guest().id();
+        let read = self.reads.get(&id).copied().unwrap_or(0) + 1;
+        let reads = match probe {
+            ProbeEffect::ReadAddress(_) => self.reads.clone().into_iter().chain([(id, read)]).collect(),
+            _ => self.reads.clone(),
+        };
+        let answered = self.faults.address_after.get(&id).is_none_or(|after| read >= *after);
         let outcome = match probe {
             ProbeEffect::ReadAddress(_) if self.guests.get(&id).is_some_and(|guest| guest.running) => {
-                if self.faults.silent.contains(&id) {
+                if self.faults.silent.contains(&id) || !answered {
                     Outcome::Address(Ipv4Addr::new(169, 254, 1, 1))
                 } else {
                     Outcome::Address(lease(id))
                 }
             }
             ProbeEffect::PortOpen { address, .. } if self.healthy(id) && *address == lease(id) => Outcome::Done,
-            ProbeEffect::GuestCheck(_) if self.healthy(id) => Outcome::Done,
+            ProbeEffect::GuestCheck(_) if self.healthy(id) && !self.faults.failing_checks.contains(&id) => Outcome::Done,
             _ => Outcome::Failed(EffectError::Unreachable(Detail(String::from("probe failed")))),
         };
-        (self, outcome)
+        (World { reads, ..self }, outcome)
     }
 
     fn apply_route(self, route: &RouteEffect) -> (World, Outcome) {
@@ -324,6 +344,11 @@ impl World {
             Effect::Guest(guest) => counted.apply_guest(guest),
             Effect::Probe(probe) => counted.apply_probe(probe),
             Effect::Route(route) => counted.apply_route(route),
+        };
+        let outcome = if world.faults.lying.contains(&index) {
+            Outcome::Failed(EffectError::TaskFailed(Detail(String::from("applied, then reported as failed"))))
+        } else {
+            outcome
         };
         match world.faults.die_after {
             Some(after) if after == index => (world.stop_everything(), outcome),
@@ -404,15 +429,17 @@ pub fn run<R: Registry>(world: World, desired: &Desired, images: &Images, tick: 
         if stepped.quiescent() {
             return Err(Box::new(Run { world, effects, reports, steps: index }));
         }
-        let (world, events) = stepped.effects.iter().fold((world, Vec::new()), |(world, events), planned| {
+        let (world, events, spent) = stepped.effects.iter().fold((world, Vec::new(), 0), |(world, events, spent), planned| {
             guard(&world, &planned.effect, desired, tick);
             let (world, outcome) = world.apply(&planned.effect);
-            (world, events.into_iter().chain([Event { effect: planned.id, outcome }]).collect::<Vec<_>>())
+            let spent = spent + cost(&planned.effect, &outcome);
+            (world, events.into_iter().chain([Event { effect: planned.id, outcome }]).collect::<Vec<_>>(), spent)
         });
         let effects = effects.into_iter().chain(stepped.effects.iter().map(|planned| planned.effect.clone())).collect();
         let memo = if crash_at == Some(index) { Memo::default() } else { stepped.memo };
         let now = match (stepped.effects.is_empty(), stepped.wake) {
             (true, Some(wake)) => wake.max(Moment(now.0 + 1)),
+            _ if world.costed => Moment(now.0 + spent.max(500)),
             _ => Moment(now.0 + 500),
         };
         Ok((world, memo, events, now, effects, reports))

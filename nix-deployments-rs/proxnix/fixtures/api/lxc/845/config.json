@@ -1,0 +1,16 @@
+{
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:07:24:A5,type=veth",
+  "arch": "amd64",
+  "protection": 0,
+  "cores": 1,
+  "mp1": "/var/lib/proxnix/logs/cloudflared,mp=/var/log/journal",
+  "memory": 512,
+  "unprivileged": 1,
+  "hostname": "cloudflared",
+  "features": "nesting=1",
+  "mp0": "/var/lib/proxnix/sops,mp=/var/lib/sops-key,ro=1",
+  "tags": "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.192;nix-irnl3cwf1n3n1vbvkh2w7yyqi653d1mq;proxnix;slot-blue",
+  "rootfs": "ZFS:subvol-845-disk-0,size=8G",
+  "digest": "aebf24ca8eca9d778947589c959e8cb3b05f4583",
+  "ostype": "unmanaged"
+}

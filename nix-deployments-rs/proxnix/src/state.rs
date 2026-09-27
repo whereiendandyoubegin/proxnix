@@ -448,7 +448,7 @@ fn inspect<K: Observe>(
     }
 }
 
-fn agent_ipv4(result: &serde_json::Value) -> Option<Ipv4Addr> {
+pub(crate) fn agent_ipv4(result: &serde_json::Value) -> Option<Ipv4Addr> {
     result
         .as_array()?
         .iter()
@@ -464,7 +464,7 @@ fn agent_ipv4(result: &serde_json::Value) -> Option<Ipv4Addr> {
         .ok()
 }
 
-fn cidr_ipv4(inet: &str) -> Option<Ipv4Addr> {
+pub(crate) fn cidr_ipv4(inet: &str) -> Option<Ipv4Addr> {
     inet.split('/').next()?.parse().ok()
 }
 
@@ -517,7 +517,13 @@ fn rootfs_size_gb(rootfs: &str) -> Result<f64> {
 }
 
 #[cfg(test)]
+pub(crate) mod tests_support {
+    pub(crate) const NIXOLOGY_APPCONFIG: &str = r#"{"backend_pool":null,"guest_check":{"command":"/run/current-system/sw/bin/proxnix-health-check","shell":"/run/current-system/sw/bin/bash"},"local_repo":null,"proxmox":{"ca_file":"/etc/pve/pve-root-ca.pem","node":"pve01","realm":"pve","token_file":"/run/secrets/proxnix/api_token","token_id":"proxnix","url":"https://localhost:8006","user":"proxnix"},"repo_cache":"/tmp/proxnix/repos","server_address":"0.0.0.0:6780","sozu":{"http_port":80,"listen_ip":"0.0.0.0","socket_path":"/run/sozu/command.sock"},"ssh_key_candidates":["/root/.ssh/id_ed25519","/root/.ssh/id_ecdsa","/root/.ssh/id_rsa"],"template_cache_path":"/var/lib/vz/template/cache/","timings_ms":{"arp_probe":2000,"guest_check_poll":3000,"guest_check_run":60000,"nix_build":3600000,"nix_eval":300000,"periodic_reconcile":120000,"provision_stagger":150,"sozu_tcp_idle":3600000,"address_poll":2000,"port_poll":2000,"task_poll":1000,"task_timeout":600000,"webhook_lock_wait":600000},"unprivileged_idmap":{"count":65536,"host_base":100000},"zfs_images":{"images":"ZFS/proxnix-images","pool":"ZFS","storage":"ZFS"}}"#;
+}
+
+#[cfg(test)]
 mod tests {
+    use super::tests_support::NIXOLOGY_APPCONFIG;
     use super::*;
     use serde_json::json;
 
@@ -908,7 +914,6 @@ mod tests {
         }
     }
 
-    const NIXOLOGY_APPCONFIG: &str = r#"{"backend_pool":null,"guest_check":{"command":"/run/current-system/sw/bin/proxnix-health-check","shell":"/run/current-system/sw/bin/bash"},"local_repo":null,"proxmox":{"ca_file":"/etc/pve/pve-root-ca.pem","node":"pve01","realm":"pve","token_file":"/run/secrets/proxnix/api_token","token_id":"proxnix","url":"https://localhost:8006","user":"proxnix"},"repo_cache":"/tmp/proxnix/repos","server_address":"0.0.0.0:6780","sozu":{"http_port":80,"listen_ip":"0.0.0.0","socket_path":"/run/sozu/command.sock"},"ssh_key_candidates":["/root/.ssh/id_ed25519","/root/.ssh/id_ecdsa","/root/.ssh/id_rsa"],"template_cache_path":"/var/lib/vz/template/cache/","timings_ms":{"arp_probe":2000,"guest_check_poll":3000,"guest_check_run":60000,"nix_build":3600000,"nix_eval":300000,"periodic_reconcile":120000,"provision_stagger":150,"sozu_tcp_idle":3600000,"webhook_lock_wait":600000},"unprivileged_idmap":{"count":65536,"host_base":100000},"zfs_images":{"images":"ZFS/proxnix-images","pool":"ZFS","storage":"ZFS"}}"#;
 
     #[test]
     fn nixology_appconfig_points_the_api_client_at_the_decrypted_token() {

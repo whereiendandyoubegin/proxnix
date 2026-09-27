@@ -113,6 +113,13 @@ impl Provisioned {
         }
     }
 
+    pub(crate) fn attempted(request: &GuestEffect) -> Option<Provisioned> {
+        match request {
+            GuestEffect::Create { target, spec, .. } => Some(Provisioned { id: target.id(), kind: spec.kind() }),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn id(self) -> Vmid {
         self.id

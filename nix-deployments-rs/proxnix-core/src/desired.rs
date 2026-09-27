@@ -17,6 +17,7 @@ use std::net::Ipv4Addr;
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigFault {
+    SameIdInBothSlots(Vmid),
     DuplicateName,
     SharedVmid { id: Vmid, with: GuestName },
     SharedServiceAddress { address: Ipv4Addr, with: GuestName },
@@ -24,9 +25,19 @@ pub enum ConfigFault {
 
 #[pure_only]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Scope {
+    #[default]
+    Everything,
+    Only(GuestName),
+    Teardown,
+}
+
+#[pure_only]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Desired {
     valid: BTreeMap<GuestName, WorkloadSpec>,
     invalid: BTreeMap<GuestName, Vec<ConfigFault>>,
+    scope: Scope,
 }
 
 #[pure_only]
@@ -58,12 +69,18 @@ fn faults(index: usize, spec: &WorkloadSpec, all: &[WorkloadSpec]) -> Vec<Config
 impl Desired {
     #[must_use]
     pub fn validate(specs: Vec<WorkloadSpec>) -> Desired {
+        Desired::validate_with(specs, Vec::new())
+    }
+
+    #[must_use]
+    pub fn validate_with(specs: Vec<WorkloadSpec>, rejected: Vec<(GuestName, ConfigFault)>) -> Desired {
         let found: Vec<Vec<ConfigFault>> = specs.iter().enumerate().map(|(index, spec)| faults(index, spec, &specs)).collect();
         let checked: Vec<(WorkloadSpec, Vec<ConfigFault>)> = specs.into_iter().zip(found).collect();
         let invalid: BTreeMap<GuestName, Vec<ConfigFault>> = checked
             .iter()
             .filter(|(_, found)| !found.is_empty())
             .map(|(spec, found)| (spec.name.clone(), found.clone()))
+            .chain(rejected.into_iter().map(|(name, fault)| (name, vec![fault])))
             .collect();
         Desired {
             valid: checked
@@ -72,11 +89,35 @@ impl Desired {
                 .map(|(spec, _)| (spec.name.clone(), spec))
                 .collect(),
             invalid,
+            scope: Scope::Everything,
         }
     }
 
+    #[must_use]
+    pub fn workload(&self, name: &GuestName) -> Desired {
+        Desired { scope: Scope::Only(name.clone()), ..self.clone() }
+    }
+
+    #[must_use]
+    pub fn teardown(&self) -> Desired {
+        Desired { scope: Scope::Teardown, ..self.clone() }
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Vec<GuestName> {
+        self.valid.keys().cloned().collect()
+    }
+
     pub fn valid(&self) -> impl Iterator<Item = &WorkloadSpec> {
-        self.valid.values()
+        self.valid.values().filter(|spec| match &self.scope {
+            Scope::Everything => true,
+            Scope::Only(name) => spec.name == *name,
+            Scope::Teardown => false,
+        })
+    }
+
+    pub fn reported(&self) -> impl Iterator<Item = (&GuestName, &Vec<ConfigFault>)> {
+        self.invalid.iter().filter(|_| !matches!(self.scope, Scope::Only(_)))
     }
 
     #[must_use]
@@ -91,6 +132,9 @@ impl Desired {
 
     #[must_use]
     pub fn orphans(&self, _push: &Push, observed: &Observation) -> Vec<Orphan> {
+        if matches!(self.scope, Scope::Only(_)) {
+            return Vec::new();
+        }
         let names: BTreeSet<GuestName> = observed
             .managed()
             .iter()

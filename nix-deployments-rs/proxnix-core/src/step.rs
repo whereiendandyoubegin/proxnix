@@ -139,7 +139,7 @@ pub fn step<R: Registry>(input: Input<'_>) -> Step {
     let plans: Vec<(GuestName, Plan)> = desired
         .valid()
         .map(|spec| (spec.name.clone(), workload::<R>(spec, images, observed, tick, now, &memo)))
-        .chain(desired.invalid().iter().map(|(name, faults)| (name.clone(), Plan::idle(Stage::Invalid(faults.clone())))))
+        .chain(desired.reported().map(|(name, faults)| (name.clone(), Plan::idle(Stage::Invalid(faults.clone())))))
         .chain(orphans.iter().map(|orphan| (orphan.name().clone(), orphaned(orphan, &memo))))
         .collect();
     let wake = plans

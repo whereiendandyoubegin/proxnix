@@ -63,6 +63,9 @@ fn deploying(ctx: &Context<'_>, serving: Option<&Member>, fresh: &Member, fencin
         (Fence::BeforeBoot, Some(serving)) => fence(ctx, serving, fresh),
         _ => None,
     };
+    if let Some(failure) = refused(ctx, fresh, &[Action::Create]) {
+        return abort(ctx, fresh, failure);
+    }
     fenced.unwrap_or_else(|| match health(ctx, fresh) {
         Health::Pending(plan) => plan,
         Health::Failed(failure) => abort(ctx, fresh, failure),

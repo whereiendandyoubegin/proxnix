@@ -1,0 +1,17 @@
+{
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:53:55:9B,type=veth",
+  "arch": "amd64",
+  "unprivileged": 1,
+  "mp2": "/var/lib/proxnix/logs/postgres,mp=/var/log/journal",
+  "memory": 2048,
+  "mp1": "/var/lib/proxnix/sops,mp=/var/lib/sops-key,ro=1",
+  "cores": 2,
+  "protection": 1,
+  "mp0": "/var/lib/proxnix/postgres,mp=/var/lib/postgresql",
+  "features": "nesting=1",
+  "hostname": "postgres",
+  "ostype": "unmanaged",
+  "digest": "eb3205d23df6ee355984a5c101c13c9c43be1b06",
+  "rootfs": "ZFS:subvol-842-disk-0,size=10G",
+  "tags": "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.168;nix-3jrdbw8y2gijjq9zgamwg77qvn2j6mjm;proxnix;slot-blue"
+}

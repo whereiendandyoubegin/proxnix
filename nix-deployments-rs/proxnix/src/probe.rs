@@ -56,7 +56,7 @@ impl Probe for Lxc {
     }
 }
 
-fn guest_check_script(command: &str) -> String {
+pub(crate) fn guest_check_script(command: &str) -> String {
     format!("if [ -x {command} ]; then exec {command}; fi")
 }
 

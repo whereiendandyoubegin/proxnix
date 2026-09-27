@@ -15,6 +15,7 @@ mod spec;
 mod step;
 mod strategy;
 mod tags;
+mod task;
 mod tick;
 
 use proxnix_pure::pure_only;
@@ -61,5 +62,7 @@ pub use tags::{
     BadGeneration, BadRole, Commit, CommitHash, Digest, Generation, HashFault, HashFormat, ManagedTags, Nix, NixHash, Ownership,
     RawTags, RoleName, TagFault,
 };
+#[pure_only]
+pub use task::{TaskExit, TaskState, Upid, UpidFault};
 #[pure_only]
 pub use tick::{Moment, Pacing, Push, Tick};

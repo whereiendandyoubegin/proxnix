@@ -12,7 +12,7 @@ fn scenario(kind: KindSpec, cutover: Cutover) -> (WorkloadSpec, World) {
 }
 
 fn settle(done: Run, desired: &Desired) -> World {
-    let calm = World { faults: Faults { fail: BTreeSet::new(), ..done.world.faults.clone() }, ..done.world };
+    let calm = World { faults: Faults { fail: BTreeSet::new(), lying: BTreeSet::new(), ..done.world.faults.clone() }, ..done.world };
     let first = run::<Builtin>(calm, desired, &Images::default(), &Tick::Periodic, None);
     let second = run::<Builtin>(first.world, desired, &Images::default(), &Tick::Periodic, None);
     assert!(
@@ -177,6 +177,33 @@ fn the_incident_push_with_nothing_changed_only_adopts() {
     assert_eq!(kinds(&done.effects), vec![Kind::Commit; 8]);
 }
 
+#[test]
+fn every_effect_that_happened_but_reported_failure_is_never_built_upon() {
+    for (kind, cutover) in cases() {
+        let (workload, world) = scenario(kind, cutover);
+        let desired = Desired::validate(vec![workload.clone()]);
+        let images = images(vec![built(&workload, NIX_B)]);
+        let clean = run::<Builtin>(world.clone(), &desired, &images, &push(COMMIT_B), None);
+        for index in 0..clean.effects.len() {
+            let lying = World { faults: Faults { lying: [index].into(), ..Faults::default() }, ..world.clone() };
+            let pushed = run::<Builtin>(lying, &desired, &images, &push(COMMIT_B), None);
+            let created = pushed.effects.iter().position(|effect| sim::kind(effect) == Kind::Create);
+            let create_lied = created == Some(index);
+            if create_lied {
+                assert!(
+                    !kinds(&pushed.effects[index + 1..]).contains(&Kind::Start)
+                        || kinds(&pushed.effects[index + 1..]).first() == Some(&Kind::Reclaim),
+                    "{cutover:?}: a create reported as failed was started anyway: {:?}",
+                    kinds(&pushed.effects)
+                );
+            }
+            let world = settle(pushed, &desired);
+            settled(&world, &desired);
+            assert_eq!(world.members("forgejo").len(), 1, "lying effect {index} ({cutover:?}) left extra guests");
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 
@@ -185,6 +212,7 @@ proptest! {
         fail in prop::collection::btree_set(0usize..40, 0..5),
         crash in prop::option::of(0usize..80),
         die_after in prop::option::of(0usize..40),
+        lying in prop::collection::btree_set(0usize..40, 0..3),
         unhealthy in any::<bool>(),
         silent in any::<bool>(),
         stop_start in any::<bool>(),
@@ -200,6 +228,8 @@ proptest! {
             unhealthy: if unhealthy { [Vmid::new(944)].into() } else { BTreeSet::new() },
             silent: if silent { [Vmid::new(944)].into() } else { BTreeSet::new() },
             die_after,
+            lying,
+            ..Faults::default()
         };
         let pushed = run::<Builtin>(World { faults, ..world }, &desired, &images(vec![built(&workload, NIX_B)]), &push(COMMIT_B), crash);
         let world = settle(pushed, &desired);

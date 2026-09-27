@@ -1,0 +1,15 @@
+{
+  "net0": "virtio=BC:24:11:72:7E:2F,bridge=vmbr0",
+  "memory": "2048",
+  "scsihw": "virtio-scsi-pci",
+  "cores": 2,
+  "smbios1": "uuid=10deaebb-830b-469c-a80d-5cffb3c98c0c",
+  "name": "k3s-cp-01",
+  "vmgenid": "4fe661fb-0321-4f51-8e62-886d8370b9ec",
+  "digest": "ddf7ced11bb23dd8b13d3bb332e2815ea0f44336",
+  "boot": "order=scsi0",
+  "scsi0": "local-lvm:vm-801-disk-0,size=4000M",
+  "meta": "creation-qemu=9.2.0,ctime=1772047366",
+  "serial0": "socket",
+  "agent": "1"
+}

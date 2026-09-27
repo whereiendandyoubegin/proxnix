@@ -1,0 +1,19 @@
+{
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:A2:FE:B8,type=veth",
+  "arch": "amd64",
+  "mp1": "/ZFS/hydra-cache,mp=/var/lib/hydra-cache",
+  "cores": 8,
+  "protection": 0,
+  "unprivileged": 1,
+  "mp2": "/var/lib/proxnix/harmonia,mp=/var/lib/nix-cache-key",
+  "memory": 32768,
+  "mp0": "/var/lib/proxnix/hydra,mp=/var/lib/hydra",
+  "features": "nesting=1",
+  "hostname": "hydra",
+  "tags": "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.122;nix-1vdz63kzk965ddrm1bb8ljs1gawclm05;proxnix;slot-blue",
+  "mp4": "/var/lib/proxnix/logs/hydra,mp=/var/log/journal",
+  "ostype": "unmanaged",
+  "digest": "ca2e5617fbdff9aeba5cc6ce049353bce9713d39",
+  "mp3": "/var/lib/proxnix/sops,mp=/var/lib/sops-key,ro=1",
+  "rootfs": "ZFS:subvol-846-disk-0,size=150G"
+}

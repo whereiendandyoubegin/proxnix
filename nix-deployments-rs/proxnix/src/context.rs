@@ -135,6 +135,7 @@ pub struct Tags {
     pub commit: String,
     pub slot: Slot,
     pub service_ip: Option<Ipv4Addr>,
+    pub role: Option<String>,
 }
 
 impl Tags {
@@ -144,7 +145,15 @@ impl Tags {
             commit: commit.to_string(),
             slot,
             service_ip: None,
+            role: None,
         }
+    }
+
+    pub fn fresh(fresh: &proxnix_core::Fresh) -> Result<Self> {
+        Ok(Self {
+            role: fresh.role().map(|role| role.as_ref().to_string()),
+            ..Self::new(NixHash::try_from(fresh.nix().as_ref())?, fresh.commit().as_ref(), fresh.slot())
+        })
     }
 
     pub fn with_service_ip(&self, ip: Ipv4Addr) -> Self {
@@ -164,11 +173,35 @@ impl Tags {
                 Slot::Green => "slot-green",
             }
         );
-        match self.service_ip {
-            Some(ip) => format!("{base};ip-{ip}"),
-            None => base,
-        }
+        [
+            Some(base),
+            self.service_ip.map(|ip| format!("ip-{ip}")),
+            self.role.as_ref().map(|role| format!("role-{role}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(";")
     }
+}
+
+pub fn render_managed(tags: &proxnix_core::ManagedTags) -> String {
+    [
+        Some(String::from("proxnix")),
+        Some(format!("nix-{}", tags.nix.as_ref())),
+        Some(format!("commit-{}", tags.commit.as_ref())),
+        Some(String::from(match tags.slot {
+            Slot::Blue => "slot-blue",
+            Slot::Green => "slot-green",
+        })),
+        tags.service_ip.map(|ip| format!("ip-{ip}")),
+        tags.generation.map(|generation| format!("gen-{}", generation.get())),
+        tags.role.as_ref().map(|role| format!("role-{}", role.as_ref())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(";")
 }
 
 /// A git commit hash, borrowed from its owner.

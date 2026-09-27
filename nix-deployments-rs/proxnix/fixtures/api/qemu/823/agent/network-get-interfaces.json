@@ -1,0 +1,86 @@
+{
+  "result": [
+    {
+      "hardware-address": "00:00:00:00:00:00",
+      "name": "lo",
+      "statistics": {
+        "rx-errs": 0,
+        "rx-bytes": 40528,
+        "rx-packets": 424,
+        "rx-dropped": 0,
+        "tx-dropped": 0,
+        "tx-errs": 0,
+        "tx-bytes": 40528,
+        "tx-packets": 424
+      },
+      "ip-addresses": [
+        {
+          "prefix": 8,
+          "ip-address": "127.0.0.1",
+          "ip-address-type": "ipv4"
+        },
+        {
+          "ip-address-type": "ipv6",
+          "ip-address": "::1",
+          "prefix": 128
+        }
+      ]
+    },
+    {
+      "ip-addresses": [
+        {
+          "prefix": 24,
+          "ip-address-type": "ipv4",
+          "ip-address": "192.168.1.224"
+        },
+        {
+          "prefix": 128,
+          "ip-address-type": "ipv6",
+          "ip-address": "fdc0:f1b8:abdd::826"
+        },
+        {
+          "prefix": 128,
+          "ip-address-type": "ipv6",
+          "ip-address": "2a0e:cb01:90::826"
+        },
+        {
+          "ip-address": "fdc0:f1b8:abdd:0:1571:95f7:fd29:66a5",
+          "ip-address-type": "ipv6",
+          "prefix": 64
+        },
+        {
+          "prefix": 64,
+          "ip-address-type": "ipv6",
+          "ip-address": "fdc0:f1b8:abdd:0:be24:11ff:fe22:7dc9"
+        },
+        {
+          "ip-address-type": "ipv6",
+          "ip-address": "2a0e:cb01:90:0:5f8d:7ae3:4dde:4442",
+          "prefix": 64
+        },
+        {
+          "ip-address": "2a0e:cb01:90:0:be24:11ff:fe22:7dc9",
+          "ip-address-type": "ipv6",
+          "prefix": 64
+        },
+        {
+          "prefix": 64,
+          "ip-address-type": "ipv6",
+          "ip-address": "fe80::be24:11ff:fe22:7dc9"
+        }
+      ],
+      "hardware-address": "bc:24:11:22:7d:c9",
+      "name": "ens18",
+      "statistics": {
+        "rx-dropped": 0,
+        "rx-bytes": 4835922,
+        "rx-errs": 0,
+        "rx-packets": 46611,
+        "tx-bytes": 19362953,
+        "tx-errs": 0,
+        "tx-packets": 16526,
+        "tx-dropped": 0
+      }
+    }
+  ]
+}

@@ -83,6 +83,8 @@ pub enum AppError {
     InvalidDiskSlot(String),
     #[error("Proxmox API request failed: {0}")]
     ProxmoxApi(#[from] proxmox_api::ReqwestError),
+    #[error("Proxmox task failed: {0:?}")]
+    Api(crate::remote::ApiFault),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
@@ -325,10 +327,14 @@ pub enum Timing {
     GuestCheckRun,
     ArpProbe,
     SozuTcpIdle,
+    AddressPoll,
+    PortPoll,
+    TaskPoll,
+    TaskTimeout,
 }
 
 impl Timing {
-    pub const ALL: [Timing; 9] = [
+    pub const ALL: [Timing; 13] = [
         Timing::PeriodicReconcile,
         Timing::WebhookLockWait,
         Timing::NixBuild,
@@ -338,6 +344,10 @@ impl Timing {
         Timing::GuestCheckRun,
         Timing::ArpProbe,
         Timing::SozuTcpIdle,
+        Timing::AddressPoll,
+        Timing::PortPoll,
+        Timing::TaskPoll,
+        Timing::TaskTimeout,
     ];
 }
 

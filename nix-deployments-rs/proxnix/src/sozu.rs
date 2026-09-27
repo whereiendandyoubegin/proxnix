@@ -152,6 +152,7 @@ impl AlreadyApplied {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
     Changed,
     AlreadyApplied,

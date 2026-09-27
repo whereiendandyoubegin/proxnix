@@ -164,9 +164,14 @@ impl Memo {
         match (effect, outcome) {
             (GuestEffect::Create { artifact, .. }, Outcome::Failed(error)) => {
                 let nix = artifact.nix().clone();
+                let provisioned = match (Provisioned::attempted(effect), effect.instance()) {
+                    (Some(attempt), Some(instance)) => put(self.provisioned, instance, attempt),
+                    _ => self.provisioned,
+                };
                 Memo {
                     failures: put(self.failures, (effect.id(), Action::Create), error.clone()),
                     given_up: put(self.given_up, (name, nix), Failure::Refused { action: Action::Create, error }),
+                    provisioned,
                     ..self
                 }
             }

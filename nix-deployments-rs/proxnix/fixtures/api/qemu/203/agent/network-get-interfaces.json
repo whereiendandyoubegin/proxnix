@@ -1,0 +1,275 @@
+{
+  "result": [
+    {
+      "name": "lo",
+      "hardware-address": "00:00:00:00:00:00",
+      "statistics": {
+        "tx-dropped": 0,
+        "tx-packets": 3560128162,
+        "tx-bytes": 789203319053,
+        "tx-errs": 0,
+        "rx-packets": 3560128162,
+        "rx-bytes": 789203319053,
+        "rx-errs": 0,
+        "rx-dropped": 0
+      },
+      "ip-addresses": [
+        {
+          "prefix": 8,
+          "ip-address-type": "ipv4",
+          "ip-address": "127.0.0.1"
+        },
+        {
+          "prefix": 128,
+          "ip-address": "::1",
+          "ip-address-type": "ipv6"
+        }
+      ]
+    },
+    {
+      "hardware-address": "bc:24:11:e0:65:d1",
+      "name": "eth0",
+      "statistics": {
+        "rx-packets": 1296362515,
+        "rx-errs": 0,
+        "rx-bytes": 244458013608,
+        "rx-dropped": 23630796,
+        "tx-dropped": 0,
+        "tx-packets": 1224139330,
+        "tx-errs": 0,
+        "tx-bytes": 205340549357
+      },
+      "ip-addresses": [
+        {
+          "ip-address-type": "ipv4",
+          "ip-address": "192.168.1.70",
+          "prefix": 24
+        },
+        {
+          "prefix": 64,
+          "ip-address-type": "ipv6",
+          "ip-address": "2a0e:cb01:90:0:be24:11ff:fee0:65d1"
+        },
+        {
+          "ip-address": "2a0e:cb01:90::5af",
+          "ip-address-type": "ipv6",
+          "prefix": 128
+        },
+        {
+          "ip-address-type": "ipv6",
+          "ip-address": "fdc0:f1b8:abdd::5af",
+          "prefix": 128
+        },
+        {
+          "ip-address-type": "ipv6",
+          "ip-address": "fdc0:f1b8:abdd:0:be24:11ff:fee0:65d1",
+          "prefix": 64
+        },
+        {
+          "prefix": 64,
+          "ip-address": "fe80::be24:11ff:fee0:65d1",
+          "ip-address-type": "ipv6"
+        }
+      ]
+    },
+    {
+      "ip-addresses": [
+        {
+          "ip-address": "10.42.1.0",
+          "ip-address-type": "ipv4",
+          "prefix": 32
+        },
+        {
+          "prefix": 64,
+          "ip-address": "fe80::e03a:88ff:fe76:b38",
+          "ip-address-type": "ipv6"
+        }
+      ],
+      "hardware-address": "e2:3a:88:76:0b:38",
+      "name": "flannel.1",
+      "statistics": {
+        "rx-dropped": 0,
+        "rx-errs": 0,
+        "rx-bytes": 1729916110,
+        "rx-packets": 6602701,
+        "tx-errs": 0,
+        "tx-bytes": 599529833,
+        "tx-packets": 7899058,
+        "tx-dropped": 7
+      }
+    },
+    {
+      "name": "cni0",
+      "hardware-address": "1a:2a:63:73:5c:2f",
+      "statistics": {
+        "rx-dropped": 0,
+        "rx-bytes": 126400483,
+        "rx-errs": 0,
+        "rx-packets": 1958122,
+        "tx-bytes": 305452154,
+        "tx-errs": 0,
+        "tx-packets": 1712613,
+        "tx-dropped": 0
+      },
+      "ip-addresses": [
+        {
+          "ip-address-type": "ipv4",
+          "ip-address": "10.42.1.1",
+          "prefix": 24
+        },
+        {
+          "ip-address": "fe80::1089:d5ff:fe8a:f7c",
+          "ip-address-type": "ipv6",
+          "prefix": 64
+        }
+      ]
+    },
+    {
+      "statistics": {
+        "rx-packets": 1955130,
+        "rx-bytes": 153549013,
+        "rx-errs": 0,
+        "rx-dropped": 0,
+        "tx-dropped": 0,
+        "tx-packets": 1714114,
+        "tx-bytes": 305503330,
+        "tx-errs": 0
+      },
+      "name": "veth181cb245",
+      "hardware-address": "0e:05:f9:1f:30:ab",
+      "ip-addresses": [
+        {
+          "ip-address": "fe80::c05:f9ff:fe1f:30ab",
+          "ip-address-type": "ipv6",
+          "prefix": 64
+        }
+      ]
+    },
+    {
+      "statistics": {
+        "tx-errs": 0,
+        "tx-bytes": 565748,
+        "tx-packets": 7267,
+        "tx-dropped": 0,
+        "rx-dropped": 0,
+        "rx-errs": 0,
+        "rx-bytes": 261426,
+        "rx-packets": 2952
+      },
+      "hardware-address": "32:67:b5:fd:1c:a7",
+      "name": "veth81311226",
+      "ip-addresses": [
+        {
+          "ip-address-type": "ipv6",
+          "ip-address": "fe80::3067:b5ff:fefd:1ca7",
+          "prefix": 64
+        }
+      ]
+    },
+    {
+      "ip-addresses": [
+        {
+          "ip-address": "fe80::58a8:5cff:fe0d:f029",
+          "ip-address-type": "ipv6",
+          "prefix": 64
+        }
+      ],
+      "name": "vethcd084cdd",
+      "hardware-address": "5a:a8:5c:0d:f0:29",
+      "statistics": {
+        "tx-bytes": 312808,
+        "tx-errs": 0,
+        "tx-packets": 4444,
+        "tx-dropped": 0,
+        "rx-dropped": 0,
+        "rx-bytes": 872,
+        "rx-errs": 0,
+        "rx-packets": 10
+      }
+    },
+    {
+      "statistics": {
+        "tx-bytes": 312266,
+        "tx-errs": 0,
+        "tx-packets": 4437,
+        "tx-dropped": 0,
+        "rx-dropped": 0,
+        "rx-bytes": 802,
+        "rx-errs": 0,
+        "rx-packets": 9
+      },
+      "name": "vethf6fbc176",
+      "hardware-address": "3a:05:af:d3:27:6c",
+      "ip-addresses": [
+        {
+          "prefix": 64,
+          "ip-address-type": "ipv6",
+          "ip-address": "fe80::3805:afff:fed3:276c"
+        }
+      ]
+    },
+    {
+      "name": "vethf78283a2",
+      "hardware-address": "86:8a:7c:8f:88:ac",
+      "statistics": {
+        "tx-dropped": 0,
+        "tx-packets": 4433,
+        "tx-bytes": 311974,
+        "tx-errs": 0,
+        "rx-packets": 9,
+        "rx-bytes": 802,
+        "rx-errs": 0,
+        "rx-dropped": 0
+      },
+      "ip-addresses": [
+        {
+          "ip-address-type": "ipv6",
+          "ip-address": "fe80::848a:7cff:fe8f:88ac",
+          "prefix": 64
+        }
+      ]
+    },
+    {
+      "ip-addresses": [
+        {
+          "ip-address": "fe80::dcc7:56ff:feab:c928",
+          "ip-address-type": "ipv6",
+          "prefix": 64
+        }
+      ],
+      "statistics": {
+        "rx-dropped": 0,
+        "rx-bytes": 802,
+        "rx-errs": 0,
+        "rx-packets": 9,
+        "tx-bytes": 311574,
+        "tx-errs": 0,
+        "tx-packets": 4429,
+        "tx-dropped": 0
+      },
+      "hardware-address": "de:c7:56:ab:c9:28",
+      "name": "veth5c538605"
+    },
+    {
+      "statistics": {
+        "tx-dropped": 0,
+        "tx-packets": 4426,
+        "tx-bytes": 311324,
+        "tx-errs": 0,
+        "rx-packets": 9,
+        "rx-bytes": 802,
+        "rx-errs": 0,
+        "rx-dropped": 0
+      },
+      "name": "veth7cbfb7fe",
+      "hardware-address": "12:43:1a:6b:43:6d",
+      "ip-addresses": [
+        {
+          "prefix": 64,
+          "ip-address-type": "ipv6",
+          "ip-address": "fe80::1043:1aff:fe6b:436d"
+        }
+      ]
+    }
+  ]
+}
