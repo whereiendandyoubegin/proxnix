@@ -38,7 +38,7 @@
         version = "0.1.0";
         src = ./nix-deployments-rs;
         cargoLock.lockFile = ./nix-deployments-rs/Cargo.lock;
-        nativeBuildInputs = [ pkgs.pkg-config ];
+        nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake ];
         buildInputs = [ pkgs.openssl pkgs.libgit2 ];
         PROXNIX_NIXOLOGY_PATH = "${nixology}";
         RUSTFLAGS = rustflags;
@@ -57,8 +57,10 @@
         doCheck = false;
       };
 
+      sozu = nixology.proxnixcfg.sozu;
+
       sozuConfig = pkgs.writeText "sozu-config.toml" ''
-        command_socket = "/run/sozu/command.sock"
+        command_socket = "${sozu.socket_path}"
         log_level      = "info"
         log_target     = "stdout"
         command_buffer_size     = 16384
@@ -66,7 +68,7 @@
 
         [[listeners]]
         protocol = "http"
-        address  = "0.0.0.0:80"
+        address  = "${sozu.listen_ip}:${toString sozu.http_port}"
       '';
 
       sozuUnit = pkgs.writeText "sozu.service" ''
@@ -95,6 +97,7 @@
         [Service]
         Type=simple
         Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
+        ExecStartPre=${nixology.packages.${system}.proxnix-secrets}/bin/proxnix-secrets
         ExecStart=${proxnixPkg}/bin/proxnix
         Restart=always
         RestartSec=5

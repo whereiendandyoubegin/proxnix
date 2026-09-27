@@ -8,13 +8,7 @@ use proxnix_core::SlotId;
 use tracing::{info, warn};
 
 use crate::context::NixHash;
-use crate::types::{AppError, Result};
-
-const BASE_SNAPSHOT: &str = "base";
-const PRIVILEGED_SUFFIX: &str = "-privileged";
-const NIX_HASH_LEN: usize = 32;
-const UNPRIVILEGED_UID_MAP: IdMap = IdMap { kind: IdKind::User, host_base: 100000, count: 65536 };
-const UNPRIVILEGED_GID_MAP: IdMap = IdMap { kind: IdKind::Group, host_base: 100000, count: 65536 };
+use crate::types::{AppError, IdRange, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -102,20 +96,34 @@ pub struct ZfsImages {
     pub images: Dataset,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotTag {
+    Base,
+}
+
+impl fmt::Display for SnapshotTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SnapshotTag::Base => "base",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     dataset: Dataset,
+    tag: SnapshotTag,
 }
 
 impl Snapshot {
     fn base(dataset: &Dataset) -> Snapshot {
-        Snapshot { dataset: dataset.clone() }
+        Snapshot { dataset: dataset.clone(), tag: SnapshotTag::Base }
     }
 }
 
 impl fmt::Display for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}", self.dataset, BASE_SNAPSHOT)
+        write!(f, "{}@{}", self.dataset, self.tag)
     }
 }
 
@@ -154,7 +162,7 @@ impl Ownership {
     fn suffix(self) -> &'static str {
         match self {
             Ownership::Unprivileged => "",
-            Ownership::Privileged => PRIVILEGED_SUFFIX,
+            Ownership::Privileged => "-privileged",
         }
     }
 }
@@ -170,6 +178,12 @@ struct IdMap {
     kind: IdKind,
     host_base: u32,
     count: u32,
+}
+
+impl IdMap {
+    fn of(kind: IdKind, range: IdRange) -> IdMap {
+        IdMap { kind, host_base: range.host_base, count: range.count }
+    }
 }
 
 impl fmt::Display for IdMap {
@@ -197,11 +211,11 @@ impl ImageKey {
 impl TryFrom<&str> for ImageKey {
     type Error = AppError;
     fn try_from(s: &str) -> Result<Self> {
-        let (hash, ownership) = match s.strip_suffix(PRIVILEGED_SUFFIX) {
+        let (hash, ownership) = match s.strip_suffix(Ownership::Privileged.suffix()) {
             Some(hash) => (hash, Ownership::Privileged),
             None => (s, Ownership::Unprivileged),
         };
-        if hash.len() == NIX_HASH_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) { Ok(ImageKey { hash: NixHash::try_from(hash)?, ownership }) } else { Err(AppError::InvalidZfsName(s.to_string())) }
+        if hash.len() == NixHash::STORE_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) { Ok(ImageKey { hash: NixHash::try_from(hash)?, ownership }) } else { Err(AppError::InvalidZfsName(s.to_string())) }
     }
 }
 
@@ -320,9 +334,9 @@ impl BaseImage<Absent> {
 }
 
 impl BaseImage<Empty> {
-    fn unpack(self, tarball: &Tarball) -> Result<BaseImage<Unpacked>> {
+    fn unpack(self, tarball: &Tarball, idmap: IdRange) -> Result<BaseImage<Unpacked>> {
         info!("unpacking {} into {}", tarball.path().display(), self.dataset);
-        let unpacked = mountpoint(&self.dataset).and_then(|into| extract(tarball, &into, self.ownership));
+        let unpacked = mountpoint(&self.dataset).and_then(|into| extract(tarball, &into, self.ownership, idmap));
         match unpacked {
             Ok(()) => Ok(self.into_state()),
             Err(e) => {
@@ -343,10 +357,10 @@ impl BaseImage<Unpacked> {
 }
 
 impl BaseImage<Sealed> {
-    pub fn ensure(zfs: &ZfsImages, key: &ImageKey, tarball: &Tarball) -> Result<BaseImage<Sealed>> {
+    pub fn ensure(zfs: &ZfsImages, key: &ImageKey, tarball: &Tarball, idmap: IdRange) -> Result<BaseImage<Sealed>> {
         match BaseImage::locate(zfs, key)? {
             Located::Sealed(image) => Ok(image),
-            Located::Absent(image) => image.create()?.unpack(tarball)?.seal(),
+            Located::Absent(image) => image.create()?.unpack(tarball, idmap)?.seal(),
         }
     }
 
@@ -442,7 +456,8 @@ fn mountpoint(dataset: &Dataset) -> Result<Mountpoint> {
     Mountpoint::try_from(zfs_cmd(&["get", "-H", "-o", "value", "mountpoint", dataset.as_str()])?.as_str())
 }
 
-fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership) -> Result<()> {
+fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership, idmap: IdRange) -> Result<()> {
+    let (uid_map, gid_map) = (IdMap::of(IdKind::User, idmap), IdMap::of(IdKind::Group, idmap));
     let tar = [
         "tar",
         "-x",
@@ -461,14 +476,14 @@ fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership) -> Result
         Ownership::Unprivileged => {
             std::os::unix::fs::chown(
                 into.path(),
-                Some(UNPRIVILEGED_UID_MAP.host_base),
-                Some(UNPRIVILEGED_GID_MAP.host_base),
+                Some(uid_map.host_base),
+                Some(gid_map.host_base),
             )?;
             let mut cmd = Command::new("lxc-usernsexec");
             cmd.arg("-m")
-                .arg(UNPRIVILEGED_UID_MAP.to_string())
+                .arg(uid_map.to_string())
                 .arg("-m")
-                .arg(UNPRIVILEGED_GID_MAP.to_string())
+                .arg(gid_map.to_string())
                 .arg("--")
                 .args(tar);
             cmd
@@ -522,6 +537,7 @@ fn run(cmd: &mut Command, what: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proxnix_core::Vmid;
 
     const HASH: &str = "0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7";
 
@@ -585,7 +601,7 @@ mod tests {
 
     #[test]
     fn a_rootfs_volume_renders_as_a_proxmox_volume() {
-        let volume = RootfsVolume::for_slot(images().storage, SlotId::Blue(842), DiskSize::gib(10));
+        let volume = RootfsVolume::for_slot(images().storage, SlotId::Blue(Vmid::new(842)), DiskSize::gib(10));
         assert_eq!(volume.to_string(), "ZFS:subvol-842-disk-0,size=10G");
     }
 
@@ -602,8 +618,9 @@ mod tests {
 
     #[test]
     fn id_maps_render_for_lxc_usernsexec() {
-        assert_eq!(UNPRIVILEGED_UID_MAP.to_string(), "u:0:100000:65536");
-        assert_eq!(UNPRIVILEGED_GID_MAP.to_string(), "g:0:100000:65536");
+        let range = IdRange { host_base: 100_000, count: 65_536 };
+        assert_eq!(IdMap::of(IdKind::User, range).to_string(), "u:0:100000:65536");
+        assert_eq!(IdMap::of(IdKind::Group, range).to_string(), "g:0:100000:65536");
     }
 
     #[test]

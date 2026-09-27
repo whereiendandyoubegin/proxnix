@@ -9,6 +9,8 @@ use crate::zfs::ZfsImages;
 pub struct NixHash(String);
 
 impl NixHash {
+    pub const STORE_LEN: usize = 32;
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -187,29 +189,6 @@ impl<'a> TryFrom<&'a str> for CommitHash<'a> {
     }
 }
 
-/// Path to the sozu control socket, borrowed from app config.
-#[derive(Debug, Clone, Copy)]
-pub struct SozuSocketPath<'a>(&'a str);
-
-impl<'a> SozuSocketPath<'a> {
-    pub fn as_str(self) -> &'a str {
-        self.0
-    }
-}
-
-impl<'a> TryFrom<&'a str> for SozuSocketPath<'a> {
-    type Error = AppError;
-    fn try_from(s: &'a str) -> Result<Self> {
-        if s.is_empty() {
-            Err(AppError::CmdError(
-                "sozu socket path cannot be empty".to_string(),
-            ))
-        } else {
-            Ok(SozuSocketPath(s))
-        }
-    }
-}
-
 /// Path to the template cache directory, borrowed from app config.
 #[derive(Debug, Clone, Copy)]
 pub struct TemplateCachePath<'a>(&'a str);
@@ -237,6 +216,7 @@ impl<'a> TryFrom<&'a str> for TemplateCachePath<'a> {
 pub struct ImageStore<'a> {
     pub template_cache_path: TemplateCachePath<'a>,
     pub zfs: Option<&'a ZfsImages>,
+    pub idmap: crate::types::IdRange,
 }
 
 /// Path to the cloned nix repository, borrowed from the pipeline.
@@ -271,8 +251,9 @@ pub struct ReconcileContext<'a> {
     pub repo_path: RepoPath<'a>,
     pub commit_hash: CommitHash<'a>,
     pub image_store: ImageStore<'a>,
-    pub sozu_socket_path: SozuSocketPath<'a>,
+    pub settings: &'a crate::types::AppConfig,
     pub backend_pool: Option<&'a BackendPool>,
+    pub pve: &'a crate::pve::Pve,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -421,7 +402,6 @@ mod tests {
     #[test]
     fn empty_borrowed_paths_are_rejected() {
         assert!(CommitHash::try_from("").is_err());
-        assert!(SozuSocketPath::try_from("").is_err());
         assert!(TemplateCachePath::try_from("").is_err());
         assert!(RepoPath::try_from("").is_err());
     }

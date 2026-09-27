@@ -28,7 +28,7 @@ export def findprimitive [dir?: path] {
             name: $entry.name,
             output: ($primitives | each --flatten {|type|
               $content
-              | ^ast-grep run --lang rust --stdin --json=compact --pattern $"struct S { $NAME: ($type) }" --selector field_declaration
+              | ^ast-grep --pattern 'Command::new($TOOL)' --json
               | complete
               | get stdout
               | from json

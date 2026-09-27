@@ -8,7 +8,6 @@ use tracing::{error, info, warn};
 
 use crate::types::{AppError, Result};
 
-const PROBE_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceBinding {
@@ -73,8 +72,8 @@ pub enum Occupancy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prober {
-    Arp,
-    Neighbour,
+    Arp { wait: Duration },
+    Neighbour { wait: Duration },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,25 +244,25 @@ fn bridge_addresses(bridge: &str) -> Result<Vec<BridgeAddress>> {
     ))) }
 }
 
-pub fn choose_prober() -> Prober {
+pub fn choose_prober(wait: Duration) -> Prober {
     match Command::new("arping").arg("-V").output() {
-        Ok(output) if output.status.success() => Prober::Arp,
+        Ok(output) if output.status.success() => Prober::Arp { wait },
         _ => {
             warn!(
                 "arping is not available, falling back to the neighbour table to detect address conflicts; install iputils-arping for a reliable probe"
             );
-            Prober::Neighbour
+            Prober::Neighbour { wait }
         }
     }
 }
 
-fn arp_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
+fn arp_probe(bridge: &str, address: Ipv4Addr, wait: Duration) -> Result<Occupancy> {
     let output = Command::new("arping")
         .arg("-D")
         .arg("-c")
         .arg("1")
         .arg("-w")
-        .arg(PROBE_WAIT.as_secs().to_string())
+        .arg(wait.as_secs().to_string())
         .arg("-I")
         .arg(bridge)
         .arg(address.to_string())
@@ -274,12 +273,12 @@ fn arp_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
     ))
 }
 
-fn neighbour_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
+fn neighbour_probe(bridge: &str, address: Ipv4Addr, wait: Duration) -> Result<Occupancy> {
     Command::new("ping")
         .arg("-c")
         .arg("1")
         .arg("-W")
-        .arg(PROBE_WAIT.as_secs().to_string())
+        .arg(wait.as_secs().to_string())
         .arg("-I")
         .arg(bridge)
         .arg(address.to_string())
@@ -297,8 +296,8 @@ fn neighbour_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
 
 fn probe(prober: Prober, bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
     match prober {
-        Prober::Arp => arp_probe(bridge, address),
-        Prober::Neighbour => neighbour_probe(bridge, address),
+        Prober::Arp { wait } => arp_probe(bridge, address, wait),
+        Prober::Neighbour { wait } => neighbour_probe(bridge, address, wait),
     }
 }
 

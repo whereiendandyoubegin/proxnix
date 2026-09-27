@@ -1,7 +1,9 @@
-use crate::context::{ImageType, SozuSocketPath, StorePath};
+use crate::context::{ImageType, StorePath};
+use crate::pve::Pve;
 use crate::nix::{eval_config, nix_build};
 use crate::state::parse_config;
-use crate::types::Result;
+use crate::types::{AppConfig, Result, Timing};
+use std::time::Duration;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use tracing::{info, warn};
@@ -9,12 +11,13 @@ use tracing::{info, warn};
 pub fn build_image_types(
     image_type_attrs: &HashMap<ImageType, String>,
     repo_path: &str,
+    timeout: Duration,
 ) -> (HashMap<ImageType, StorePath>, HashMap<ImageType, String>) {
     let results: Vec<(ImageType, Result<StorePath>)> = image_type_attrs
         .par_iter()
         .map(|(image_type, build_attr)| {
             info!("Building image type '{}' ({})", image_type, build_attr);
-            let result = nix_build(image_type.as_str(), build_attr, repo_path)
+            let result = nix_build(image_type.as_str(), build_attr, repo_path, timeout)
                 .and_then(StorePath::try_from);
             match &result {
                 Ok(path) => info!("Built '{}' -> {}", image_type, path),
@@ -36,15 +39,8 @@ pub fn build_image_types(
     (built, errors)
 }
 
-pub fn ensure_vms_running(repo_path: &str, sozu_socket_path: &str) {
-    let sozu_socket_path = match SozuSocketPath::try_from(sozu_socket_path) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("periodic reconcile: {}", e);
-            return;
-        }
-    };
-    let raw = match eval_config(repo_path) {
+pub fn ensure_vms_running(repo_path: &str, settings: &AppConfig, pve: &Pve) {
+    let raw = match eval_config(repo_path, settings.timings_ms.get(Timing::NixEval)) {
         Ok(r) => r,
         Err(e) => {
             warn!("periodic reconcile: failed to eval config: {:?}", e);
@@ -55,7 +51,7 @@ pub fn ensure_vms_running(repo_path: &str, sozu_socket_path: &str) {
         Ok(desired) => desired
             .into_workload_groups()
             .iter()
-            .for_each(|g| g.ensure_running(sozu_socket_path)),
+            .for_each(|g| g.ensure_running(settings, pve)),
         Err(e) => warn!("periodic reconcile: failed to parse config: {:?}", e),
     }
 }

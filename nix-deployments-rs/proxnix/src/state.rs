@@ -1,15 +1,14 @@
+use crate::api::{self, Kind, Lxc, Qemu};
 use crate::context::NixHash;
-use crate::pct::{pct_config, pct_list};
-use crate::types::{
-    AppConfig, AppError, BindMount, DeployedContainer, DeployedState, DeployedVM, DesiredState,
-    MountMode, QMConfig, QMList, Result,
-};
-use proxnix_core::Slot;
+use crate::pve::Pve;
+use crate::types::{AppConfig, AppError, BindMount, DesiredState, MountMode, Result};
+use proxmox_api::nodes::node::{lxc, qemu};
+use proxmox_api::types::bounded_integer::BoundedInteger;
+use proxnix_core::{GuestStatus, Slot, Vmid};
 use rayon::prelude::*;
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::process::Command;
+use std::net::Ipv4Addr;
 
 pub(crate) fn slot_from_tags(tags: Option<&str>) -> Slot {
     tags.and_then(|t| {
@@ -28,7 +27,7 @@ pub(crate) fn nix_hash_from_tags(tags: Option<&str>) -> Option<NixHash> {
     })
 }
 
-pub(crate) fn service_ip_from_tags(tags: Option<&str>) -> Option<std::net::Ipv4Addr> {
+pub(crate) fn service_ip_from_tags(tags: Option<&str>) -> Option<Ipv4Addr> {
     tags.and_then(|t| {
         t.split(';')
             .find(|tag| tag.trim().starts_with("ip-"))
@@ -38,14 +37,6 @@ pub(crate) fn service_ip_from_tags(tags: Option<&str>) -> Option<std::net::Ipv4A
 
 pub(crate) fn is_proxnix_managed(tags: Option<&str>) -> bool {
     tags.is_some_and(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-}
-
-pub(crate) fn vm_tags(vm_id: u32) -> Result<Option<String>> {
-    Ok(parse_qm_config(&qm_config(vm_id)?)?.tags)
-}
-
-pub(crate) fn container_tags(ct_id: u32) -> Result<Option<String>> {
-    Ok(parse_pct_config(pct_config(ct_id)?)?.tags)
 }
 
 pub fn parse_config(json: &str) -> Result<DesiredState> {
@@ -58,277 +49,311 @@ pub fn parse_appconfig(json: &str) -> Result<AppConfig> {
     Ok(appconfig)
 }
 
-pub fn qm_list() -> Result<String> {
-    let qm_list = Command::new("qm").arg("list").output()?;
-    if !qm_list.status.success() {
-        return Err(AppError::CmdError(format!(
-            "qm list has failed with exit code: {:?}",
-            qm_list.status.code()
-        )));
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listed<X> {
+    pub id: Vmid,
+    pub name: String,
+    pub status: GuestStatus,
+    pub tags: Option<String>,
+    pub extra: X,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resources {
+    pub memory_mb: u32,
+    pub disk_gb: f64,
+    pub cores: u16,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Deployed<X> {
+    pub id: Vmid,
+    pub name: String,
+    pub status: GuestStatus,
+    pub nix_hash: Option<NixHash>,
+    pub active_slot: Slot,
+    pub service_ip: Option<Ipv4Addr>,
+    pub resources: Resources,
+    pub extra: X,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QemuListing {
+    pub memory_mb: u32,
+    pub disk_gb: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QemuExtra {
+    pub sockets: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LxcExtra {
+    pub privileged: bool,
+    pub bind_mounts: Vec<BindMount>,
+}
+
+pub trait Observe: Kind {
+    type Listing: Send;
+    type Config: Send;
+    type Extra: Send + Sync;
+
+    fn list(pve: &Pve) -> Result<Vec<Listed<Self::Listing>>>;
+    fn candidates(listed: Vec<Listed<Self::Listing>>) -> Vec<Listed<Self::Listing>> {
+        listed
     }
-    let stdout_bytes = qm_list.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-
-    Ok(output_string)
+    fn config(pve: &Pve, id: Vmid) -> Result<Self::Config>;
+    fn tags_of(config: &Self::Config) -> Option<&str>;
+    fn decode(id: Vmid, listing: Self::Listing, config: Self::Config) -> Result<(Resources, Self::Extra)>;
+    fn address(pve: &Pve, id: Vmid) -> Result<Ipv4Addr>;
 }
 
-pub(crate) fn vm_exists(vm_id: u32) -> Result<bool> {
-    qm_list()
-        .and_then(|raw| parse_qm_list(&raw).map(|vms| vms.into_iter().any(|vm| vm.vm_id == vm_id)))
+fn vmid_of(id: &impl BoundedInteger) -> Result<Vmid> {
+    Ok(Vmid::new(u32::try_from(id.get())?))
 }
 
-pub fn qm_config(vm_id: u32) -> Result<String> {
-    let qm_config = Command::new("qm")
-        .arg("config")
-        .arg(vm_id.to_string())
-        .output()?;
-    if !qm_config.status.success() {
-        return Err(AppError::CmdError(format!(
-            "qm config has failed with exit code: {:?}",
-            qm_config.status.code()
-        )));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Bytes(i64);
+
+impl Bytes {
+    fn reported(bytes: Option<i64>) -> Bytes {
+        Bytes(bytes.unwrap_or(0))
     }
 
-    let stdout_bytes = qm_config.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
+    fn mebibytes(self) -> Result<u32> {
+        Ok(u32::try_from(self.0 / (1_i64 << 20))?)
+    }
 
-    Ok(output_string)
+    #[allow(clippy::cast_precision_loss)]
+    fn gibibytes(self) -> f64 {
+        self.0 as f64 / f64::from(1_u32 << 30)
+    }
 }
 
-pub fn parse_qm_config(output_string: &str) -> Result<QMConfig> {
-    let qmconfig = output_string
-        .lines()
-        .fold(QMConfig::default(), |mut accumulator, line| {
-            let (key, value) = line.split_once(':').unwrap(); // TODO Maybe make a function to validate qm config output in the future
-            let key = key.trim();
-            let value = value.trim();
-
-            match key {
-                "agent" => accumulator.agent = value.parse().unwrap(),
-                "balloon" => accumulator.balloon = value.parse().unwrap(),
-                "boot" => accumulator.boot = value.parse().unwrap(),
-                "bootdisk" => accumulator.bootdisk = value.parse().unwrap(),
-                "cipassword" => accumulator.cipassword = Some(value.to_string()),
-                "ciuser" => accumulator.ciuser = Some(value.to_string()),
-                "cores" => accumulator.cores = value.parse().unwrap(),
-                "cpu" => accumulator.cpu = value.parse().unwrap(),
-                "cpuunits" => accumulator.cpuunits = value.parse().unwrap(),
-                "memory" => accumulator.memory = value.parse().unwrap(),
-                "meta" => accumulator.meta = value.parse().unwrap(),
-                "name" => accumulator.name = value.parse().unwrap(),
-                "numa" => accumulator.numa = value.parse().unwrap(),
-                "onboot" => accumulator.onboot = value.parse().unwrap(),
-                "protection" => accumulator.protection = value.parse().unwrap(),
-                "sockets" => accumulator.sockets = value.parse().unwrap(),
-                "sshkeys" => accumulator.sshkeys = Some(value.to_string()),
-                "tags" => accumulator.tags = Some(value.to_string()),
-                "vga" => accumulator.vga = value.parse().unwrap(),
-                "vmgenid" => accumulator.vmgenid = value.parse().unwrap(),
-                key if key.starts_with("scsi")
-                    || key.starts_with("sata")
-                    || key.starts_with("ide")
-                    || key.starts_with("virtio") =>
-                {
-                    accumulator.disks.insert(key.to_string(), value.to_string());
-                }
-                key if key.starts_with("ipconfig") => {
-                    accumulator
-                        .ipconfigs
-                        .insert(key.to_string(), value.to_string());
-                }
-                key if key.starts_with("net") => {
-                    accumulator
-                        .networks
-                        .insert(key.to_string(), value.to_string());
-                }
-                key if key.starts_with("serial") => {
-                    accumulator
-                        .serial
-                        .insert(key.to_string(), value.to_string());
-                }
-                _ => {}
-            }
-            accumulator
-        });
-    Ok(qmconfig)
+fn required<T>(value: Option<T>, id: Vmid, key: &str) -> Result<T> {
+    value.ok_or_else(|| AppError::ProxmoxError(format!("config of {id} is missing `{key}`")))
 }
 
-pub fn parse_qm_list(output_string: &str) -> Result<Vec<QMList>> {
-    output_string
-        .lines()
-        .skip(1)
-        .map(|line| -> Result<QMList> {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-
-            let col = |n: usize| -> crate::types::Result<&str> {
-                parts.get(n).copied().ok_or_else(|| {
-                    AppError::ParsingModuleError(format!(
-                        "qm list line has fewer columns than expected: '{line}'"
-                    ))
-                })
-            };
-
-            Ok(QMList {
-                vm_id: col(0)?.parse()?,
-                name: col(1)?.to_string(),
-                status: col(2)?.to_string(),
-                mem_mb: col(3)?.parse()?,
-                bootdisk_gb: col(4)?.parse()?,
-                pid: col(5)?.parse()?,
-            })
-        })
-        .collect()
+fn narrowed<T: TryFrom<i128, Error = std::num::TryFromIntError>>(value: &impl BoundedInteger) -> Result<T> {
+    Ok(T::try_from(value.get())?)
 }
 
-pub fn enrich_cpu_info(deployed: DeployedState) -> Result<DeployedState> {
-    let DeployedState { vms, containers } = deployed;
-    let deployedvms = vms
+fn listed_qemu(item: qemu::GetOutputItems) -> Result<Listed<QemuListing>> {
+    Ok(Listed {
+        id: vmid_of(&item.vmid)?,
+        name: item.name.unwrap_or_default(),
+        status: match item.status {
+            qemu::Status::Running => GuestStatus::Running,
+            qemu::Status::Stopped => GuestStatus::from("stopped"),
+        },
+        tags: item.tags,
+        extra: QemuListing {
+            memory_mb: Bytes::reported(item.maxmem).mebibytes()?,
+            disk_gb: Bytes::reported(item.maxdisk).gibibytes(),
+        },
+    })
+}
+
+fn listed_lxc(item: lxc::GetOutputItems) -> Result<Listed<()>> {
+    Ok(Listed {
+        id: vmid_of(&item.vmid)?,
+        name: item.name.unwrap_or_default(),
+        status: match item.status {
+            lxc::Status::Running => GuestStatus::Running,
+            lxc::Status::Stopped => GuestStatus::from("stopped"),
+        },
+        tags: item.tags,
+        extra: (),
+    })
+}
+
+impl Observe for Qemu {
+    type Listing = QemuListing;
+    type Config = qemu::vmid::config::GetOutput;
+    type Extra = QemuExtra;
+
+    fn list(pve: &Pve) -> Result<Vec<Listed<QemuListing>>> {
+        pve.call(pve.node().qemu().get(qemu::GetParams::default()))?
+            .into_iter()
+            .map(listed_qemu)
+            .collect()
+    }
+
+    fn candidates(listed: Vec<Listed<QemuListing>>) -> Vec<Listed<QemuListing>> {
+        listed
+            .into_iter()
+            .map(|entry| (entry.name.clone(), entry))
+            .collect::<HashMap<_, _>>()
+            .into_values()
+            .collect()
+    }
+
+    fn config(pve: &Pve, id: Vmid) -> Result<Self::Config> {
+        pve.call(
+            pve.node()
+                .qemu()
+                .vmid(api::vmid(id)?)
+                .config()
+                .get(qemu::vmid::config::GetParams::default()),
+        )
+    }
+
+    fn tags_of(config: &Self::Config) -> Option<&str> {
+        config.tags.as_deref()
+    }
+
+    fn decode(_id: Vmid, listing: QemuListing, config: Self::Config) -> Result<(Resources, QemuExtra)> {
+        Ok((
+            Resources {
+                memory_mb: listing.memory_mb,
+                disk_gb: listing.disk_gb,
+                cores: config.cores.map_or(Ok(0), |n| u16::try_from(n.get()))?,
+            },
+            QemuExtra {
+                sockets: config.sockets.map_or(Ok(1), |n| u8::try_from(n.get()))?,
+            },
+        ))
+    }
+
+    fn address(pve: &Pve, id: Vmid) -> Result<Ipv4Addr> {
+        pve.call(
+            pve.node()
+                .qemu()
+                .vmid(api::vmid(id)?)
+                .agent()
+                .network_get_interfaces()
+                .get(),
+        )?
+        .additional_properties
+        .get("result")
+        .and_then(agent_ipv4)
+        .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {id}")))
+    }
+}
+
+impl Observe for Lxc {
+    type Listing = ();
+    type Config = lxc::vmid::config::GetOutput;
+    type Extra = LxcExtra;
+
+    fn list(pve: &Pve) -> Result<Vec<Listed<()>>> {
+        pve.call(pve.node().lxc().get())?
+            .into_iter()
+            .map(listed_lxc)
+            .collect()
+    }
+
+    fn config(pve: &Pve, id: Vmid) -> Result<Self::Config> {
+        pve.call(
+            pve.node()
+                .lxc()
+                .vmid(api::vmid(id)?)
+                .config()
+                .get(lxc::vmid::config::GetParams::default()),
+        )
+    }
+
+    fn tags_of(config: &Self::Config) -> Option<&str> {
+        config.tags.as_deref()
+    }
+
+    fn decode(id: Vmid, (): (), config: Self::Config) -> Result<(Resources, LxcExtra)> {
+        Ok((
+            Resources {
+                memory_mb: narrowed(&required(config.memory, id, "memory")?)?,
+                disk_gb: rootfs_size_gb(&required(config.rootfs, id, "rootfs")?)?,
+                cores: narrowed(&required(config.cores, id, "cores")?)?,
+            },
+            LxcExtra {
+                privileged: !config.unprivileged.unwrap_or(false),
+                bind_mounts: config
+                    .mps
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>()
+                    .values()
+                    .map(|mount| parse_mount(mount))
+                    .collect::<Result<_>>()?,
+            },
+        ))
+    }
+
+    fn address(pve: &Pve, id: Vmid) -> Result<Ipv4Addr> {
+        pve.call(pve.node().lxc().vmid(api::vmid(id)?).interfaces().get())?
+            .into_iter()
+            .filter(|iface| iface.name != "lo")
+            .find_map(|iface| iface.inet.as_deref().and_then(cidr_ipv4))
+            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {id}")))
+    }
+}
+
+pub fn deployed<K: Observe>(pve: &Pve) -> Result<HashMap<String, Deployed<K::Extra>>> {
+    inventory::<K>(K::list(pve)?, |id| K::config(pve, id))
+}
+
+pub fn exists<K: Observe>(pve: &Pve, id: Vmid) -> Result<bool> {
+    Ok(K::list(pve)?.iter().any(|entry| entry.id == id))
+}
+
+pub fn tags<K: Observe>(pve: &Pve, id: Vmid) -> Result<Option<String>> {
+    Ok(K::tags_of(&K::config(pve, id)?).map(str::to_string))
+}
+
+fn inventory<K: Observe>(
+    listed: Vec<Listed<K::Listing>>,
+    config: impl Fn(Vmid) -> Result<K::Config> + Sync,
+) -> Result<HashMap<String, Deployed<K::Extra>>> {
+    Ok(K::candidates(listed)
         .into_par_iter()
-        .map(|(_name, vm)| -> Result<Option<(String, DeployedVM)>> {
-            let config = qm_config(vm.vm_id)?;
-            let parsed = parse_qm_config(&config)?;
-            if !is_proxnix_managed(parsed.tags.as_deref()) {
-                return Ok(None);
-            }
-            let nix_hash = nix_hash_from_tags(parsed.tags.as_deref());
-            let active_slot = slot_from_tags(parsed.tags.as_deref());
-            let service_ip = service_ip_from_tags(parsed.tags.as_deref());
-            Ok(Some((
-                vm.vm_name.clone(),
-                DeployedVM {
-                    vm_id: vm.vm_id,
-                    vm_name: vm.vm_name,
-                    nix_hash,
-                    template_id: vm.template_id,
-                    mem_mb: vm.mem_mb,
-                    bootdisk_gb: vm.bootdisk_gb,
-                    status: vm.status,
-                    pid: vm.pid,
-                    cores: u16::from(parsed.cores),
-                    sockets: parsed.sockets,
-                    active_slot,
-                    service_ip,
-                },
-            )))
-        })
-        .collect::<Result<Vec<Option<_>>>>()?
+        .map(|entry| inspect::<K>(entry, &config))
+        .collect::<Result<Vec<_>>>()?
         .into_iter()
         .flatten()
-        .collect();
-    Ok(DeployedState {
-        vms: deployedvms,
-        containers,
-    })
+        .map(|deployed| (deployed.name.clone(), deployed))
+        .collect())
 }
 
-pub fn list_to_deployed_vm(qmlists: Vec<QMList>) -> DeployedState {
-    let lists = qmlists
-        .into_iter()
-        .map(|qmlist| -> (String, DeployedVM) {
-            (
-                qmlist.name.clone(),
-                DeployedVM {
-                    vm_id: qmlist.vm_id,
-                    vm_name: qmlist.name.clone(),
-                    nix_hash: None,
-                    template_id: None,
-                    mem_mb: qmlist.mem_mb,
-                    bootdisk_gb: qmlist.bootdisk_gb,
-                    status: qmlist.status,
-                    pid: qmlist.pid,
-                    cores: 0,   //placeholder
-                    sockets: 0, //placeholder
-                    active_slot: Slot::Blue,
-                    service_ip: None,
-                },
-            )
+fn inspect<K: Observe>(
+    entry: Listed<K::Listing>,
+    config: &(impl Fn(Vmid) -> Result<K::Config> + Sync),
+) -> Result<Option<Deployed<K::Extra>>> {
+    let Listed { id, name, status, tags, extra } = entry;
+    if is_proxnix_managed(tags.as_deref()) {
+        K::decode(id, extra, config(id)?).map(|(resources, extra)| {
+            Some(Deployed {
+                id,
+                name,
+                status,
+                nix_hash: nix_hash_from_tags(tags.as_deref()),
+                active_slot: slot_from_tags(tags.as_deref()),
+                service_ip: service_ip_from_tags(tags.as_deref()),
+                resources,
+                extra,
+            })
         })
-        .collect();
-
-    DeployedState {
-        vms: lists,
-        containers: HashMap::new(),
+    } else {
+        Ok(None)
     }
 }
 
-pub(crate) struct PctListEntry {
-    ct_id: u32,
-    status: String,
-    ct_name: String,
-}
-
-#[derive(Deserialize)]
-struct PctConfigData {
-    hostname: String,
-    memory_mb: u32,
-    cores: u16,
-    rootfs_gb: f64,
-    tags: Option<String>,
-    unprivileged: bool,
-    bind_mounts: Vec<BindMount>,
-}
-
-pub fn parse_pct_list(output: &str) -> Result<Vec<PctListEntry>> {
-    output
-        .lines()
-        .skip(1)
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 3 {
-                return Err(AppError::ParsingModuleError(format!(
-                    "pct list line has fewer columns than expected: '{line}'"
-                )));
-            }
-            Ok(PctListEntry {
-                ct_id: parts[0].parse()?,
-                status: parts[1].to_string(),
-                ct_name: parts.last().unwrap().to_string(),
-            })
-        })
-        .collect()
-}
-
-fn parse_pct_config(output: String) -> Result<PctConfigData> {
-    let fields: BTreeMap<&str, &str> = output
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(k, v)| (k, v.trim()))
-        .collect();
-
-    let get = |key: &str| {
-        fields
-            .get(key)
-            .copied()
-            .ok_or_else(|| AppError::ProxmoxError(format!("pct config is missing `{key}`")))
-    };
-
-    let bind_mounts = fields
+fn agent_ipv4(result: &serde_json::Value) -> Option<Ipv4Addr> {
+    result
+        .as_array()?
         .iter()
-        .filter(|(k, _)| {
-            k.strip_prefix("mp")
-                .is_some_and(|n| n.parse::<u8>().is_ok())
-        })
-        .map(|(_, v)| parse_mount(v))
-        .collect::<Result<Vec<_>>>()?;
+        .filter(|iface| iface["name"] != "lo")
+        .find_map(|iface| {
+            iface["ip-addresses"]
+                .as_array()?
+                .iter()
+                .find(|addr| addr["ip-address-type"] == "ipv4")
+                .and_then(|addr| addr["ip-address"].as_str())
+        })?
+        .parse()
+        .ok()
+}
 
-    Ok(PctConfigData {
-        hostname: get("hostname")?.to_string(),
-        memory_mb: get("memory")?.parse()?,
-        cores: get("cores")?.parse()?,
-        rootfs_gb: rootfs_size_gb(get("rootfs")?)?,
-        tags: fields.get("tags").map(std::string::ToString::to_string),
-        unprivileged: match fields.get("unprivileged").copied() {
-            Some("1") => true,
-            None | Some("0") => false,
-            Some(other) => {
-                return Err(AppError::ProxmoxError(format!(
-                    "pct config has unexpected unprivileged value `{other}`"
-                )));
-            }
-        },
-        bind_mounts,
-    })
+fn cidr_ipv4(inet: &str) -> Option<Ipv4Addr> {
+    inet.split('/').next()?.parse().ok()
 }
 
 fn parse_mount(value: &str) -> Result<BindMount> {
@@ -379,156 +404,10 @@ fn rootfs_size_gb(rootfs: &str) -> Result<f64> {
     }
 }
 
-// fn parse_pct_config(output: &str) -> Result<PctConfigData> {
-//     let mut hostname = String::new();
-//     let mut memory_mb = 0u32;
-//     let mut cores = 0u16;
-//     let mut rootfs_gb = 0.0f64;
-//     let mut tags: Option<String> = None;
-//     let mut unprivileged = false;
-//     let mut bind_mounts: Vec<BindMount> = Vec::new();
-
-//     for line in output.lines() {
-//         if let Some((key, value)) = line.split_once(':') {
-//             let key = key.trim();
-//             let value = value.trim();
-//             match key {
-//                 "hostname" => hostname = value.to_string(),
-//                 "memory" => memory_mb = value.parse()?,
-//                 "cores" => cores = value.parse()?,
-//                 "unprivileged" => unprivileged = value.trim() == "1",
-//                 "rootfs" => {
-//                     // Format: "local-lvm:vm-200-disk-0,size=8G"
-//                     if let Some(size_part) =
-//                         value.split(',').find(|s| s.trim().starts_with("size="))
-//                     {
-//                         let size_str = size_part.trim().trim_start_matches("size=");
-//                         if let Some(gb) = size_str.strip_suffix('G') {
-//                             rootfs_gb = gb.parse().unwrap_or(0.0);
-//                         } else if let Some(mb) = size_str.strip_suffix('M') {
-//                             rootfs_gb = mb.parse::<f64>().unwrap_or(0.0) / 1024.0;
-//                         }
-//                     }
-//                 }
-//                 "tags" => tags = Some(value.to_string()),
-//                 k if k.starts_with("mp") && k[2..].parse::<u32>().is_ok() => {
-//                     // Format: "/host/path,mp=/container/path"
-//                     let parts: Vec<&str> = value.split(',').collect();
-//                     if let (Some(host_path), Some(mp_part)) = (
-//                         parts.first(),
-//                         parts.iter().find(|p| p.trim().starts_with("mp=")),
-//                     ) {
-//                         let container_path = mp_part.trim().trim_start_matches("mp=");
-//                         bind_mounts.push(BindMount {
-//                             host_path: host_path.to_string(),
-//                             container_path: container_path.to_string(),
-//                             mode: match value.contains("ro=1") {
-//                                 true => MountMode::ReadOnly,
-//                                 false => MountMode::ReadWrite,
-//                             },
-//                         });
-//                     }
-//                 }
-//                 _ => {}
-//             }
-//         }
-//     }
-
-//     Ok(PctConfigData {
-//         hostname,
-//         memory_mb,
-//         cores,
-//         rootfs_gb,
-//         tags,
-//         unprivileged,
-//         bind_mounts,
-//     })
-// }
-
-pub fn enrich_container_info(
-    entries: Vec<PctListEntry>,
-) -> Result<HashMap<String, DeployedContainer>> {
-    let result = entries
-        .into_par_iter()
-        .map(|entry| -> Result<Option<(String, DeployedContainer)>> {
-            let config_raw = pct_config(entry.ct_id)?;
-            let config = parse_pct_config(config_raw)?;
-            if !is_proxnix_managed(config.tags.as_deref()) {
-                return Ok(None);
-            }
-            let nix_hash = nix_hash_from_tags(config.tags.as_deref());
-            let active_slot = slot_from_tags(config.tags.as_deref());
-            let service_ip = service_ip_from_tags(config.tags.as_deref());
-            Ok(Some((
-                entry.ct_name.clone(),
-                DeployedContainer {
-                    ct_id: entry.ct_id,
-                    ct_name: entry.ct_name,
-                    nix_hash,
-                    mem_mb: config.memory_mb,
-                    bootdisk_gb: config.rootfs_gb,
-                    status: entry.status,
-                    cores: config.cores,
-                    bind_mounts: config.bind_mounts,
-                    privileged: !config.unprivileged,
-                    active_slot,
-                    service_ip,
-                },
-            )))
-        })
-        .collect::<Result<Vec<Option<_>>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    Ok(result)
-}
-
-pub(crate) fn container_exists(ct_id: u32) -> Result<bool> {
-    pct_list().and_then(|raw| {
-        parse_pct_list(&raw).map(|containers| {
-            containers
-                .into_iter()
-                .any(|container| container.ct_id == ct_id)
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-
-    pub fn test_parse_qm_list() {
-        let sample = "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID
-       100 master               stopped    8000              52.00 0
-       101 plextemp             running    12000             52.00 1476084
-       102 master               stopped    1200              60.00 0
-       103 k3s-warm             stopped    1200              60.00 0
-       104 controltemp          stopped    1200              60.00 0
-       105 eos                  stopped    4000              50.00 0
-       106 proxmox-staging      running    4000             100.00 160968
-       201 k3s-cp-01            running    10240             60.00 1811557
-       202 k3s-cp-02            running    10240             60.00 29387
-       203 k3s-cp-03            running    10240             60.00 29688
-       204 k3s-wrk-fat-01       running    32768             64.00 29513
-       205 k3s-wrk-fat-02       running    32768             64.00 1163752
-       206 k3s-wrk-01           running    15360             60.00 29816
-       207 k3s-wrk-02           running    15360             60.00 29727
-       300 discord-bot-guest    stopped    4000               4.00 0
-       700 nixos-test           running    4048              24.41 87587
-       802 k3s-init             running    4096               3.91 1206131
-       810 nix-worker           stopped    4096               3.91 0
-       811 nix-control          stopped    4096               3.91 0
-       900 Copy-of-VM-k3s-warm  running    6000              60.00 89806
-      9000 ubuntu-template      stopped    1024              20.00 0
-      9005 nixos-template       stopped    4096               3.91 0
-      9006 nixos-template       stopped    4096               3.91 0
-      9010 clean-ubuntu         stopped    1024               2.20 0";
-
-        let result = parse_qm_list(sample);
-        println!("{:#?}", result)
-    }
+    use serde_json::json;
 
     use crate::context::Tags;
     use std::net::Ipv4Addr;
@@ -567,8 +446,8 @@ mod tests {
         let parsed = parse_config(NIX_EVAL_SAMPLE).expect("nix eval output should parse");
 
         let vm = &parsed.vms["test-website"];
-        assert_eq!(vm.blue_id, 823);
-        assert_eq!(vm.green_id, 923);
+        assert_eq!(vm.blue_id, Vmid::new(823));
+        assert_eq!(vm.green_id, Vmid::new(923));
         assert_eq!(vm.service_address, Some(Ipv4Addr::new(192, 168, 1, 23)));
         assert_eq!(vm.backend_port, 80);
         assert_eq!(vm.dhcp_timeout_seconds, 240);
@@ -680,5 +559,267 @@ mod tests {
                 .as_str(),
             "abc123"
         );
+    }
+
+    const MANAGED: &str = "proxnix;nix-abc123;commit-x;slot-green;ip-10.0.0.7";
+
+    fn listed<X>(id: u32, name: &str, tags: Option<&str>, extra: X) -> Listed<X> {
+        Listed {
+            id: Vmid::new(id),
+            name: name.to_string(),
+            status: GuestStatus::Running,
+            tags: tags.map(str::to_string),
+            extra,
+        }
+    }
+
+    fn decoded<T: serde::de::DeserializeOwned>(json: &serde_json::Value) -> T {
+        serde_json::from_str(&json.to_string()).unwrap()
+    }
+
+    fn qemu_config(json: &serde_json::Value) -> qemu::vmid::config::GetOutput {
+        decoded(json)
+    }
+
+    fn lxc_config(json: &serde_json::Value) -> lxc::vmid::config::GetOutput {
+        decoded(json)
+    }
+
+    fn web_vm() -> Listed<QemuListing> {
+        listed(823, "web", Some(MANAGED), QemuListing { memory_mb: 2048, disk_gb: 10.0 })
+    }
+
+    fn never_read<T>(id: Vmid) -> Result<T> {
+        panic!("the config of {id} must not be read")
+    }
+
+    #[test]
+    fn an_unmanaged_guest_is_skipped_before_its_config_is_read() {
+        let found = inventory::<Qemu>(
+            vec![listed(900, "windows", Some("gaming"), QemuListing { memory_mb: 8192, disk_gb: 64.0 })],
+            never_read,
+        )
+        .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_ballooned_vm_config_decodes() {
+        let found = inventory::<Qemu>(vec![web_vm()], |_| {
+            Ok(qemu_config(&json!({
+                "digest": "0123", "balloon": 1024, "cores": 2, "sockets": 1,
+                "memory": "2048", "tags": MANAGED
+            })))
+        })
+        .unwrap();
+        assert_eq!(
+            found["web"],
+            Deployed {
+                id: Vmid::new(823),
+                name: "web".to_string(),
+                status: GuestStatus::Running,
+                nix_hash: Some(NixHash::try_from("abc123").unwrap()),
+                active_slot: Slot::Green,
+                service_ip: Some(Ipv4Addr::new(10, 0, 0, 7)),
+                resources: Resources { memory_mb: 2048, disk_gb: 10.0, cores: 2 },
+                extra: QemuExtra { sockets: 1 },
+            }
+        );
+    }
+
+    #[test]
+    fn vms_are_narrowed_by_name_before_ownership_is_checked() {
+        let found = inventory::<Qemu>(
+            vec![web_vm(), listed(900, "web", None, QemuListing { memory_mb: 2048, disk_gb: 10.0 })],
+            never_read,
+        )
+        .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn containers_are_checked_for_ownership_before_being_keyed_by_name() {
+        let found = inventory::<Lxc>(
+            vec![listed(833, "pihole", Some(MANAGED), ()), listed(900, "pihole", None, ())],
+            |id| {
+                assert_eq!(id, Vmid::new(833));
+                Ok(lxc_config(&json!({
+                    "digest": "0123", "memory": 1024, "cores": 2,
+                    "rootfs": "local-lvm:vm-833-disk-0,size=8G", "unprivileged": 1,
+                    "mp0": "/srv/pihole,mp=/etc/pihole,ro=1", "tags": MANAGED
+                })))
+            },
+        )
+        .unwrap();
+        assert_eq!(found["pihole"].id, Vmid::new(833));
+        assert_eq!(
+            found["pihole"].extra,
+            LxcExtra {
+                privileged: false,
+                bind_mounts: vec![BindMount {
+                    host_path: "/srv/pihole".to_string(),
+                    container_path: "/etc/pihole".to_string(),
+                    mode: MountMode::ReadOnly,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn a_managed_container_missing_its_memory_fails_the_inventory() {
+        assert!(
+            inventory::<Lxc>(vec![listed(833, "pihole", Some(MANAGED), ())], |_| {
+                Ok(lxc_config(&json!({ "digest": "0123", "cores": 2, "rootfs": "x:y,size=8G" })))
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_failed_config_read_fails_the_whole_inventory() {
+        assert!(
+            inventory::<Lxc>(vec![listed(833, "pihole", Some(MANAGED), ())], |_| {
+                Err(AppError::ProxmoxError("unreachable".to_string()))
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn list_items_are_read_in_the_units_qm_list_reported() {
+        let items: Vec<qemu::GetOutputItems> = decoded(&json!([{
+            "vmid": 823, "name": "web", "status": "running", "tags": MANAGED,
+            "maxmem": 2_147_483_648_i64, "maxdisk": 10_737_418_240_i64
+        }]));
+        assert_eq!(
+            items.into_iter().map(listed_qemu).collect::<Result<Vec<_>>>().unwrap(),
+            vec![web_vm()]
+        );
+    }
+
+    #[test]
+    fn a_stopped_container_keeps_the_reported_status() {
+        let items: Vec<lxc::GetOutputItems> =
+            decoded(&json!([{ "vmid": 833, "name": "pihole", "status": "stopped" }]));
+        assert_eq!(
+            items.into_iter().map(listed_lxc).collect::<Result<Vec<_>>>().unwrap(),
+            vec![Listed {
+                id: Vmid::new(833),
+                name: "pihole".to_string(),
+                status: GuestStatus::from("stopped"),
+                tags: None,
+                extra: (),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_first_non_loopback_ipv4_is_the_vm_address() {
+        let result = json!([
+            {"name":"lo","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"127.0.0.1"}]},
+            {"name":"eth0","ip-addresses":[
+                {"ip-address-type":"ipv6","ip-address":"fe80::1"},
+                {"ip-address-type":"ipv4","ip-address":"10.0.0.9"}
+            ]}
+        ]);
+        assert_eq!(agent_ipv4(&result), Some(Ipv4Addr::new(10, 0, 0, 9)));
+        assert_eq!(agent_ipv4(&json!("not a list")), None);
+    }
+
+    #[test]
+    fn a_container_address_drops_its_prefix_length() {
+        assert_eq!(cidr_ipv4("10.0.0.12/24"), Some(Ipv4Addr::new(10, 0, 0, 12)));
+        assert_eq!(cidr_ipv4("fe80::1/64"), None);
+    }
+
+    fn fixture<T: serde::de::DeserializeOwned>(path: &str) -> Option<T> {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/api")
+                .join(path),
+        )
+        .ok()
+        .map(|text| serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path} does not decode: {e}")))
+    }
+
+    fn managed_ids<X>(listed: &[Listed<X>]) -> Vec<Vmid> {
+        listed
+            .iter()
+            .filter(|entry| is_proxnix_managed(entry.tags.as_deref()))
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    #[test]
+    fn captured_qemu_responses_decode() {
+        let listed: Vec<Listed<QemuListing>> = fixture::<Vec<qemu::GetOutputItems>>("qemu.json")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| listed_qemu(item).unwrap())
+            .collect();
+        for id in managed_ids(&listed) {
+            let config: Option<qemu::vmid::config::GetOutput> = fixture(&format!("qemu/{id}/config.json"));
+            let listing = QemuListing { memory_mb: 0, disk_gb: 0.0 };
+            if let Some(config) = config {
+                assert!(Qemu::decode(id, listing, config).is_ok(), "config of {id} is unusable");
+            }
+            let agent: Option<qemu::vmid::agent::network_get_interfaces::GetOutput> =
+                fixture(&format!("qemu/{id}/agent/network-get-interfaces.json"));
+            if let Some(agent) = agent {
+                assert!(agent.additional_properties.get("result").and_then(agent_ipv4).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn captured_lxc_responses_decode() {
+        let listed: Vec<Listed<()>> = fixture::<Vec<lxc::GetOutputItems>>("lxc.json")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| listed_lxc(item).unwrap())
+            .collect();
+        for id in managed_ids(&listed) {
+            let config: Option<lxc::vmid::config::GetOutput> = fixture(&format!("lxc/{id}/config.json"));
+            if let Some(config) = config {
+                assert!(Lxc::decode(id, (), config).is_ok(), "config of {id} is unusable");
+            }
+            let interfaces: Option<Vec<lxc::vmid::interfaces::GetOutputItems>> =
+                fixture(&format!("lxc/{id}/interfaces.json"));
+            if let Some(interfaces) = interfaces {
+                assert!(
+                    interfaces
+                        .iter()
+                        .filter(|iface| iface.name != "lo")
+                        .any(|iface| iface.inet.as_deref().and_then(cidr_ipv4).is_some())
+                );
+            }
+        }
+    }
+
+    const NIXOLOGY_APPCONFIG: &str = r#"{"backend_pool":null,"guest_check":{"command":"/run/current-system/sw/bin/proxnix-health-check","shell":"/run/current-system/sw/bin/bash"},"local_repo":null,"proxmox":{"ca_file":"/etc/pve/pve-root-ca.pem","node":"pve01","realm":"pve","token_file":"/run/secrets/proxnix/api_token","token_id":"proxnix","url":"https://localhost:8006","user":"proxnix"},"repo_cache":"/tmp/proxnix/repos","server_address":"0.0.0.0:6780","sozu":{"http_port":80,"listen_ip":"0.0.0.0","socket_path":"/run/sozu/command.sock"},"ssh_key_candidates":["/root/.ssh/id_ed25519","/root/.ssh/id_ecdsa","/root/.ssh/id_rsa"],"template_cache_path":"/var/lib/vz/template/cache/","timings_ms":{"arp_probe":2000,"guest_check_poll":3000,"guest_check_run":60000,"nix_build":3600000,"nix_eval":300000,"periodic_reconcile":120000,"provision_stagger":150,"sozu_tcp_idle":3600000,"webhook_lock_wait":600000},"unprivileged_idmap":{"count":65536,"host_base":100000},"zfs_images":{"images":"ZFS/proxnix-images","pool":"ZFS","storage":"ZFS"}}"#;
+
+    #[test]
+    fn nixology_appconfig_points_the_api_client_at_the_decrypted_token() {
+        let config = parse_appconfig(NIXOLOGY_APPCONFIG).unwrap();
+        assert_eq!(config.proxmox.node, "pve01");
+        assert_eq!(config.proxmox.token_file, std::path::PathBuf::from("/run/secrets/proxnix/api_token"));
+        assert_eq!(config.proxmox.ca_file, std::path::PathBuf::from("/etc/pve/pve-root-ca.pem"));
+    }
+
+    #[test]
+    fn nixology_supplies_every_setting_in_its_own_units() {
+        let config = parse_appconfig(NIXOLOGY_APPCONFIG).unwrap();
+        assert_eq!(config.timings_ms.get(crate::types::Timing::ProvisionStagger), std::time::Duration::from_millis(150));
+        assert_eq!(config.timings_ms.get(crate::types::Timing::NixBuild), std::time::Duration::from_secs(3600));
+        assert_eq!(config.sozu.http_port, 80);
+        assert_eq!(config.unprivileged_idmap, crate::types::IdRange { host_base: 100_000, count: 65_536 });
+        assert_eq!(config.guest_check.command, "/run/current-system/sw/bin/proxnix-health-check");
+    }
+
+    #[test]
+    fn a_config_missing_a_timing_is_rejected_when_read() {
+        let partial = NIXOLOGY_APPCONFIG.replace("\"nix_build\":3600000,", "");
+        assert_ne!(partial, NIXOLOGY_APPCONFIG);
+        assert!(parse_appconfig(&partial).is_err());
     }
 }

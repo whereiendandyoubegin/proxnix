@@ -1,40 +1,31 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
-use proxnix_core::{Slot, SlotId, Workload};
+use proxmox_api::nodes::node::{lxc, qemu};
+use proxnix_core::{GuestStatus, Slot, SlotId, Vmid, Workload};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::{
-    context::{BackendId, BackendPool, ImageStore, NixHash, ReconcileContext, SozuSocketPath, StorePath, Tags},
+    api::{Cli, Execute, GuestOp, Kind, Lxc, Qemu},
+    context::{BackendId, BackendPool, ImageStore, ImageType, NixHash, ReconcileContext, StorePath, Tags},
     materialise::Materialise,
-    pct::{ExecOutcome, pct_destroy, pct_exec, pct_list, pct_set_protection, pct_set_resources, pct_set_tags, pct_start, pct_stop},
-    qm::{qm_destroy, qm_get_running_ip, qm_set_protection, qm_set_resources, qm_set_tags, qm_start, qm_stop},
+    probe::Probe,
+    pve::Pve,
     sozu::{Proxied, Pruned, Settled, SozuClient},
-    state::{
-        container_exists, container_tags, enrich_container_info, enrich_cpu_info,
-        is_proxnix_managed, list_to_deployed_vm, parse_pct_list, parse_qm_list, qm_list, vm_exists,
-        vm_tags,
-    },
+    state::{self, Deployed, Observe, is_proxnix_managed},
     types::{
-        AppError, ContainerConfig, ContainerFieldChange, DeployedContainer, DeployedVM,
-        FieldChange, Outcome, OutcomeKind, Result, SkipReason, VMConfig,
+        AppConfig, AppError, ContainerConfig, FieldChange, Outcome, OutcomeKind, Result, SkipReason, Timing,
+        VMConfig,
     },
 };
 
-const GUEST_SHELL: &str = "/run/current-system/sw/bin/bash";
-const GUEST_CHECK: &str = "/run/current-system/sw/bin/proxnix-health-check";
-const GUEST_CHECK_POLL: Duration = Duration::from_secs(3);
-const GUEST_CHECK_RUN_TIMEOUT: Duration = Duration::from_secs(60);
-const PROVISION_STAGGER: Duration = Duration::from_millis(150);
-
 static PROVISION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn guest_check_script() -> String {
-    format!("if [ -x {GUEST_CHECK} ]; then exec {GUEST_CHECK}; fi")
-}
+pub type DeployedOf<T> = Deployed<<<T as Deployments>::Kind as Observe>::Extra>;
 
 enum Phase {
     Initial,
@@ -50,89 +41,83 @@ enum TargetState {
     Unmanaged,
 }
 
+struct Retiring {
+    slot_id: SlotId,
+    backend_id: Option<BackendId>,
+    ip: Option<Ipv4Addr>,
+}
+
 pub struct DeployContext<'a, T: Deployments> {
     config: &'a T,
     new_slot: Slot,
-    old_backend_id: Option<BackendId>,
-    old_ip: Option<Ipv4Addr>,
-    old_slot_id: Option<SlotId>,
+    retiring: Option<Retiring>,
     sozu: SozuClient,
     artifact: StorePath,
     tags: Tags,
     image_store: ImageStore<'a>,
     backend_pool: Option<&'a BackendPool>,
+    pve: &'a Pve,
+    settings: &'a AppConfig,
     phase: Phase,
 }
 
 impl<'a, T: Deployments> DeployContext<'a, T> {
-    fn from_create(
-        config: &'a T,
-        artifact: StorePath,
-        commit_hash: &'a str,
-        image_store: ImageStore<'a>,
-        sozu_socket_path: &str,
-        backend_pool: Option<&'a BackendPool>,
-    ) -> Result<Self> {
+    fn from_create(config: &'a T, artifact: StorePath, ctx: &ReconcileContext<'a>) -> Result<Self> {
         let new_slot = Slot::Blue;
-        let tags = Tags::new(nix_hash_of(&artifact)?, commit_hash, new_slot);
-        let sozu = SozuClient::connect(sozu_socket_path)?;
-        Ok(Self {
-            config,
-            new_slot,
-            old_backend_id: None,
-            old_ip: None,
-            old_slot_id: None,
-            sozu,
-            artifact,
-            tags,
-            image_store,
-            backend_pool,
-            phase: Phase::Initial,
-        })
+        let tags = Tags::new(nix_hash_of(&artifact)?, ctx.commit_hash.as_str(), new_slot);
+        Self::connect(config, new_slot, None, artifact, tags, ctx)
     }
 
     fn from_rebuild(
         config: &'a T,
-        deployed: &T::Deployed,
-        deployed_id: u32,
+        deployed: &DeployedOf<T>,
         artifact: StorePath,
-        commit_hash: &'a str,
-        image_store: ImageStore<'a>,
-        sozu_socket_path: &str,
-        backend_pool: Option<&'a BackendPool>,
+        ctx: &ReconcileContext<'a>,
     ) -> Result<Self> {
-        let deployed_slot = deployed.active_slot();
-        let new_slot = deployed_slot.switch_slot();
-        let tags = Tags::new(nix_hash_of(&artifact)?, commit_hash, new_slot);
-        let old_backend_id = deployed
-            .nix_hash()
-            .map(|h| BackendId::new(config.name(), h));
-        let old_ip = match deployed.service_ip() {
-            Some(ip) => Some(ip),
-            None => if let Some(ip) = T::get_ip(deployed_id).ok().and_then(|raw| raw.trim().parse().ok()) { Some(ip) } else {
-                warn!(
-                    "{} has no recorded service ip and its address could not be read; its backend cannot be deregistered by address",
-                    config.name()
-                );
-                None
+        let new_slot = deployed.active_slot.switch_slot();
+        let tags = Tags::new(nix_hash_of(&artifact)?, ctx.commit_hash.as_str(), new_slot);
+        let retiring = Retiring {
+            slot_id: match deployed.active_slot {
+                Slot::Blue => SlotId::Blue(deployed.id),
+                Slot::Green => SlotId::Green(deployed.id),
             },
+            backend_id: deployed
+                .nix_hash
+                .as_ref()
+                .map(|h| BackendId::new(config.name(), h)),
+            ip: deployed.service_ip.or_else(|| {
+                let read = <T::Kind as Observe>::address(ctx.pve, deployed.id).ok();
+                if read.is_none() {
+                    warn!(
+                        "{} has no recorded service ip and its address could not be read; its backend cannot be deregistered by address",
+                        config.name()
+                    );
+                }
+                read
+            }),
         };
-        let old_slot_id = match deployed_slot {
-            Slot::Blue => SlotId::Blue(deployed_id),
-            Slot::Green => SlotId::Green(deployed_id),
-        };
-        let sozu = SozuClient::connect(sozu_socket_path)?;
+        Self::connect(config, new_slot, Some(retiring), artifact, tags, ctx)
+    }
+
+    fn connect(
+        config: &'a T,
+        new_slot: Slot,
+        retiring: Option<Retiring>,
+        artifact: StorePath,
+        tags: Tags,
+        ctx: &ReconcileContext<'a>,
+    ) -> Result<Self> {
         Ok(Self {
             config,
             new_slot,
-            old_backend_id,
-            old_ip,
-            old_slot_id: Some(old_slot_id),
-            sozu,
+            retiring,
+            sozu: SozuClient::connect(ctx.settings)?,
             artifact,
             tags,
-            image_store,
-            backend_pool,
+            image_store: ctx.image_store,
+            backend_pool: ctx.backend_pool,
+            pve: ctx.pve,
+            settings: ctx.settings,
             phase: Phase::Initial,
         })
     }
@@ -140,7 +125,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     fn provision_inactive(self) -> Result<Self> {
         let target = self.config.id_for_slot(self.new_slot);
         let new_backend_id = BackendId::new(self.config.name(), &self.tags.nix_hash);
-        prepare_target::<T>(self.config.name(), target)?;
+        prepare_target::<T>(self.pve, self.config.name(), target)?;
         info!(
             "[{}] provisioning {:?} as {} (inactive, not started)",
             self.config.name(),
@@ -163,52 +148,50 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
     }
 
     fn start_and_check(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, sozu, artifact, tags, image_store, backend_pool } = self;
-        let (target, new_backend_id) = match phase {
-            Phase::Provisioned { target, new_backend_id } => (target, new_backend_id),
-            _ => unreachable!("start_and_check called outside Provisioned phase"),
+        let Phase::Provisioned { target, new_backend_id } = &self.phase else {
+            unreachable!("start_and_check called outside Provisioned phase")
         };
+        let (target, new_backend_id) = (*target, new_backend_id.clone());
+        let config = self.config;
         info!("[{}] starting {}", config.name(), target.inner());
-        T::start(target.inner())?;
-        let new_ip = await_ip::<T>(config, target.inner())?;
+        Cli.run(&GuestOp::<T::Kind>::start(target.inner()))?;
+        let new_ip = await_ip::<T>(self.pve, config, target.inner())?;
         info!("[{}] {} came up at {}", config.name(), target.inner(), new_ip);
-        match backend_pool {
+        match self.backend_pool {
             Some(pool) if !pool.contains(new_ip) => warn!(
                 "{} came up on {}, which is outside the declared backend pool {}-{}; the pool declaration and the dhcp scope disagree",
                 config.name(), new_ip, pool.start, pool.end
             ),
             _ => {}
         }
-        let tags = tags.with_service_ip(new_ip);
-        T::set_tags(target.inner(), &tags)?;
+        let tags = self.tags.with_service_ip(new_ip);
+        Cli.run(&GuestOp::<T::Kind>::tags(target.inner(), &tags))?;
         config.post_check()?;
         let addr = SocketAddr::from((new_ip, config.backend_port()));
         info!("[{}] health checking {}", config.name(), addr);
         config.health_check(addr)?;
         info!("[{}] port {} is open, running the guest health check", config.name(), addr);
-        T::guest_check(config.name(), target.inner(), config.health_check_timeout())?;
+        <T::Kind as Probe>::guest_check(
+            config.name(),
+            target.inner(),
+            config.health_check_timeout(),
+            &self.settings.guest_check,
+            &self.settings.timings_ms,
+        )?;
         info!("[{}] healthy at {}", config.name(), addr);
         Ok(Self {
-            config,
-            new_slot,
-            old_backend_id,
-            old_ip,
-            old_slot_id,
-            sozu,
-            artifact,
             tags,
-            image_store,
-            backend_pool,
             phase: Phase::Healthy { new_backend_id, new_ip },
+            ..self
         })
     }
 
-    fn register_and_switch(self) -> Result<Self> {
-        let Self { phase, config, new_slot, old_backend_id, old_ip, old_slot_id, mut sozu, artifact, tags, image_store, backend_pool } = self;
-        let (new_backend_id, new_ip) = match phase {
-            Phase::Healthy { new_backend_id, new_ip, .. } => (new_backend_id, new_ip),
-            _ => unreachable!("register_and_switch called outside Healthy phase"),
+    fn register_and_switch(mut self) -> Result<Self> {
+        let Phase::Healthy { new_backend_id, new_ip } = &self.phase else {
+            unreachable!("register_and_switch called outside Healthy phase")
         };
+        let (new_backend_id, new_ip) = (new_backend_id.clone(), *new_ip);
+        let config = self.config;
         if !config.tcp_ports().is_empty() {
             info!(
                 "[{}] forwarding tcp ports {:?} to {}",
@@ -216,63 +199,13 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
                 config.tcp_ports(),
                 new_ip
             );
-            sozu.register_tcp_backends(config, &new_backend_id, new_ip)?;
+            self.sozu.register_tcp_backends(config, &new_backend_id, new_ip)?;
         }
-        let switched = (|| -> Result<()> {
-        match config.service_address() {
-            None => info!(
-                "{} has no service address, leaving it unproxied",
-                config.name()
-            ),
-            Some(service) => {
-                info!(
-                    "[{}] cutting traffic over: {} -> {} (service address {})",
-                    config.name(),
-                    old_ip.map_or_else(|| "nothing".to_string(), |i| i.to_string()),
-                    new_ip,
-                    service
-                );
-                sozu.ensure_cluster(config)?;
-                sozu.register_backend(config, &new_backend_id, new_ip)?;
-                match sozu.prune_backends(config, new_ip) {
-                    Ok(Pruned { removed: 0, failed: 0 }) => {}
-                    Ok(pruned) => info!(
-                        "[{}] dropped {} stale backends ({} could not be dropped)",
-                        config.name(), pruned.removed, pruned.failed
-                    ),
-                    Err(e) => warn!(
-                        "[{}] could not check for stale backends, traffic may still reach a retired instance: {}",
-                        config.name(), e
-                    ),
-                }
-                if let (Some(old_bid), Some(old_ip_val)) = (old_backend_id.as_ref(), old_ip) {
-                    match sozu.remove_backend(config, old_bid, old_ip_val) {
-                        Ok(()) => {}
-                        Err(e) => {
-                            warn!(
-                                "failed to deregister old backend {}, rolling back new registration: {}",
-                                old_bid, e
-                            );
-                            match sozu.remove_backend(config, &new_backend_id, new_ip) {
-                                Ok(()) => {}
-                                Err(undo) => warn!(
-                                    "could not deregister new backend {}: {}",
-                                    new_backend_id, undo
-                                ),
-                            }
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-        })();
-        if let Err(e) = switched {
-            sozu.remove_tcp_backends(config, &new_backend_id, new_ip);
+        if let Err(e) = cut_over(&mut self.sozu, config, &new_backend_id, new_ip, self.retiring.as_ref()) {
+            self.sozu.remove_tcp_backends(config, &new_backend_id, new_ip);
             return Err(e);
         }
-        match sozu.prune_tcp_backends(config, new_ip) {
+        match self.sozu.prune_tcp_backends(config, new_ip) {
             Ok(Pruned { removed: 0, failed: 0 }) => {}
             Ok(pruned) => info!(
                 "[{}] dropped {} stale tcp backends ({} could not be dropped)",
@@ -284,17 +217,8 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             ),
         }
         Ok(Self {
-            config,
-            new_slot,
-            old_backend_id,
-            old_ip,
-            old_slot_id,
-            sozu,
-            artifact,
-            tags,
-            image_store,
-            backend_pool,
             phase: Phase::BackendRegistered,
+            ..self
         })
     }
 
@@ -302,21 +226,18 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         let Phase::BackendRegistered = self.phase else {
             unreachable!("maybe_destroy_old called outside BackendRegistered phase")
         };
-        match self.old_slot_id {
-            Some(slot_id) => {
-                info!(
-                    "[{}] traffic is on the new instance, retiring {}",
-                    self.config.name(),
-                    slot_id.inner()
-                );
-                T::stop(&slot_id.inner())?;
-                T::destroy(slot_id.inner())
-            }
-            None => Ok(()),
-        }
+        self.retiring.map_or(Ok(()), |old| {
+            info!(
+                "[{}] traffic is on the new instance, retiring {}",
+                self.config.name(),
+                old.slot_id.inner()
+            );
+            Cli.run_all(&GuestOp::<T::Kind>::retire(old.slot_id.inner()))
+        })
     }
 
     pub fn run(self) -> Result<()> {
+        let pve = self.pve;
         self.config.pre_check()?;
         let target = self.config.id_for_slot(self.new_slot);
         let new_hash = self.tags.nix_hash.clone();
@@ -327,7 +248,9 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             new_hash,
             self.new_slot,
             target.inner(),
-            self.old_slot_id.map_or_else(|| "none".to_string(), |s| s.inner().to_string())
+            self.retiring
+                .as_ref()
+                .map_or_else(|| "none".to_string(), |old| old.slot_id.inner().to_string())
         );
 
         let switched = self
@@ -351,11 +274,65 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             }
             Err(e) => {
                 warn!("[{}] deploy failed: {}", name, e);
-                abort::<T>(target);
+                abort::<T>(pve, target);
                 Err(e)
             }
         }
     }
+}
+
+fn cut_over<T: Deployments>(
+    sozu: &mut SozuClient,
+    config: &T,
+    new_backend_id: &BackendId,
+    new_ip: Ipv4Addr,
+    retiring: Option<&Retiring>,
+) -> Result<()> {
+    let old_ip = retiring.and_then(|old| old.ip);
+    match config.service_address() {
+        None => info!(
+            "{} has no service address, leaving it unproxied",
+            config.name()
+        ),
+        Some(service) => {
+            info!(
+                "[{}] cutting traffic over: {} -> {} (service address {})",
+                config.name(),
+                old_ip.map_or_else(|| "nothing".to_string(), |i| i.to_string()),
+                new_ip,
+                service
+            );
+            sozu.ensure_cluster(config)?;
+            sozu.register_backend(config, new_backend_id, new_ip)?;
+            match sozu.prune_backends(config, new_ip) {
+                Ok(Pruned { removed: 0, failed: 0 }) => {}
+                Ok(pruned) => info!(
+                    "[{}] dropped {} stale backends ({} could not be dropped)",
+                    config.name(), pruned.removed, pruned.failed
+                ),
+                Err(e) => warn!(
+                    "[{}] could not check for stale backends, traffic may still reach a retired instance: {}",
+                    config.name(), e
+                ),
+            }
+            if let (Some(old_bid), Some(old_ip_val)) = (retiring.and_then(|old| old.backend_id.as_ref()), old_ip)
+                && let Err(e) = sozu.remove_backend(config, old_bid, old_ip_val)
+            {
+                warn!(
+                    "failed to deregister old backend {}, rolling back new registration: {}",
+                    old_bid, e
+                );
+                if let Err(undo) = sozu.remove_backend(config, new_backend_id, new_ip) {
+                    warn!(
+                        "could not deregister new backend {}: {}",
+                        new_backend_id, undo
+                    );
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn nix_hash_of(artifact: &StorePath) -> Result<NixHash> {
@@ -364,7 +341,7 @@ fn nix_hash_of(artifact: &StorePath) -> Result<NixHash> {
     })
 }
 
-fn await_ip<T: Deployments>(config: &T, id: u32) -> Result<Ipv4Addr> {
+fn await_ip<T: Deployments>(pve: &Pve, config: &T, id: Vmid) -> Result<Ipv4Addr> {
     let timeout = config.dhcp_timeout();
     let started = Instant::now();
     info!(
@@ -376,19 +353,16 @@ fn await_ip<T: Deployments>(config: &T, id: u32) -> Result<Ipv4Addr> {
     (0_u32..)
         .take_while(|_| started.elapsed() < timeout)
         .find_map(|attempt| {
-            if let Some(ip) = T::get_ip(id)
-                .ok()
-                .and_then(|raw| raw.trim().parse::<Ipv4Addr>().ok())
-                .filter(|ip| {
-                    let usable = !ip.is_link_local() && !ip.is_unspecified() && !ip.is_loopback();
-                    if !usable {
-                        warn!(
-                            "[{}] {} self-assigned {}, dhcp has not answered",
-                            config.name(), id, ip
-                        );
-                    }
-                    usable
-                }) { Some(ip) } else {
+            if let Some(ip) = <T::Kind as Observe>::address(pve, id).ok().filter(|ip| {
+                let usable = !ip.is_link_local() && !ip.is_unspecified() && !ip.is_loopback();
+                if !usable {
+                    warn!(
+                        "[{}] {} self-assigned {}, dhcp has not answered",
+                        config.name(), id, ip
+                    );
+                }
+                usable
+            }) { Some(ip) } else {
                 if attempt > 0 && attempt % 5 == 0 {
                     info!(
                         "[{}] still no address on {} after {}s (attempt {}, timeout {}s)",
@@ -424,19 +398,19 @@ impl fmt::Display for RouteGap {
 
 enum Upkeep {
     Undeployed,
-    Start { id: u32, status: String },
+    Start { id: Vmid, status: GuestStatus },
     Unproxied,
     Unroutable { gap: RouteGap },
     Route { backend_id: BackendId, ip: Ipv4Addr },
 }
 
-fn upkeep<T: Deployments>(config: &T, deployed: Option<&T::Deployed>) -> Upkeep {
+fn upkeep<T: Deployments>(config: &T, deployed: Option<&DeployedOf<T>>) -> Upkeep {
     match deployed {
         None => Upkeep::Undeployed,
-        Some(d) => match d.status() {
-            "running" => match (config.service_address(), config.tcp_ports().is_empty()) {
+        Some(d) => match &d.status {
+            GuestStatus::Running => match (config.service_address(), config.tcp_ports().is_empty()) {
                 (None, true) => Upkeep::Unproxied,
-                _ => match (d.service_ip(), d.nix_hash()) {
+                _ => match (d.service_ip, d.nix_hash.as_ref()) {
                     (Some(ip), Some(hash)) => Upkeep::Route {
                         backend_id: BackendId::new(config.name(), hash),
                         ip,
@@ -445,29 +419,29 @@ fn upkeep<T: Deployments>(config: &T, deployed: Option<&T::Deployed>) -> Upkeep 
                     (_, None) => Upkeep::Unroutable { gap: RouteGap::NoNixHash },
                 },
             },
-            status => Upkeep::Start { id: d.id(), status: status.to_string() },
+            GuestStatus::Other(_) => Upkeep::Start { id: d.id, status: d.status.clone() },
         },
     }
 }
 
 fn restore_routes<T: Deployments>(
     routes: &[(&T, &BackendId, Ipv4Addr)],
-    sozu_socket_path: SozuSocketPath<'_>,
+    settings: &AppConfig,
 ) {
     if routes.is_empty() {
         return;
     }
-    let mut sozu = match SozuClient::connect(sozu_socket_path.as_str()) {
+    let mut sozu = match SozuClient::connect(settings) {
         Ok(client) => client,
         Err(e) => {
             warn!("periodic reconcile: could not reach sozu: {}", e);
             return;
         }
     };
-    routes.iter().for_each(|(config, backend_id, ip)| {
+    for (config, backend_id, ip) in routes {
         restore_tcp_routes(&mut sozu, *config, backend_id, *ip);
         if config.service_address().is_none() {
-            return;
+            continue;
         }
         let restored = sozu
             .ensure_cluster(*config)
@@ -500,7 +474,7 @@ fn restore_routes<T: Deployments>(
                 e
             ),
         }
-    });
+    }
 }
 
 fn restore_tcp_routes<T: Deployments>(
@@ -542,8 +516,8 @@ fn restore_tcp_routes<T: Deployments>(
     }
 }
 
-pub fn ensure_running<T: Deployments>(configs: &[T], sozu_socket_path: SozuSocketPath<'_>) {
-    let deployed = match T::load_deployed() {
+pub fn ensure_running<T: Deployments>(configs: &[T], settings: &AppConfig, pve: &Pve) {
+    let deployed = match state::deployed::<T::Kind>(pve) {
         Ok(d) => d,
         Err(e) => {
             warn!("periodic reconcile: could not load deployed state: {}", e);
@@ -556,31 +530,33 @@ pub fn ensure_running<T: Deployments>(configs: &[T], sozu_socket_path: SozuSocke
         .map(|config| (config, upkeep(config, deployed.get(config.name()))))
         .collect();
 
-    plans.iter().for_each(|(config, plan)| match plan {
-        Upkeep::Undeployed => debug!(
-            "periodic reconcile: {} is not deployed, it will be created on the next push",
-            config.name()
-        ),
-        Upkeep::Start { id, status } => {
-            info!(
-                "periodic reconcile: {} (id {}) is {}, starting",
-                config.name(),
-                id,
-                status
-            );
-            match T::start(*id) {
-                Ok(true) => info!("periodic reconcile: started {}", config.name()),
-                Ok(false) => {}
-                Err(e) => warn!("periodic reconcile: could not start {}: {}", config.name(), e),
+    for (config, plan) in &plans {
+        match plan {
+            Upkeep::Undeployed => debug!(
+                "periodic reconcile: {} is not deployed, it will be created on the next push",
+                config.name()
+            ),
+            Upkeep::Start { id, status } => {
+                info!(
+                    "periodic reconcile: {} (id {}) is {}, starting",
+                    config.name(),
+                    id,
+                    status
+                );
+                match Cli.run(&GuestOp::<T::Kind>::start(*id)) {
+                    Ok(Settled::Changed) => info!("periodic reconcile: started {}", config.name()),
+                    Ok(Settled::AlreadyApplied) => {}
+                    Err(e) => warn!("periodic reconcile: could not start {}: {}", config.name(), e),
+                }
             }
+            Upkeep::Unroutable { gap } => warn!(
+                "periodic reconcile: {} is running but cannot be routed because {}",
+                config.name(),
+                gap
+            ),
+            Upkeep::Unproxied | Upkeep::Route { .. } => {}
         }
-        Upkeep::Unroutable { gap } => warn!(
-            "periodic reconcile: {} is running but cannot be routed because {}",
-            config.name(),
-            gap
-        ),
-        Upkeep::Unproxied | Upkeep::Route { .. } => {}
-    });
+    }
 
     let routes: Vec<(&T, &BackendId, Ipv4Addr)> = plans
         .iter()
@@ -590,11 +566,15 @@ pub fn ensure_running<T: Deployments>(configs: &[T], sozu_socket_path: SozuSocke
         })
         .collect();
 
-    restore_routes(&routes, sozu_socket_path);
+    restore_routes(&routes, settings);
 }
 
-fn target_state<T: Deployments>(id: u32) -> Result<TargetState> {
-    if T::exists(id)? { T::tags(id).map(|tags| classify_target(true, tags.as_deref())) } else { Ok(TargetState::Vacant) }
+fn target_state<T: Deployments>(pve: &Pve, id: Vmid) -> Result<TargetState> {
+    if state::exists::<T::Kind>(pve, id)? {
+        state::tags::<T::Kind>(pve, id).map(|tags| classify_target(true, tags.as_deref()))
+    } else {
+        Ok(TargetState::Vacant)
+    }
 }
 
 fn classify_target(exists: bool, tags: Option<&str>) -> TargetState {
@@ -605,22 +585,16 @@ fn classify_target(exists: bool, tags: Option<&str>) -> TargetState {
     }
 }
 
-fn destroy_managed<T: Deployments>(id: u32) -> Result<()> {
-    T::set_protection(id, false)?;
-    T::stop(&id)?;
-    T::destroy(id)
-}
-
-fn prepare_target<T: Deployments>(name: &str, target: SlotId) -> Result<()> {
+fn prepare_target<T: Deployments>(pve: &Pve, name: &str, target: SlotId) -> Result<()> {
     let id = target.inner();
-    match target_state::<T>(id)? {
+    match target_state::<T>(pve, id)? {
         TargetState::Vacant => Ok(()),
         TargetState::Managed => {
             info!(
                 "[{}] reclaiming Proxnix-managed inactive slot {} before provisioning",
                 name, id
             );
-            destroy_managed::<T>(id)
+            Cli.run_all(&GuestOp::<T::Kind>::reclaim(id))
         }
         TargetState::Unmanaged => Err(AppError::CmdError(format!(
             "refusing to replace instance {id} because it is not tagged 'proxnix'"
@@ -628,9 +602,9 @@ fn prepare_target<T: Deployments>(name: &str, target: SlotId) -> Result<()> {
     }
 }
 
-fn abort<T: Deployments>(target: SlotId) {
+fn abort<T: Deployments>(pve: &Pve, target: SlotId) {
     let id = target.inner();
-    match target_state::<T>(id) {
+    match target_state::<T>(pve, id) {
         Ok(TargetState::Vacant) => {}
         Ok(TargetState::Unmanaged) => warn!(
             "abort: refusing to destroy {}, it is not tagged 'proxnix'",
@@ -638,62 +612,11 @@ fn abort<T: Deployments>(target: SlotId) {
         ),
         Ok(TargetState::Managed) => {
             warn!("deploy failed, destroying Proxnix-managed instance {}", id);
-            if let Err(e) = destroy_managed::<T>(id) {
+            if let Err(e) = Cli.run_all(&GuestOp::<T::Kind>::reclaim(id)) {
                 warn!("abort: could not destroy {}: {}", id, e);
             }
         }
         Err(e) => warn!("abort: could not inspect {}: {}", id, e),
-    }
-}
-
-pub trait DeployedState {
-    fn id(&self) -> u32;
-    fn name(&self) -> &str;
-    fn nix_hash(&self) -> Option<&NixHash>;
-    fn status(&self) -> &str;
-    fn active_slot(&self) -> Slot;
-    fn service_ip(&self) -> Option<Ipv4Addr>;
-}
-
-impl DeployedState for DeployedVM {
-    fn id(&self) -> u32 {
-        self.vm_id
-    }
-    fn name(&self) -> &str {
-        &self.vm_name
-    }
-    fn nix_hash(&self) -> Option<&NixHash> {
-        self.nix_hash.as_ref()
-    }
-    fn status(&self) -> &str {
-        &self.status
-    }
-    fn active_slot(&self) -> Slot {
-        self.active_slot
-    }
-    fn service_ip(&self) -> Option<Ipv4Addr> {
-        self.service_ip
-    }
-}
-
-impl DeployedState for DeployedContainer {
-    fn id(&self) -> u32 {
-        self.ct_id
-    }
-    fn name(&self) -> &str {
-        &self.ct_name
-    }
-    fn nix_hash(&self) -> Option<&NixHash> {
-        self.nix_hash.as_ref()
-    }
-    fn status(&self) -> &str {
-        &self.status
-    }
-    fn active_slot(&self) -> Slot {
-        self.active_slot
-    }
-    fn service_ip(&self) -> Option<Ipv4Addr> {
-        self.service_ip
     }
 }
 
@@ -761,212 +684,89 @@ impl Dangerous for ContainerConfig {
 }
 
 pub trait Deployments: Dangerous + Materialise + Workload + Sized + Send + Sync + Proxied {
-    type Deployed: DeployedState + Send + Sync;
-    type FieldChange: PartialEq + Clone + Send + Sync;
-
-    fn load_deployed() -> Result<HashMap<String, Self::Deployed>>;
-
-    fn guest_check(name: &str, _id: u32, _timeout: Duration) -> Result<()> {
-        info!(
-            "[{}] guest health checks are only supported for containers; only the port check ran",
-            name
-        );
-        Ok(())
-    }
-
-    fn compute_changes(
-        &self,
-        deployed: &Self::Deployed,
-        image_hashes: &HashMap<crate::context::ImageType, NixHash>,
-    ) -> Vec<Self::FieldChange>;
-    fn requires_rebuild(changes: &[Self::FieldChange]) -> bool;
+    type Kind: Observe + Probe;
 
     fn is_protected(&self) -> bool;
+    fn resources(&self, changes: &[FieldChange]) -> Result<<Self::Kind as Kind>::Set>;
 
-    fn get_ip(id: u32) -> Result<String>;
-    fn exists(id: u32) -> Result<bool>;
-    fn tags(id: u32) -> Result<Option<String>>;
-    fn set_tags(id: u32, tags: &Tags) -> Result<()>;
-    fn set_protection(id: u32, protected: bool) -> Result<()>;
-    fn stop(id: &u32) -> Result<()>;
-    fn destroy(id: u32) -> Result<()>;
-    fn start(id: u32) -> Result<bool>;
-    fn apply_in_place(&self, deployed_id: u32, changes: &[Self::FieldChange]) -> Result<()>;
-}
-
-impl Deployments for VMConfig {
-    type Deployed = DeployedVM;
-    type FieldChange = FieldChange;
-    fn load_deployed() -> Result<HashMap<String, Self::Deployed>> {
-        let qm_raw = qm_list()?;
-        let parsed_qm_list = parse_qm_list(&qm_raw)?;
-        let deployed_vms = list_to_deployed_vm(parsed_qm_list);
-        let enriched = enrich_cpu_info(deployed_vms)?;
-        Ok(enriched.vms)
+    fn kind_change(&self, _deployed: &DeployedOf<Self>) -> Option<FieldChange> {
+        None
     }
+
     fn compute_changes(
         &self,
-        deployed: &Self::Deployed,
-        image_hashes: &HashMap<crate::context::ImageType, NixHash>,
-    ) -> Vec<Self::FieldChange> {
-        let desired_nix_hash = image_hashes.get(self.image_type());
-        let image_changed = desired_nix_hash
+        deployed: &DeployedOf<Self>,
+        image_hashes: &HashMap<ImageType, NixHash>,
+    ) -> Vec<FieldChange> {
+        let image_changed = image_hashes
+            .get(self.image_type())
             .zip(deployed.nix_hash.as_ref())
             .is_none_or(|(desired, deployed)| desired != deployed);
         [
-            (self.memory_mb != deployed.mem_mb, FieldChange::Memory),
-            (self.disk_gb > deployed.bootdisk_gb.round() as u32, FieldChange::Disk),
-            (self.cores != deployed.cores, FieldChange::Cores),
-            (self.sockets != deployed.sockets, FieldChange::Sockets),
-            (image_changed, FieldChange::Image),
+            (self.memory_mb() != deployed.resources.memory_mb, FieldChange::Memory),
+            (self.disk_gb() > deployed.resources.disk_gb.round() as u32, FieldChange::Disk),
+            (self.cores() != deployed.resources.cores, FieldChange::Cores),
         ]
         .into_iter()
         .filter_map(|(changed, field)| changed.then_some(field))
+        .chain(self.kind_change(deployed))
+        .chain(image_changed.then_some(FieldChange::Image))
         .collect()
     }
-    fn requires_rebuild(changes: &[Self::FieldChange]) -> bool {
-        changes.iter().any(|s| matches!(s, FieldChange::Image | FieldChange::Disk))
-    }
+}
+
+fn requires_rebuild(changes: &[FieldChange]) -> bool {
+    changes.iter().any(|c| matches!(c, FieldChange::Image | FieldChange::Disk))
+}
+
+impl Deployments for VMConfig {
+    type Kind = Qemu;
+
     fn is_protected(&self) -> bool {
         self.protected
     }
-    fn get_ip(id: u32) -> Result<String> {
-        qm_get_running_ip(&id)
+
+    fn kind_change(&self, deployed: &DeployedOf<Self>) -> Option<FieldChange> {
+        (self.sockets != deployed.extra.sockets).then_some(FieldChange::Sockets)
     }
-    fn exists(id: u32) -> Result<bool> {
-        vm_exists(id)
-    }
-    fn tags(id: u32) -> Result<Option<String>> {
-        vm_tags(id)
-    }
-    fn set_tags(id: u32, tags: &Tags) -> Result<()> {
-        qm_set_tags(id, tags)
-    }
-    fn set_protection(id: u32, protected: bool) -> Result<()> {
-        qm_set_protection(id, protected)
-    }
-    fn stop(id: &u32) -> Result<()> {
-        qm_stop(id)
-    }
-    fn destroy(id: u32) -> Result<()> {
-        qm_destroy(id)
-    }
-    fn start(id: u32) -> Result<bool> {
-        qm_start(id)
-    }
-    fn apply_in_place(&self, deployed_id: u32, changes: &[Self::FieldChange]) -> Result<()> {
-        qm_set_resources(deployed_id, self, changes)
+
+    fn resources(&self, changes: &[FieldChange]) -> Result<qemu::vmid::config::PutParams> {
+        Ok(qemu::vmid::config::PutParams {
+            memory: changes
+                .contains(&FieldChange::Memory)
+                .then(|| self.memory_mb.to_string()),
+            cores: changes
+                .contains(&FieldChange::Cores)
+                .then(|| NonZeroU64::new(u64::from(self.cores)))
+                .flatten(),
+            sockets: changes
+                .contains(&FieldChange::Sockets)
+                .then(|| NonZeroU64::new(u64::from(self.sockets)))
+                .flatten(),
+            ..Default::default()
+        })
     }
 }
 
 impl Deployments for ContainerConfig {
-    type Deployed = DeployedContainer;
-    type FieldChange = ContainerFieldChange;
+    type Kind = Lxc;
 
-    fn guest_check(name: &str, id: u32, timeout: Duration) -> Result<()> {
-        let script = guest_check_script();
-        let argv = [GUEST_SHELL, "-c", script.as_str()];
-        let started = Instant::now();
-        (0_u32..)
-            .take_while(|_| started.elapsed() < timeout)
-            .find_map(|attempt| match pct_exec(id, &argv, GUEST_CHECK_RUN_TIMEOUT) {
-                Ok(ExecOutcome::Succeeded { .. }) => Some(Ok(())),
-                Ok(ExecOutcome::Failed { code, output }) => {
-                    if attempt % 5 == 0 { info!(
-                        "[{}] guest health check not passing yet after {}s (exit {:?}): {}",
-                        name,
-                        started.elapsed().as_secs(),
-                        code,
-                        output
-                    ); }
-                    std::thread::sleep(
-                        GUEST_CHECK_POLL.min(timeout.saturating_sub(started.elapsed())),
-                    );
-                    None
-                }
-                Err(e) => Some(Err(e)),
-            })
-            .unwrap_or_else(|| {
-                Err(AppError::CmdError(format!(
-                    "{} guest health check did not pass within {}s",
-                    name,
-                    timeout.as_secs()
-                )))
-            })
-    }
-
-    fn load_deployed() -> Result<HashMap<String, Self::Deployed>> {
-        let pct_raw = pct_list()?;
-        let pct_entries = parse_pct_list(&pct_raw)?;
-        enrich_container_info(pct_entries)
-    }
-    fn compute_changes(
-        &self,
-        deployed: &Self::Deployed,
-        image_hashes: &HashMap<crate::context::ImageType, NixHash>,
-    ) -> Vec<Self::FieldChange> {
-        let desired_nix_hash = image_hashes.get(self.image_type());
-        let image_changed = desired_nix_hash
-            .zip(deployed.nix_hash.as_ref())
-            .is_none_or(|(desired, deployed)| desired != deployed);
-        [
-            (self.memory_mb != deployed.mem_mb, ContainerFieldChange::Memory),
-            (self.disk_gb > deployed.bootdisk_gb.round() as u32, ContainerFieldChange::Disk),
-            (self.cores != deployed.cores, ContainerFieldChange::Cores),
-            (image_changed, ContainerFieldChange::Image),
-        ]
-        .into_iter()
-        .filter_map(|(changed, field)| changed.then_some(field))
-        .collect()
-    }
-    fn requires_rebuild(changes: &[Self::FieldChange]) -> bool {
-        changes.iter().any(|s| matches!(s, ContainerFieldChange::Image | ContainerFieldChange::Disk))
-    }
     fn is_protected(&self) -> bool {
         self.protected
     }
-    fn get_ip(id: u32) -> Result<String> {
-        let output = std::process::Command::new("lxc-info")
-            .arg("-n")
-            .arg(id.to_string())
-            .arg("-i")
-            .arg("-H")
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AppError::CmdError(format!(
-                "lxc-info failed for container {id}: {stderr}"
-            )));
-        }
-        String::from_utf8(output.stdout)?
-            .lines()
-            .find_map(|line| line.trim().parse::<Ipv4Addr>().ok())
-            .map(|ip| ip.to_string())
-            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {id}")))
-    }
-    fn exists(id: u32) -> Result<bool> {
-        container_exists(id)
-    }
-    fn tags(id: u32) -> Result<Option<String>> {
-        container_tags(id)
-    }
-    fn set_tags(id: u32, tags: &Tags) -> Result<()> {
-        pct_set_tags(id, tags)
-    }
-    fn set_protection(id: u32, protected: bool) -> Result<()> {
-        pct_set_protection(id, protected)
-    }
-    fn stop(id: &u32) -> Result<()> {
-        pct_stop(id)
-    }
-    fn destroy(id: u32) -> Result<()> {
-        pct_destroy(id)
-    }
-    fn start(id: u32) -> Result<bool> {
-        pct_start(id)
-    }
-    fn apply_in_place(&self, deployed_id: u32, changes: &[Self::FieldChange]) -> Result<()> {
-        pct_set_resources(deployed_id, self, changes)
+
+    fn resources(&self, changes: &[FieldChange]) -> Result<lxc::vmid::config::PutParams> {
+        Ok(lxc::vmid::config::PutParams {
+            memory: changes
+                .contains(&FieldChange::Memory)
+                .then(|| i128::from(self.memory_mb).try_into())
+                .transpose()?,
+            cores: changes
+                .contains(&FieldChange::Cores)
+                .then(|| i128::from(self.cores).try_into())
+                .transpose()?,
+            ..Default::default()
+        })
     }
 }
 
@@ -976,18 +776,17 @@ enum Action<'a, T: Deployments> {
     },
     Rebuild {
         config: &'a T,
-        deployed: &'a T::Deployed,
-        deployed_id: u32,
+        deployed: &'a DeployedOf<T>,
     },
     UpdateInPlace {
         config: &'a T,
-        deployed_id: u32,
+        deployed_id: Vmid,
         service_ip: Option<Ipv4Addr>,
-        changes: Vec<T::FieldChange>,
+        changes: Vec<FieldChange>,
     },
     Destroy {
         name: String,
-        id: u32,
+        id: Vmid,
     },
     Skip {
         name: String,
@@ -1002,92 +801,83 @@ pub fn reconcile<T: Deployments>(
     configs: &[T],
     ctx: &ReconcileContext<'_>,
 ) -> Result<Vec<Outcome>> {
-    let deployed = T::load_deployed()?;
+    let deployed = state::deployed::<T::Kind>(ctx.pve)?;
     let actions = plan(configs, &deployed, ctx.image_hashes);
     Ok(actions
         .into_par_iter()
         .enumerate()
         .map(|(index, action)| {
-        std::thread::sleep(match u32::try_from(index) {
-            Ok(nth) => PROVISION_STAGGER.saturating_mul(nth),
-            Err(_) => Duration::ZERO,
-        });
-        match action {
-            Action::Create { config } => {
-                let result = (|| -> Result<()> {
-                    let artifact = get_artifact(config, ctx)?;
-                    DeployContext::from_create(
-                        config,
-                        artifact,
-                        ctx.commit_hash.as_str(),
-                        ctx.image_store,
-                        ctx.sozu_socket_path.as_str(),
-                        ctx.backend_pool,
-                    )?.run()
-                })();
-                Outcome::new(config.name(), OutcomeKind::Created, result)
-            }
-            Action::Rebuild { config, deployed, deployed_id } => {
-                let result = (|| -> Result<()> {
-                    let artifact = get_artifact(config, ctx)?;
-                    DeployContext::from_rebuild(
-                        config,
-                        deployed,
-                        deployed_id,
-                        artifact,
-                        ctx.commit_hash.as_str(),
-                        ctx.image_store,
-                        ctx.sozu_socket_path.as_str(),
-                        ctx.backend_pool,
-                    )?.run()
-                })();
-                Outcome::new(config.name(), OutcomeKind::Rebuilt, result)
-            }
-            Action::UpdateInPlace { config, deployed_id, service_ip, changes } => {
-                let result = (|| -> Result<()> {
-                    config.pre_check()?;
-                    config.apply_in_place(deployed_id, &changes)?;
-                    config.post_check()?;
-                    match service_ip {
-                        Some(ip) => {
-                            config.health_check(SocketAddr::from((ip, config.backend_port())))
-                        }
-                        None => Ok(()),
-                    }
-                })();
-                Outcome::new(config.name(), OutcomeKind::Updated, result)
-            }
-            Action::Destroy { name, id } => {
-                let result = (|| -> Result<()> {
-                    let mut sozu = SozuClient::connect(ctx.sozu_socket_path.as_str())?;
-                    match sozu.remove_cluster(&name) {
-                        Ok(_) => {}
-                        Err(e) => info!(
-                            "[{}] sozu had no cluster to remove ({}), continuing with teardown",
-                            name, e
-                        ),
-                    }
-                    match sozu.remove_tcp_clusters(&name) {
-                        Ok(0) => {}
-                        Ok(n) => info!("[{}] removed {} tcp clusters", name, n),
-                        Err(e) => warn!(
-                            "[{}] could not remove tcp clusters ({}), continuing with teardown",
-                            name, e
-                        ),
-                    }
-                    info!("[{}] destroying orphaned instance {}", name, id);
-                    T::stop(&id)?;
-                    T::destroy(id)
-                })();
-                Outcome::new(&name, OutcomeKind::Destroyed, result)
-            }
-            Action::Skip { name, reason } => {
-                Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(()))
-            }
-            Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
-        }
+            std::thread::sleep(match u32::try_from(index) {
+                Ok(nth) => ctx.settings.timings_ms.get(Timing::ProvisionStagger).saturating_mul(nth),
+                Err(_) => Duration::ZERO,
+            });
+            execute(action, ctx)
         })
         .collect())
+}
+
+fn execute<T: Deployments>(action: Action<'_, T>, ctx: &ReconcileContext<'_>) -> Outcome {
+    match action {
+        Action::Create { config } => Outcome::new(
+            config.name(),
+            OutcomeKind::Created,
+            get_artifact(config, ctx)
+                .and_then(|artifact| DeployContext::from_create(config, artifact, ctx))
+                .and_then(DeployContext::run),
+        ),
+        Action::Rebuild { config, deployed } => Outcome::new(
+            config.name(),
+            OutcomeKind::Rebuilt,
+            get_artifact(config, ctx)
+                .and_then(|artifact| DeployContext::from_rebuild(config, deployed, artifact, ctx))
+                .and_then(DeployContext::run),
+        ),
+        Action::UpdateInPlace { config, deployed_id, service_ip, changes } => Outcome::new(
+            config.name(),
+            OutcomeKind::Updated,
+            update_in_place(config, deployed_id, service_ip, &changes),
+        ),
+        Action::Destroy { name, id } => {
+            let result = destroy_orphan::<T>(&name, id, ctx.settings);
+            Outcome::new(&name, OutcomeKind::Destroyed, result)
+        }
+        Action::Skip { name, reason } => Outcome::new(&name, OutcomeKind::Skipped(reason), Ok(())),
+        Action::NoOp { name } => Outcome::new(&name, OutcomeKind::NoOp, Ok(())),
+    }
+}
+
+fn update_in_place<T: Deployments>(
+    config: &T,
+    deployed_id: Vmid,
+    service_ip: Option<Ipv4Addr>,
+    changes: &[FieldChange],
+) -> Result<()> {
+    config.pre_check()?;
+    Cli.run(&GuestOp::<T::Kind>::Set(deployed_id, config.resources(changes)?))?;
+    config.post_check()?;
+    service_ip.map_or(Ok(()), |ip| {
+        config.health_check(SocketAddr::from((ip, config.backend_port())))
+    })
+}
+
+fn destroy_orphan<T: Deployments>(name: &str, id: Vmid, settings: &AppConfig) -> Result<()> {
+    let mut sozu = SozuClient::connect(settings)?;
+    if let Err(e) = sozu.remove_cluster(name) {
+        info!(
+            "[{}] sozu had no cluster to remove ({}), continuing with teardown",
+            name, e
+        );
+    }
+    match sozu.remove_tcp_clusters(name) {
+        Ok(0) => {}
+        Ok(n) => info!("[{}] removed {} tcp clusters", name, n),
+        Err(e) => warn!(
+            "[{}] could not remove tcp clusters ({}), continuing with teardown",
+            name, e
+        ),
+    }
+    info!("[{}] destroying orphaned instance {}", name, id);
+    Cli.run_all(&GuestOp::<T::Kind>::retire(id))
 }
 
 fn get_artifact<T: Deployments>(
@@ -1109,10 +899,10 @@ fn get_artifact<T: Deployments>(
 
 fn plan<'a, T: Deployments>(
     configs: &'a [T],
-    deployed: &'a HashMap<String, T::Deployed>,
-    image_hashes: &HashMap<crate::context::ImageType, NixHash>,
+    deployed: &'a HashMap<String, DeployedOf<T>>,
+    image_hashes: &HashMap<ImageType, NixHash>,
 ) -> Vec<Action<'a, T>> {
-    let desired: HashSet<&str> = configs.iter().map(proxnix_core::Workload::name).collect();
+    let desired: HashSet<&str> = configs.iter().map(Workload::name).collect();
 
     configs
         .iter()
@@ -1123,7 +913,7 @@ fn plan<'a, T: Deployments>(
                 .filter(|(n, _)| !desired.contains(n.as_str()))
                 .map(|(n, d)| Action::Destroy {
                     name: n.clone(),
-                    id: d.id(),
+                    id: d.id,
                 }),
         )
         .collect()
@@ -1131,8 +921,8 @@ fn plan<'a, T: Deployments>(
 
 fn classify<'a, T: Deployments>(
     config: &'a T,
-    deployed: &'a HashMap<String, T::Deployed>,
-    image_hashes: &HashMap<crate::context::ImageType, NixHash>,
+    deployed: &'a HashMap<String, DeployedOf<T>>,
+    image_hashes: &HashMap<ImageType, NixHash>,
 ) -> Action<'a, T> {
     let Some(d) = deployed.get(config.name()) else {
         return Action::Create { config };
@@ -1140,18 +930,14 @@ fn classify<'a, T: Deployments>(
 
     let changes = config.compute_changes(d, image_hashes);
 
-    match (changes.is_empty(), T::requires_rebuild(&changes), config.is_protected()) {
+    match (changes.is_empty(), requires_rebuild(&changes), config.is_protected()) {
         (true, _, _) => Action::NoOp { name: config.name().into() },
         (_, _, true) => Action::Skip { name: config.name().into(), reason: SkipReason::Protected },
-        (_, true, _) => Action::Rebuild {
-            config,
-            deployed: d,
-            deployed_id: d.id(),
-        },
+        (_, true, _) => Action::Rebuild { config, deployed: d },
         (_, false, _) => Action::UpdateInPlace {
             config,
-            deployed_id: d.id(),
-            service_ip: d.service_ip(),
+            deployed_id: d.id,
+            service_ip: d.service_ip,
             changes,
         },
     }
@@ -1160,13 +946,14 @@ fn classify<'a, T: Deployments>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::ImageType;
+    use crate::state::{LxcExtra, QemuExtra, Resources};
+    use crate::types::{BindMount, MountMode};
 
     fn vm(protected: bool) -> VMConfig {
         VMConfig {
             name: "test-website".to_string(),
-            blue_id: 823,
-            green_id: 824,
+            blue_id: Vmid::new(823),
+            green_id: Vmid::new(824),
             hostname: "test-website".to_string(),
             service_address: Some(Ipv4Addr::new(192, 168, 1, 23)),
             backend_port: 80,
@@ -1181,29 +968,69 @@ mod tests {
             disk_gb: 10,
             protected,
             network_bridge: "vmbr0".to_string(),
-            scsi_hw: "virtio-scsi-pci".to_string(),
-            disk_slot: "scsi0".to_string(),
+            scsi_hw: qemu::Scsihw::VirtioScsiPci,
+            disk_slot: "scsi0".parse().unwrap(),
             impure: false,
         }
     }
 
-    fn deployed(hash: &str, slot: Slot) -> DeployedVM {
-        DeployedVM {
-            vm_id: match slot {
+    fn container() -> ContainerConfig {
+        ContainerConfig {
+            name: "pihole".to_string(),
+            hostname: "pihole".to_string(),
+            service_address: None,
+            backend_port: 80,
+            tcp_ports: vec![],
+            dhcp_timeout_seconds: 240,
+            health_check_timeout_seconds: 180,
+            blue_id: Vmid::new(833),
+            green_id: Vmid::new(933),
+            image_type: ImageType::from("build-lxc-pihole"),
+            cores: 2,
+            memory_mb: 1024,
+            storage_location: "local-lvm".to_string(),
+            disk_gb: 8,
+            protected: false,
+            privileged: true,
+            bind_mounts: vec![],
+            network_bridge: "vmbr0".to_string(),
+            impure: false,
+        }
+    }
+
+    fn deployed(hash: &str, slot: Slot) -> DeployedOf<VMConfig> {
+        Deployed {
+            id: Vmid::new(match slot {
                 Slot::Blue => 823,
                 Slot::Green => 824,
-            },
-            vm_name: "test-website".to_string(),
+            }),
+            name: "test-website".to_string(),
+            status: GuestStatus::Running,
             nix_hash: Some(NixHash::try_from(hash).unwrap()),
-            template_id: None,
-            mem_mb: 2048,
-            bootdisk_gb: 10.0,
-            status: "running".to_string(),
-            pid: 1234,
-            cores: 2,
-            sockets: 1,
             active_slot: slot,
             service_ip: Some(Ipv4Addr::new(10, 0, 0, 10)),
+            resources: Resources { memory_mb: 2048, disk_gb: 10.0, cores: 2 },
+            extra: QemuExtra { sockets: 1 },
+        }
+    }
+
+    fn deployed_container(hash: &str) -> DeployedOf<ContainerConfig> {
+        Deployed {
+            id: Vmid::new(833),
+            name: "pihole".to_string(),
+            status: GuestStatus::Running,
+            nix_hash: Some(NixHash::try_from(hash).unwrap()),
+            active_slot: Slot::Blue,
+            service_ip: None,
+            resources: Resources { memory_mb: 1024, disk_gb: 8.0, cores: 2 },
+            extra: LxcExtra {
+                privileged: true,
+                bind_mounts: vec![BindMount {
+                    host_path: "/srv".to_string(),
+                    container_path: "/srv".to_string(),
+                    mode: MountMode::ReadOnly,
+                }],
+            },
         }
     }
 
@@ -1212,6 +1039,10 @@ mod tests {
             ImageType::from("build-qcow2-website"),
             NixHash::try_from(hash).unwrap(),
         )])
+    }
+
+    fn rendered<K: Kind>(op: &GuestOp<K>) -> String {
+        op.invocation().unwrap().to_string()
     }
 
     #[test]
@@ -1237,7 +1068,7 @@ mod tests {
         let deploy_time = BackendId::new(config.name(), &hash);
         match upkeep(&config, Some(&deployed("abc123", Slot::Blue))) {
             Upkeep::Route { backend_id, .. } => {
-                assert_eq!(backend_id.as_str(), deploy_time.as_str())
+                assert_eq!(backend_id.as_str(), deploy_time.as_str());
             }
             _ => panic!("expected a route"),
         }
@@ -1246,14 +1077,14 @@ mod tests {
     #[test]
     fn a_stopped_workload_is_started_and_not_routed() {
         let config = vm(false);
-        let stopped = DeployedVM {
-            status: "stopped".to_string(),
+        let stopped = Deployed {
+            status: GuestStatus::from("stopped"),
             ..deployed("abc123", Slot::Blue)
         };
         match upkeep(&config, Some(&stopped)) {
             Upkeep::Start { id, status } => {
-                assert_eq!(id, 823);
-                assert_eq!(status, "stopped");
+                assert_eq!(id, Vmid::new(823));
+                assert_eq!(status.to_string(), "stopped");
             }
             _ => panic!("a stopped workload should be started"),
         }
@@ -1271,7 +1102,7 @@ mod tests {
     #[test]
     fn a_running_workload_with_no_recorded_address_is_reported_not_guessed() {
         let config = vm(false);
-        let untagged = DeployedVM { service_ip: None, ..deployed("abc123", Slot::Blue) };
+        let untagged = Deployed { service_ip: None, ..deployed("abc123", Slot::Blue) };
         match upkeep(&config, Some(&untagged)) {
             Upkeep::Unroutable { gap: RouteGap::NoServiceIp } => {}
             _ => panic!("a missing service ip must surface as a gap"),
@@ -1287,28 +1118,10 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_without_a_check_script_passes_rather_than_erroring() {
-        let script = guest_check_script();
-        assert!(script.contains(GUEST_CHECK));
-        assert!(
-            script.starts_with("if [ -x "),
-            "a guest that declares no check must not fail the deploy"
-        );
-    }
-
-    #[test]
-    fn the_check_replaces_the_shell_so_its_exit_code_is_the_verdict() {
-        assert!(
-            guest_check_script().contains(&format!("exec {}", GUEST_CHECK)),
-            "the script's exit status must be what proxnix sees"
-        );
-    }
-
-    #[test]
     fn blue_and_green_resolve_to_distinct_identities() {
         let c = vm(false);
-        assert_eq!(c.id_for_slot(Slot::Blue), SlotId::Blue(823));
-        assert_eq!(c.id_for_slot(Slot::Green), SlotId::Green(824));
+        assert_eq!(c.id_for_slot(Slot::Blue), SlotId::Blue(Vmid::new(823)));
+        assert_eq!(c.id_for_slot(Slot::Green), SlotId::Green(Vmid::new(824)));
         assert_ne!(
             c.id_for_slot(Slot::Blue).inner(),
             c.id_for_slot(Slot::Green).inner()
@@ -1345,7 +1158,7 @@ mod tests {
         let d = deployed("abc123", Slot::Blue);
         let changes = c.compute_changes(&d, &hashes("def456"));
         assert!(changes.contains(&FieldChange::Image));
-        assert!(VMConfig::requires_rebuild(&changes));
+        assert!(requires_rebuild(&changes));
     }
 
     #[test]
@@ -1354,7 +1167,7 @@ mod tests {
         let d = deployed("abc123", Slot::Blue);
         let changes = c.compute_changes(&d, &hashes("abc123"));
         assert_eq!(changes, vec![FieldChange::Memory]);
-        assert!(!VMConfig::requires_rebuild(&changes));
+        assert!(!requires_rebuild(&changes));
     }
 
     #[test]
@@ -1362,7 +1175,7 @@ mod tests {
         let c = VMConfig { disk_gb: 20, ..vm(false) };
         let d = deployed("abc123", Slot::Blue);
         let changes = c.compute_changes(&d, &hashes("abc123"));
-        assert!(VMConfig::requires_rebuild(&changes));
+        assert!(requires_rebuild(&changes));
     }
 
     #[test]
@@ -1371,6 +1184,51 @@ mod tests {
         let d = deployed("abc123", Slot::Blue);
         let changes = c.compute_changes(&d, &HashMap::new());
         assert!(changes.contains(&FieldChange::Image));
+    }
+
+    #[test]
+    fn vm_changes_are_reported_in_a_fixed_order() {
+        let c = VMConfig { memory_mb: 4096, disk_gb: 20, cores: 4, sockets: 2, ..vm(false) };
+        let d = deployed("abc123", Slot::Blue);
+        assert_eq!(
+            c.compute_changes(&d, &hashes("def456")),
+            vec![
+                FieldChange::Memory,
+                FieldChange::Disk,
+                FieldChange::Cores,
+                FieldChange::Sockets,
+                FieldChange::Image,
+            ]
+        );
+    }
+
+    #[test]
+    fn containers_have_no_socket_change() {
+        let c = ContainerConfig { memory_mb: 2048, cores: 4, ..container() };
+        let image = HashMap::from([(
+            ImageType::from("build-lxc-pihole"),
+            NixHash::try_from("def456").unwrap(),
+        )]);
+        assert_eq!(
+            c.compute_changes(&deployed_container("abc123"), &image),
+            vec![FieldChange::Memory, FieldChange::Cores, FieldChange::Image]
+        );
+    }
+
+    #[test]
+    fn an_in_place_update_only_sets_what_changed() {
+        let c = VMConfig { memory_mb: 4096, sockets: 2, ..vm(false) };
+        let set = c.resources(&[FieldChange::Memory, FieldChange::Sockets]).unwrap();
+        assert_eq!(
+            rendered(&GuestOp::<Qemu>::Set(Vmid::new(823), set)),
+            "qm set 823 --memory 4096 --sockets 2"
+        );
+        let ct = ContainerConfig { cores: 4, ..container() };
+        let set = ct.resources(&[FieldChange::Cores]).unwrap();
+        assert_eq!(
+            rendered(&GuestOp::<Lxc>::Set(Vmid::new(833), set)),
+            "pct set 833 --cores 4"
+        );
     }
 
     #[test]
@@ -1388,9 +1246,9 @@ mod tests {
         let c = vm(false);
         let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Green))]);
         match classify(&c, &d, &hashes("def456")) {
-            Action::Rebuild { deployed, deployed_id, .. } => {
-                assert_eq!(deployed_id, 824);
-                assert_eq!(deployed.active_slot(), Slot::Green);
+            Action::Rebuild { deployed, .. } => {
+                assert_eq!(deployed.id, Vmid::new(824));
+                assert_eq!(deployed.active_slot, Slot::Green);
             }
             _ => panic!("expected Rebuild when the image hash changed"),
         }
@@ -1422,7 +1280,7 @@ mod tests {
         let d = HashMap::from([("test-website".to_string(), deployed("abc123", Slot::Green))]);
         match classify(&c, &d, &hashes("abc123")) {
             Action::UpdateInPlace { deployed_id, service_ip, .. } => {
-                assert_eq!(deployed_id, 824);
+                assert_eq!(deployed_id, Vmid::new(824));
                 assert_eq!(service_ip, Some(Ipv4Addr::new(10, 0, 0, 10)));
             }
             _ => panic!("expected UpdateInPlace for a resource-only change"),
@@ -1436,7 +1294,7 @@ mod tests {
         match actions.as_slice() {
             [Action::Destroy { name, id }] => {
                 assert_eq!(name, "orphan");
-                assert_eq!(*id, 823);
+                assert_eq!(*id, Vmid::new(823));
             }
             _ => panic!("expected a single Destroy for the orphaned workload"),
         }

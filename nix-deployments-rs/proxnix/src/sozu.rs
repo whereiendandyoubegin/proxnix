@@ -12,7 +12,7 @@ use sozu_command_lib::{
 };
 use tracing::{debug, info, warn};
 
-use crate::types::{AppError, ContainerConfig, Result, VMConfig};
+use crate::types::{AppConfig, AppError, ContainerConfig, Result, Timing, VMConfig};
 
 fn socket_address(ip: Ipv4Addr, port: u16) -> SocketAddress {
     SocketAddress {
@@ -31,21 +31,12 @@ pub trait Proxied {
     fn tcp_ports(&self) -> &[u16];
     fn cluster_id(&self) -> &str;
     fn hostname(&self) -> &str;
+    fn network_bridge(&self) -> &str;
 
     fn backend_address(&self, ip: Ipv4Addr) -> SocketAddress {
         socket_address(ip, self.backend_port())
     }
-
-    fn frontend_address(&self) -> Option<SocketAddress> {
-        self.service_address()
-            .map(|_| socket_address(SOZU_LISTENER_IP, FRONTEND_PORT))
-    }
 }
-
-pub const FRONTEND_PORT: u16 = 80;
-pub const SOZU_LISTENER_IP: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
-
-const TCP_IDLE_TIMEOUT: u32 = 3600;
 
 pub fn tcp_cluster_id(name: &str, port: u16) -> String {
     format!("{name}-tcp-{port}")
@@ -110,6 +101,9 @@ impl Proxied for VMConfig {
     fn hostname(&self) -> &str {
         &self.hostname
     }
+    fn network_bridge(&self) -> &str {
+        &self.network_bridge
+    }
 }
 
 impl Proxied for ContainerConfig {
@@ -128,11 +122,35 @@ impl Proxied for ContainerConfig {
     fn hostname(&self) -> &str {
         &self.hostname
     }
+    fn network_bridge(&self) -> &str {
+        &self.network_bridge
+    }
 }
 
 const SOZU_MAX_PROCESSING: u32 = 32;
-const NO_CHANGE: &str = "did not bring any change";
-const ALREADY_EXISTS: &str = "already exists";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlreadyApplied {
+    NoChange,
+    AlreadyExists,
+}
+
+impl AlreadyApplied {
+    const ALL: [AlreadyApplied; 2] = [AlreadyApplied::NoChange, AlreadyApplied::AlreadyExists];
+
+    fn phrase(self) -> &'static str {
+        match self {
+            AlreadyApplied::NoChange => "did not bring any change",
+            AlreadyApplied::AlreadyExists => "already exists",
+        }
+    }
+
+    fn in_message(message: &str) -> Option<AlreadyApplied> {
+        AlreadyApplied::ALL
+            .into_iter()
+            .find(|refusal| message.contains(refusal.phrase()))
+    }
+}
 
 pub enum Settled {
     Changed,
@@ -202,13 +220,27 @@ pub fn stale_backends(
 
 pub struct SozuClient {
     pub channel: Channel<Request, Response>,
+    listen_ip: Ipv4Addr,
+    http_port: u16,
+    tcp_idle_secs: u32,
 }
 
 impl SozuClient {
-    pub fn connect(socket_path: &str) -> Result<Self> {
-        let mut channel = Channel::from_path(socket_path, 16384, 163840)?;
+    pub fn connect(settings: &AppConfig) -> Result<Self> {
+        let mut channel = Channel::from_path(&settings.sozu.socket_path, 16384, 163840)?;
         channel.blocking()?;
-        Ok(Self { channel })
+        Ok(Self {
+            channel,
+            listen_ip: settings.sozu.listen_ip,
+            http_port: settings.sozu.http_port,
+            tcp_idle_secs: u32::try_from(settings.timings_ms.get(Timing::SozuTcpIdle).as_secs())?,
+        })
+    }
+
+    fn frontend_address<T: Proxied>(&self, config: &T) -> Option<SocketAddress> {
+        config
+            .service_address()
+            .map(|_| socket_address(self.listen_ip, self.http_port))
     }
 
     fn settled_response(&mut self) -> Result<Response> {
@@ -244,7 +276,7 @@ impl SozuClient {
     fn expect_applied(&mut self, what: &str) -> Result<Settled> {
         match self.settled()? {
             (ResponseStatus::Ok, _) => Ok(Settled::Changed),
-            (_, message) if message.contains(NO_CHANGE) || message.contains(ALREADY_EXISTS) => {
+            (_, message) if AlreadyApplied::in_message(&message).is_some() => {
                 Ok(Settled::AlreadyApplied)
             }
             (_, message) => Err(AppError::SozuError(format!("{what}: {message}"))),
@@ -263,7 +295,7 @@ impl SozuClient {
 
         self.expect_applied("add cluster")?;
 
-        let frontend = config.frontend_address().ok_or_else(|| {
+        let frontend = self.frontend_address(config).ok_or_else(|| {
             AppError::SozuError(format!(
                 "{} has no service address, it cannot be proxied",
                 config.cluster_id()
@@ -273,8 +305,8 @@ impl SozuClient {
         debug!(
             "sozu: adding http frontend for '{}' on {}:{} matching hostname '{}'",
             config.cluster_id(),
-            SOZU_LISTENER_IP,
-            FRONTEND_PORT,
+            self.listen_ip,
+            self.http_port,
             config.hostname()
         );
         self.channel.write_message(
@@ -314,7 +346,7 @@ impl SozuClient {
         self.expect_applied("add backend")
     }
     fn ensure_tcp_listener(&mut self, port: u16) -> Result<Settled> {
-        let address = socket_address(SOZU_LISTENER_IP, port);
+        let address = socket_address(self.listen_ip, port);
         self.channel
             .write_message(&RequestType::ListListeners(ListListeners {}).into())?;
         let response = self.settled_response()?;
@@ -332,12 +364,12 @@ impl SozuClient {
         };
 
         let added = if existing.is_some() { Settled::AlreadyApplied } else {
-            info!("sozu: adding tcp listener on {}:{}", SOZU_LISTENER_IP, port);
+            info!("sozu: adding tcp listener on {}:{}", self.listen_ip, port);
             self.channel.write_message(
                 &RequestType::AddTcpListener(TcpListenerConfig {
                     address,
-                    front_timeout: TCP_IDLE_TIMEOUT,
-                    back_timeout: TCP_IDLE_TIMEOUT,
+                    front_timeout: self.tcp_idle_secs,
+                    back_timeout: self.tcp_idle_secs,
                     ..Default::default()
                 })
                 .into(),
@@ -346,7 +378,7 @@ impl SozuClient {
         };
 
         if let Some(true) = existing { Ok(added) } else {
-            info!("sozu: activating tcp listener on {}:{}", SOZU_LISTENER_IP, port);
+            info!("sozu: activating tcp listener on {}:{}", self.listen_ip, port);
             self.channel.write_message(
                 &RequestType::ActivateListener(ActivateListener {
                     address,
@@ -383,7 +415,7 @@ impl SozuClient {
             self.channel.write_message(
                 &RequestType::AddTcpFrontend(RequestTcpFrontend {
                     cluster_id: cluster_id.clone(),
-                    address: socket_address(SOZU_LISTENER_IP, port),
+                    address: socket_address(self.listen_ip, port),
                     ..Default::default()
                 })
                 .into(),
@@ -740,7 +772,7 @@ mod tests {
                     tcp_listeners: BTreeMap::from([(
                         format!("0.0.0.0:{}", port),
                         TcpListenerConfig {
-                            address: socket_address(SOZU_LISTENER_IP, port),
+                            address: socket_address(Ipv4Addr::UNSPECIFIED, port),
                             active,
                             ..Default::default()
                         },
@@ -755,7 +787,7 @@ mod tests {
 
     #[test]
     fn a_tcp_listener_is_found_by_address() {
-        let wanted = socket_address(SOZU_LISTENER_IP, 2222);
+        let wanted = socket_address(Ipv4Addr::UNSPECIFIED, 2222);
         assert_eq!(tcp_listener_in(&listeners(2222, true), &wanted), Some(true));
         assert_eq!(tcp_listener_in(&listeners(2222, false), &wanted), Some(false));
         assert_eq!(tcp_listener_in(&listeners(2223, true), &wanted), None);

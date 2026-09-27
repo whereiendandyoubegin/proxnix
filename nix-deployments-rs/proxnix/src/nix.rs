@@ -1,29 +1,10 @@
+use crate::child::{self, Exit};
 use crate::types::{AppError, Result};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 use tracing::{info, warn};
-
-pub const BASE_REPO_PATH: &str = "/tmp/proxnix/repos";
-const NIX_BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
-const NIX_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const NIX_EVAL_TIMEOUT: Duration = Duration::from_secs(300);
-
-enum BuildOutcome {
-    Finished(ExitStatus),
-    TimedOut,
-}
-
-fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<BuildOutcome> {
-    let started = Instant::now();
-    loop {
-        match child.try_wait()? {
-            Some(status) => return Ok(BuildOutcome::Finished(status)),
-            None => if started.elapsed() >= timeout { return Ok(BuildOutcome::TimedOut) } else { std::thread::sleep(NIX_POLL_INTERVAL) },
-        }
-    }
-}
 
 fn walk_for_file(dir: &Path, filename: &str, results: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -73,7 +54,7 @@ pub fn eval_appconfig(nixology_path: &str) -> Result<String> {
     Ok(String::from_utf8(nix_eval.stdout)?)
 }
 
-pub fn eval_config(repo_path: &str) -> Result<String> {
+pub fn eval_config(repo_path: &str, timeout: Duration) -> Result<String> {
     let flake_path = find_in_repo(repo_path, "flake.nix")?;
     let nix_dir = Path::new(&flake_path)
         .parent()
@@ -110,24 +91,24 @@ pub fn eval_config(repo_path: &str) -> Result<String> {
         })
     });
 
-    let outcome = wait_with_timeout(&mut child, NIX_EVAL_TIMEOUT)?;
+    let outcome = child::wait(&mut child, timeout)?;
     let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
     let stderr = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
 
     match outcome {
-        BuildOutcome::TimedOut => {
+        Exit::TimedOut => {
             warn!(
                 "nix eval exceeded {}s, killing it",
-                NIX_EVAL_TIMEOUT.as_secs()
+                timeout.as_secs()
             );
             child.kill().ok();
             child.wait().ok();
             Err(AppError::NixError(format!(
                 "eval of .#proxnix timed out after {}s",
-                NIX_EVAL_TIMEOUT.as_secs()
+                timeout.as_secs()
             )))
         }
-        BuildOutcome::Finished(status) => if status.success() { Ok(stdout) } else { Err(AppError::NixError(format!(
+        Exit::Finished(status) => if status.success() { Ok(stdout) } else { Err(AppError::NixError(format!(
             "eval of .#proxnix failed (exit: {:?}): {}",
             status.code(),
             stderr
@@ -167,7 +148,7 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
     Ok(parsed)
 }
 
-pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result<String> {
+pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str, timeout: Duration) -> Result<String> {
     let flake_path = find_in_repo(repo_path, "flake.nix")?;
     let nix_dir = Path::new(&flake_path)
         .parent()
@@ -200,34 +181,34 @@ pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result
         })
     });
 
-    let outcome = wait_with_timeout(&mut child, NIX_BUILD_TIMEOUT)?;
+    let outcome = child::wait(&mut child, timeout)?;
     if let Some(handle) = pump {
         handle.join().ok();
     }
 
     match outcome {
-        BuildOutcome::TimedOut => {
+        Exit::TimedOut => {
             warn!(
                 "nix build for '{}' exceeded {}s, killing it",
                 config_name,
-                NIX_BUILD_TIMEOUT.as_secs()
+                timeout.as_secs()
             );
             child.kill().ok();
             child.wait().ok();
             return Err(AppError::NixError(format!(
                 "build for '{}' timed out after {}s",
                 config_name,
-                NIX_BUILD_TIMEOUT.as_secs()
+                timeout.as_secs()
             )));
         }
-        BuildOutcome::Finished(status) if !status.success() => {
+        Exit::Finished(status) if !status.success() => {
             return Err(AppError::NixError(format!(
                 "build for '{}' failed (exit: {:?})",
                 config_name,
                 status.code()
             )));
         }
-        BuildOutcome::Finished(_) => {}
+        Exit::Finished(_) => {}
     }
 
     let path_output = Command::new("nix")
