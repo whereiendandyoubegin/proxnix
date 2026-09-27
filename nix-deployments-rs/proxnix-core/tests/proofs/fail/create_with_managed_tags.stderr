@@ -1,0 +1,15 @@
+warning: unreachable expression
+ --> tests/proofs/fail/create_with_managed_tags.rs:4:54
+  |
+4 |     GuestEffect::Create { target: todo!(), artifact: todo!(), spec: todo!(), fresh: tags }
+  |                                   -------            ^^^^^^^ unreachable expression
+  |                                   |
+  |                                   any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+ --> tests/proofs/fail/create_with_managed_tags.rs:4:85
+  |
+4 |     GuestEffect::Create { target: todo!(), artifact: todo!(), spec: todo!(), fresh: tags }
+  |                                                                                     ^^^^ expected `Fresh`, found `ManagedTags`

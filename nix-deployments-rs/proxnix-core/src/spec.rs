@@ -24,9 +24,17 @@ pub struct BridgeName(pub String);
 
 #[pure_only]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Protection {
+pub enum Cutover {
+    Overlap,
+    StopStart,
     Protected,
-    Unprotected,
+}
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purity {
+    Pure,
+    Impure,
 }
 
 #[pure_only]
@@ -60,7 +68,8 @@ pub struct WorkloadSpec {
     pub slots: SlotPair,
     pub image: ImageType,
     pub resources: Resources,
-    pub protection: Protection,
+    pub cutover: Cutover,
+    pub purity: Purity,
     pub proxy: ProxySpec,
     pub timeouts: Timeouts,
     pub kind: KindSpec,
@@ -81,6 +90,11 @@ impl WorkloadSpec {
     #[must_use]
     pub fn cores(&self) -> Cores {
         self.resources.cores
+    }
+
+    #[must_use]
+    pub fn routed(&self) -> bool {
+        self.proxy.service_address.is_some() || !self.proxy.tcp_ports.is_empty()
     }
 
     #[must_use]

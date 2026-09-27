@@ -15,6 +15,8 @@ pub enum TagFault {
     BadCommit(HashFault),
     NoSlot,
     BadServiceIp,
+    BadGeneration,
+    BadRole,
 }
 
 #[pure_only]
@@ -90,6 +92,67 @@ pub type NixHash = Digest<Nix>;
 pub type CommitHash = Digest<Commit>;
 
 #[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Generation(u64);
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadGeneration;
+
+#[pure_only]
+impl Generation {
+    pub const FIRST: Generation = Generation(1);
+
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn after(self) -> Generation {
+        Generation(self.0.saturating_add(1))
+    }
+}
+
+#[pure_only]
+impl std::str::FromStr for Generation {
+    type Err = BadGeneration;
+
+    fn from_str(text: &str) -> Result<Self, BadGeneration> {
+        match (text.is_empty(), text.chars().all(|c| c.is_ascii_digit())) {
+            (false, true) => text.parse().map(Generation).map_err(|_| BadGeneration),
+            _ => Err(BadGeneration),
+        }
+    }
+}
+
+#[pure_only]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RoleName(String);
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadRole;
+
+#[pure_only]
+impl std::str::FromStr for RoleName {
+    type Err = BadRole;
+
+    fn from_str(text: &str) -> Result<Self, BadRole> {
+        match (text.is_empty(), text.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())) {
+            (false, true) => Ok(RoleName(String::from(text))),
+            _ => Err(BadRole),
+        }
+    }
+}
+
+#[pure_only]
+impl AsRef<str> for RoleName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawTags(String);
 
@@ -107,6 +170,8 @@ pub struct ManagedTags {
     pub commit: CommitHash,
     pub slot: Slot,
     pub service_ip: Option<Ipv4Addr>,
+    pub generation: Option<Generation>,
+    pub role: Option<RoleName>,
 }
 
 #[pure_only]
@@ -129,6 +194,12 @@ impl TryFrom<&RawTags> for ManagedTags {
                 .and_then(|slot| Slot::try_from(slot).map_err(|_| TagFault::NoSlot))?,
             service_ip: tag("ip-")
                 .map(|ip| ip.parse().map_err(|_| TagFault::BadServiceIp))
+                .transpose()?,
+            generation: tag("gen-")
+                .map(|generation| generation.parse().map_err(|BadGeneration| TagFault::BadGeneration))
+                .transpose()?,
+            role: tag("role-")
+                .map(|role| role.parse().map_err(|BadRole| TagFault::BadRole))
                 .transpose()?,
         })
     }
@@ -196,6 +267,8 @@ mod tests {
                 commit: COMMIT.parse().unwrap(),
                 slot: Slot::Blue,
                 service_ip: Some(Ipv4Addr::new(192, 168, 1, 214)),
+                generation: None,
+                role: None,
             })
         );
     }
@@ -237,6 +310,36 @@ mod tests {
     }
 
     #[test]
+    fn the_generation_and_role_are_read_when_present() {
+        match ownership(&format!("{};gen-7;role-writer", managed("blue"))) {
+            Ownership::Managed(tags) => {
+                assert_eq!(tags.generation, Some("7".parse().unwrap()));
+                assert_eq!(tags.role, Some("writer".parse().unwrap()));
+            }
+            other => panic!("expected managed, got {other:?}"),
+        }
+        assert!(matches!(ownership(&managed("blue")), Ownership::Managed(ManagedTags { generation: None, role: None, .. })));
+    }
+
+    #[test]
+    fn a_generation_or_role_that_does_not_parse_is_malformed() {
+        for generation in ["gen-", "gen-x", "gen--1", "gen-+1", "gen-99999999999999999999"] {
+            assert_eq!(
+                ownership(&format!("{};{generation}", managed("blue"))),
+                Ownership::Malformed(TagFault::BadGeneration)
+            );
+        }
+        assert_eq!(ownership(&format!("{};role-Writer", managed("blue"))), Ownership::Malformed(TagFault::BadRole));
+        assert_eq!(ownership(&format!("{};role-", managed("blue"))), Ownership::Malformed(TagFault::BadRole));
+    }
+
+    #[test]
+    fn generations_only_move_forward() {
+        assert!(Generation::FIRST.after() > Generation::FIRST);
+        assert_eq!(Generation(u64::MAX).after(), Generation(u64::MAX));
+    }
+
+    #[test]
     fn tag_order_and_whitespace_do_not_matter() {
         assert_eq!(
             ownership(&format!(" slot-green ; proxnix ;nix-{NIX}; commit-{COMMIT}")),
@@ -245,6 +348,8 @@ mod tests {
                 commit: COMMIT.parse().unwrap(),
                 slot: Slot::Green,
                 service_ip: None,
+                generation: None,
+                role: None,
             })
         );
     }
