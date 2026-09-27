@@ -3,7 +3,7 @@ use crate::interpret::{Declared, Interpreter, Probes, Provision, Routes};
 use crate::materialise::Materialise;
 use crate::nix::NixFault;
 use crate::probe::{ExecOutcome, exec, guest_check_script};
-use crate::remote::Api;
+use crate::remote::{Api, ApiError};
 use crate::types::{AppConfig, AppError, BindMount, ContainerConfig, MountMode as ShellMountMode, Result, Timing, VMConfig};
 use proxmox_api::client::Client;
 use rayon::prelude::*;
@@ -280,7 +280,7 @@ pub fn drive<Reg: Registry, C: Client, R: Routes, P: Probes, M: Provision>(
     clock: &Clock,
 ) -> Result<Report>
 where
-    AppError: From<C::Error>,
+    C::Error: ApiError,
 {
     let finished = (0..inputs.limit).try_fold((Memo::default(), Vec::new()), |(memo, events), _| {
         let observed = match observe() {
@@ -365,7 +365,7 @@ pub fn drive_all<Reg: Registry, C: Client + Sync, R: Routes + Send>(
     clock: &Clock,
 ) -> Vec<(GuestName, Result<Report>)>
 where
-    AppError: From<C::Error>,
+    C::Error: ApiError,
 {
     let shared = Mutex::new(routes);
     let lock = Mutex::new(());

@@ -1,6 +1,6 @@
 use crate::api::{GuestOp, Lxc, Qemu};
 use crate::context::{BackendId, NixHash, StorePath, Tags, render_managed};
-use crate::remote::{Api, ApiFault, Presence, Remote};
+use crate::remote::{Api, ApiError, ApiFault, Presence, Remote};
 use crate::sozu::{Proxied, Pruned, Settled};
 use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 use proxmox_api::client::Client;
@@ -172,7 +172,7 @@ fn lxc_changes(changes: &[ResourceChange]) -> Result<lxc::vmid::config::PutParam
 
 impl<C: Client, R: Routes, P: Probes, M: Provision> Interpreter<'_, C, R, P, M>
 where
-    AppError: From<C::Error>,
+    C::Error: ApiError,
 {
     pub fn execute(&mut self, planned: &[Planned]) -> Vec<Event> {
         planned
@@ -402,7 +402,7 @@ fn made_by(tags: &ManagedTags, fresh: &proxnix_core::Fresh) -> bool {
 
 fn settle_all<C: Client, K: Remote>(api: &Api<C>, ops: &[GuestOp<K>]) -> Result<Outcome>
 where
-    AppError: From<C::Error>,
+    C::Error: ApiError,
 {
     ops.iter().try_fold(Outcome::AlreadyApplied, |outcome, op| {
         settled(api.apply(op)).map(|next| match (outcome, next) {

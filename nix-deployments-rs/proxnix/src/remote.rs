@@ -23,6 +23,16 @@ pub enum ApiFault {
     CreationNeedsRootPam,
 }
 
+pub trait ApiError: Into<AppError> {
+    fn empty_success(&self) -> bool;
+}
+
+impl ApiError for proxmox_api::ReqwestError {
+    fn empty_success(&self) -> bool {
+        matches!(self, proxmox_api::ReqwestError::UnknownFailure(status, _) if status.is_success())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     Done,
@@ -45,7 +55,7 @@ pub struct Api<C> {
 
 impl<C: Client> Api<C>
 where
-    AppError: From<C::Error>,
+    C::Error: ApiError,
 {
     pub fn new(client: C, node: String, runtime: Handle, poll: Duration, timeout: Duration) -> Self {
         Api { client, node, runtime, poll, timeout }
@@ -56,7 +66,15 @@ where
     }
 
     fn call<T>(&self, request: impl Future<Output = std::result::Result<T, C::Error>>) -> Result<T> {
-        self.runtime.block_on(request).map_err(AppError::from)
+        self.runtime.block_on(request).map_err(Into::into)
+    }
+
+    fn unit(&self, request: impl Future<Output = std::result::Result<(), C::Error>>) -> Result<Reply> {
+        match self.runtime.block_on(request) {
+            Ok(()) => Ok(Reply::Done),
+            Err(error) if error.empty_success() => Ok(Reply::Done),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn task(&self, request: impl Future<Output = std::result::Result<String, C::Error>>) -> Result<Reply> {
@@ -160,24 +178,24 @@ fn listed(id: Vmid, found: impl Iterator<Item = (i128, GuestStatus, Option<Strin
 pub trait Remote: Kind + Sized {
     fn submit<C: Client>(api: &Api<C>, op: &GuestOp<Self>) -> Result<Reply>
     where
-        AppError: From<C::Error>;
+        C::Error: ApiError;
     fn presence<C: Client>(api: &Api<C>, id: Vmid) -> Result<Presence>
     where
-        AppError: From<C::Error>;
+        C::Error: ApiError;
     fn address<C: Client>(api: &Api<C>, id: Vmid) -> Result<Option<Ipv4Addr>>
     where
-        AppError: From<C::Error>;
+        C::Error: ApiError;
 }
 
 impl Remote for Qemu {
     fn submit<C: Client>(api: &Api<C>, op: &GuestOp<Qemu>) -> Result<Reply>
     where
-        AppError: From<C::Error>,
+        C::Error: ApiError,
     {
         let guests = api.node().qemu();
         match op {
             GuestOp::Create(_) => Err(AppError::Api(ApiFault::CreationNeedsRootPam)),
-            GuestOp::Set(id, params) => api.call(guests.vmid(vmid(*id)?).config().put(params.clone())).map(|()| Reply::Done),
+            GuestOp::Set(id, params) => api.unit(guests.vmid(vmid(*id)?).config().put(params.clone())),
             GuestOp::Start(id, params) => api.task(guests.vmid(vmid(*id)?).status().start().post(params.clone())),
             GuestOp::Stop(id, params) => api.task(guests.vmid(vmid(*id)?).status().stop().post(params.clone())),
             GuestOp::Destroy(id, params) => api.task(guests.vmid(vmid(*id)?).delete(params.clone())),
@@ -187,7 +205,7 @@ impl Remote for Qemu {
 
     fn presence<C: Client>(api: &Api<C>, id: Vmid) -> Result<Presence>
     where
-        AppError: From<C::Error>,
+        C::Error: ApiError,
     {
         let found = api.call(api.node().qemu().get(qemu::GetParams::default()))?;
         Ok(listed(
@@ -207,7 +225,7 @@ impl Remote for Qemu {
 
     fn address<C: Client>(api: &Api<C>, id: Vmid) -> Result<Option<Ipv4Addr>>
     where
-        AppError: From<C::Error>,
+        C::Error: ApiError,
     {
         let reply = api.call(api.node().qemu().vmid(vmid(id)?).agent().network_get_interfaces().get())?;
         Ok(reply.additional_properties.get("result").and_then(agent_ipv4))
@@ -217,12 +235,12 @@ impl Remote for Qemu {
 impl Remote for Lxc {
     fn submit<C: Client>(api: &Api<C>, op: &GuestOp<Lxc>) -> Result<Reply>
     where
-        AppError: From<C::Error>,
+        C::Error: ApiError,
     {
         let guests = api.node().lxc();
         match op {
             GuestOp::Create(_) => Err(AppError::Api(ApiFault::CreationNeedsRootPam)),
-            GuestOp::Set(id, params) => api.call(guests.vmid(vmid(*id)?).config().put(params.clone())).map(|()| Reply::Done),
+            GuestOp::Set(id, params) => api.unit(guests.vmid(vmid(*id)?).config().put(params.clone())),
             GuestOp::Start(id, params) => api.task(guests.vmid(vmid(*id)?).status().start().post(params.clone())),
             GuestOp::Stop(id, params) => api.task(guests.vmid(vmid(*id)?).status().stop().post(params.clone())),
             GuestOp::Destroy(id, params) => api.task(guests.vmid(vmid(*id)?).delete(params.clone())),
@@ -232,7 +250,7 @@ impl Remote for Lxc {
 
     fn presence<C: Client>(api: &Api<C>, id: Vmid) -> Result<Presence>
     where
-        AppError: From<C::Error>,
+        C::Error: ApiError,
     {
         let found = api.call(api.node().lxc().get())?;
         Ok(listed(
@@ -252,7 +270,7 @@ impl Remote for Lxc {
 
     fn address<C: Client>(api: &Api<C>, id: Vmid) -> Result<Option<Ipv4Addr>>
     where
-        AppError: From<C::Error>,
+        C::Error: ApiError,
     {
         let interfaces = api.call(api.node().lxc().vmid(vmid(id)?).interfaces().get())?;
         Ok(interfaces.into_iter().filter(|iface| iface.name != "lo").find_map(|iface| iface.inet.as_deref().and_then(cidr_ipv4)))
@@ -276,11 +294,21 @@ pub(crate) mod fake {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct FakeError(pub String);
+    pub enum FakeError {
+        Status(String),
+        NoData,
+        Decode(String),
+    }
 
     impl From<FakeError> for crate::types::AppError {
         fn from(error: FakeError) -> Self {
-            crate::types::AppError::ProxmoxError(error.0)
+            crate::types::AppError::ProxmoxError(format!("{error:?}"))
+        }
+    }
+
+    impl super::ApiError for FakeError {
+        fn empty_success(&self) -> bool {
+            *self == FakeError::NoData
         }
     }
 
@@ -339,10 +367,12 @@ pub(crate) mod fake {
             let asked = (method, String::from(path));
             async move {
                 match scripted {
-                    Some((expected, at, reply)) if (expected, at.clone()) == asked => {
-                        reply.map_err(FakeError).and_then(|text| serde_json::from_str(&text).map_err(|e| FakeError(e.to_string())))
-                    }
-                    other => Err(FakeError(format!("unexpected {:?} {}, scripted {other:?}", asked.0, asked.1))),
+                    Some((expected, at, reply)) if (expected, at.clone()) == asked => match reply {
+                        Err(status) => Err(FakeError::Status(status)),
+                        Ok(text) if text.trim() == "null" => Err(FakeError::NoData),
+                        Ok(text) => serde_json::from_str(&text).map_err(|e| FakeError::Decode(e.to_string())),
+                    },
+                    other => Err(FakeError::Status(format!("unexpected {:?} {}, scripted {other:?}", asked.0, asked.1))),
                 }
             }
         }

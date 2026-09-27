@@ -97,6 +97,7 @@ async fn webhook_handler(
     StatusCode::OK
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Serve,
     DeployOnce,
@@ -104,32 +105,81 @@ enum Mode {
     Plan,
 }
 
-impl Mode {
-    fn from_args() -> Self {
-        let args: Vec<String> = std::env::args().collect();
-        let has = |flag: &str| args.iter().any(|a| a == flag);
-        match (has("--plan"), has("--deploy-once"), has("--core")) {
-            (true, _, _) => Mode::Plan,
-            (false, true, true) => Mode::DeployCore,
-            (false, true, false) => Mode::DeployOnce,
-            (false, false, _) => Mode::Serve,
-        }
+#[derive(Debug, PartialEq, Eq)]
+struct Cli {
+    mode: Mode,
+    repo: Option<std::path::PathBuf>,
+}
+
+const USAGE: &str = "usage:\n  proxnix                                   serve webhooks and run the periodic reconcile\n  proxnix --deploy-once                     deploy local_repo once with the current pipeline\n  proxnix --deploy-once --core [--repo DIR] deploy once with the new engine\n  proxnix --plan [--repo DIR]               print what the new engine would do; writes nothing";
+
+fn parse_args(args: &[String]) -> std::result::Result<Cli, String> {
+    let (flags, repo) = match args.iter().position(|arg| arg == "--repo") {
+        None => (args.to_vec(), None),
+        Some(at) => match args.get(at + 1) {
+            Some(path) if !path.starts_with("--") => (
+                args.iter().enumerate().filter(|(index, _)| *index != at && *index != at + 1).map(|(_, arg)| arg.clone()).collect(),
+                Some(std::path::PathBuf::from(path)),
+            ),
+            _ => return Err(String::from("--repo needs a directory")),
+        },
+    };
+    let words: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let mode = match words.as_slice() {
+        [] => Mode::Serve,
+        ["--deploy-once"] => Mode::DeployOnce,
+        ["--deploy-once", "--core"] | ["--core", "--deploy-once"] => Mode::DeployCore,
+        ["--plan"] => Mode::Plan,
+        other => return Err(format!("unrecognised arguments {other:?}")),
+    };
+    match (mode, &repo) {
+        (Mode::Serve | Mode::DeployOnce, Some(_)) => Err(String::from("--repo only applies to --plan and --deploy-once --core")),
+        _ => Ok(Cli { mode, repo }),
     }
 }
 
-fn repo_arg(appconfig: &AppConfig) -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter()
-        .position(|a| a == "--repo")
-        .and_then(|at| args.get(at + 1).cloned())
-        .or_else(|| appconfig.local_repo.clone())
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> std::result::Result<Cli, String> {
+        parse_args(&args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn only_no_arguments_serves() {
+        assert_eq!(parse(&[]).unwrap().mode, Mode::Serve);
+        assert!(parse(&["--plna"]).is_err());
+        assert!(parse(&["--plan", "--deploy-once"]).is_err());
+        assert!(parse(&["--core"]).is_err());
+        assert!(parse(&["e10b8a3d07fda12c829b028ee5dd5a0ae7710cc4"]).is_err());
+    }
+
+    #[test]
+    fn the_engine_modes_take_an_optional_repo() {
+        assert_eq!(parse(&["--plan"]).unwrap(), Cli { mode: Mode::Plan, repo: None });
+        assert_eq!(
+            parse(&["--plan", "--repo", "/root/nixology"]).unwrap(),
+            Cli { mode: Mode::Plan, repo: Some(std::path::PathBuf::from("/root/nixology")) }
+        );
+        assert_eq!(parse(&["--repo", "/r", "--core", "--deploy-once"]).unwrap().mode, Mode::DeployCore);
+        assert!(parse(&["--plan", "--repo"]).is_err());
+        assert!(parse(&["--plan", "--repo", "--core"]).is_err());
+        assert!(parse(&["--deploy-once", "--repo", "/r"]).is_err());
+        assert!(parse(&["--repo", "/r"]).is_err());
+    }
 }
 
-async fn run_engine(mode: Mode, appconfig: AppConfig, pve: Pve) {
-    let Some(repo) = repo_arg(&appconfig) else {
+async fn run_engine(mode: Mode, repo: Option<std::path::PathBuf>, appconfig: AppConfig, pve: Pve) {
+    let Some(repo) = repo.or_else(|| appconfig.local_repo.clone().map(std::path::PathBuf::from)) else {
         error!("--plan and --deploy-once --core need --repo PATH or services.proxnix.local_repo");
         std::process::exit(2);
     };
+    if !repo.is_dir() {
+        error!("--repo {} is not a directory; pass the path of a checkout, not a commit", repo.display());
+        std::process::exit(2);
+    }
+    let repo = repo.to_string_lossy().to_string();
     let finished = tokio::task::spawn_blocking(move || match mode {
         Mode::Plan => engine::plan(&appconfig, &pve, &repo).map(|(prepared, projections)| {
             println!("{}", render::plan(&prepared.commit, &projections));
@@ -157,6 +207,14 @@ async fn run_engine(mode: Mode, appconfig: AppConfig, pve: Pve) {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cli = match parse_args(&args) {
+        Ok(cli) => cli,
+        Err(problem) => {
+            eprintln!("proxnix: {problem}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -171,9 +229,9 @@ async fn main() {
     let pve = Pve::connect(&appconfig.proxmox, tokio::runtime::Handle::current())
         .expect("Failed to set up the Proxmox API client");
 
-    let mode = Mode::from_args();
+    let mode = cli.mode;
     if let Mode::Plan | Mode::DeployCore = mode {
-        run_engine(mode, appconfig, pve).await;
+        run_engine(mode, cli.repo, appconfig, pve).await;
         return;
     }
     if let Mode::DeployOnce = mode {
