@@ -1,0 +1,5 @@
+error: pure_only: `mut` is not allowed; return a new value instead
+ --> tests/ui/fail/mut_param.rs:4:17
+  |
+4 | fn bump(value: &mut u8) {
+  |                 ^^^

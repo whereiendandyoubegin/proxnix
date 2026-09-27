@@ -5,7 +5,7 @@ use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use proxmox_api::nodes::node::{lxc, qemu};
-use proxnix_core::{GuestStatus, Slot, SlotId, Vmid, Workload};
+use proxnix_core::{GuestStatus, Slot, SlotId, Vmid};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
@@ -19,7 +19,7 @@ use crate::{
     state::{self, Deployed, Observe, is_proxnix_managed},
     types::{
         AppConfig, AppError, ContainerConfig, FieldChange, Outcome, OutcomeKind, Result, SkipReason, Timing,
-        VMConfig,
+        VMConfig, Workload,
     },
 };
 
@@ -130,7 +130,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             "[{}] provisioning {:?} as {} (inactive, not started)",
             self.config.name(),
             self.new_slot,
-            target.inner()
+            target.inner().get()
         );
         {
             let _storage = PROVISION_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -153,10 +153,10 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
         };
         let (target, new_backend_id) = (*target, new_backend_id.clone());
         let config = self.config;
-        info!("[{}] starting {}", config.name(), target.inner());
+        info!("[{}] starting {}", config.name(), target.inner().get());
         Cli.run(&GuestOp::<T::Kind>::start(target.inner()))?;
         let new_ip = await_ip::<T>(self.pve, config, target.inner())?;
-        info!("[{}] {} came up at {}", config.name(), target.inner(), new_ip);
+        info!("[{}] {} came up at {}", config.name(), target.inner().get(), new_ip);
         match self.backend_pool {
             Some(pool) if !pool.contains(new_ip) => warn!(
                 "{} came up on {}, which is outside the declared backend pool {}-{}; the pool declaration and the dhcp scope disagree",
@@ -230,7 +230,7 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             info!(
                 "[{}] traffic is on the new instance, retiring {}",
                 self.config.name(),
-                old.slot_id.inner()
+                old.slot_id.inner().get()
             );
             Cli.run_all(&GuestOp::<T::Kind>::retire(old.slot_id.inner()))
         })
@@ -247,10 +247,10 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             name,
             new_hash,
             self.new_slot,
-            target.inner(),
+            target.inner().get(),
             self.retiring
                 .as_ref()
-                .map_or_else(|| "none".to_string(), |old| old.slot_id.inner().to_string())
+                .map_or_else(|| "none".to_string(), |old| old.slot_id.inner().get().to_string())
         );
 
         let switched = self
@@ -262,11 +262,11 @@ impl<'a, T: Deployments> DeployContext<'a, T> {
             Ok(ctx) => {
                 let result = ctx.maybe_destroy_old();
                 match &result {
-                    Ok(()) => info!("[{}] deployed, now serving from {}", name, target.inner()),
+                    Ok(()) => info!("[{}] deployed, now serving from {}", name, target.inner().get()),
                     Err(e) => warn!(
                         "[{}] traffic is on {} but retiring the old instance failed: {}",
                         name,
-                        target.inner(),
+                        target.inner().get(),
                         e
                     ),
                 }
@@ -348,7 +348,7 @@ fn await_ip<T: Deployments>(pve: &Pve, config: &T, id: Vmid) -> Result<Ipv4Addr>
         "[{}] waiting up to {}s for {} to report an address",
         config.name(),
         timeout.as_secs(),
-        id
+        id.get()
     );
     (0_u32..)
         .take_while(|_| started.elapsed() < timeout)
@@ -358,7 +358,7 @@ fn await_ip<T: Deployments>(pve: &Pve, config: &T, id: Vmid) -> Result<Ipv4Addr>
                 if !usable {
                     warn!(
                         "[{}] {} self-assigned {}, dhcp has not answered",
-                        config.name(), id, ip
+                        config.name(), id.get(), ip
                     );
                 }
                 usable
@@ -367,7 +367,7 @@ fn await_ip<T: Deployments>(pve: &Pve, config: &T, id: Vmid) -> Result<Ipv4Addr>
                     info!(
                         "[{}] still no address on {} after {}s (attempt {}, timeout {}s)",
                         config.name(),
-                        id,
+                        id.get(),
                         started.elapsed().as_secs(),
                         attempt,
                         timeout.as_secs()
@@ -380,6 +380,13 @@ fn await_ip<T: Deployments>(pve: &Pve, config: &T, id: Vmid) -> Result<Ipv4Addr>
             }
         })
         .ok_or(AppError::IpTimeoutError(id))
+}
+
+fn status_label(status: GuestStatus) -> &'static str {
+    match status {
+        GuestStatus::Running => "running",
+        GuestStatus::Stopped => "stopped",
+    }
 }
 
 enum RouteGap {
@@ -419,7 +426,7 @@ fn upkeep<T: Deployments>(config: &T, deployed: Option<&DeployedOf<T>>) -> Upkee
                     (_, None) => Upkeep::Unroutable { gap: RouteGap::NoNixHash },
                 },
             },
-            GuestStatus::Other(_) => Upkeep::Start { id: d.id, status: d.status.clone() },
+            GuestStatus::Stopped => Upkeep::Start { id: d.id, status: d.status },
         },
     }
 }
@@ -540,8 +547,8 @@ pub fn ensure_running<T: Deployments>(configs: &[T], settings: &AppConfig, pve: 
                 info!(
                     "periodic reconcile: {} (id {}) is {}, starting",
                     config.name(),
-                    id,
-                    status
+                    id.get(),
+                    status_label(*status)
                 );
                 match Cli.run(&GuestOp::<T::Kind>::start(*id)) {
                     Ok(Settled::Changed) => info!("periodic reconcile: started {}", config.name()),
@@ -592,12 +599,12 @@ fn prepare_target<T: Deployments>(pve: &Pve, name: &str, target: SlotId) -> Resu
         TargetState::Managed => {
             info!(
                 "[{}] reclaiming Proxnix-managed inactive slot {} before provisioning",
-                name, id
+                name, id.get()
             );
             Cli.run_all(&GuestOp::<T::Kind>::reclaim(id))
         }
         TargetState::Unmanaged => Err(AppError::CmdError(format!(
-            "refusing to replace instance {id} because it is not tagged 'proxnix'"
+            "refusing to replace instance {} because it is not tagged 'proxnix'", id.get()
         ))),
     }
 }
@@ -608,15 +615,15 @@ fn abort<T: Deployments>(pve: &Pve, target: SlotId) {
         Ok(TargetState::Vacant) => {}
         Ok(TargetState::Unmanaged) => warn!(
             "abort: refusing to destroy {}, it is not tagged 'proxnix'",
-            id
+            id.get()
         ),
         Ok(TargetState::Managed) => {
-            warn!("deploy failed, destroying Proxnix-managed instance {}", id);
+            warn!("deploy failed, destroying Proxnix-managed instance {}", id.get());
             if let Err(e) = Cli.run_all(&GuestOp::<T::Kind>::reclaim(id)) {
-                warn!("abort: could not destroy {}: {}", id, e);
+                warn!("abort: could not destroy {}: {}", id.get(), e);
             }
         }
-        Err(e) => warn!("abort: could not inspect {}: {}", id, e),
+        Err(e) => warn!("abort: could not inspect {}: {}", id.get(), e),
     }
 }
 
@@ -876,7 +883,7 @@ fn destroy_orphan<T: Deployments>(name: &str, id: Vmid, settings: &AppConfig) ->
             name, e
         ),
     }
-    info!("[{}] destroying orphaned instance {}", name, id);
+    info!("[{}] destroying orphaned instance {}", name, id.get());
     Cli.run_all(&GuestOp::<T::Kind>::retire(id))
 }
 
@@ -1078,13 +1085,13 @@ mod tests {
     fn a_stopped_workload_is_started_and_not_routed() {
         let config = vm(false);
         let stopped = Deployed {
-            status: GuestStatus::from("stopped"),
+            status: GuestStatus::Stopped,
             ..deployed("abc123", Slot::Blue)
         };
         match upkeep(&config, Some(&stopped)) {
             Upkeep::Start { id, status } => {
                 assert_eq!(id, Vmid::new(823));
-                assert_eq!(status.to_string(), "stopped");
+                assert_eq!(status, GuestStatus::Stopped);
             }
             _ => panic!("a stopped workload should be started"),
         }

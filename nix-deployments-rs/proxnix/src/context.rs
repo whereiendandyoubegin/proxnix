@@ -157,7 +157,12 @@ impl Tags {
     pub fn render(&self) -> String {
         let base = format!(
             "proxnix;nix-{};commit-{};{}",
-            self.nix_hash, self.commit, self.slot
+            self.nix_hash,
+            self.commit,
+            match self.slot {
+                Slot::Blue => "slot-blue",
+                Slot::Green => "slot-green",
+            }
         );
         match self.service_ip {
             Some(ip) => format!("{base};ip-{ip}"),

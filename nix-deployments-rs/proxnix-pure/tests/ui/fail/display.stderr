@@ -1,0 +1,17 @@
+error: pure_only: `mut` is not allowed; return a new value instead
+ --> tests/ui/fail/display.rs:8:23
+  |
+8 |     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  |                       ^^^
+
+error: pure_only: rendering to text is not allowed in pure code
+ --> tests/ui/fail/display.rs:9:9
+  |
+9 |         write!(f, "{}", self.0)
+  |         ^^^^^
+
+error: pure_only: rendering to text is not allowed in pure code
+ --> tests/ui/fail/display.rs:7:1
+  |
+7 | impl std::fmt::Display for Name {
+  | ^^^^

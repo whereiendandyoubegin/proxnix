@@ -1,0 +1,5 @@
+error: pure_only: strings are not allowed in signatures; take and return typed values
+  --> tests/ui/fail/as_ref_other.rs:15:23
+   |
+15 |     fn text(&self) -> &str {
+   |                       ^

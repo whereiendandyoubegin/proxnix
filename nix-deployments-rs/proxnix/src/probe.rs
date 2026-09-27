@@ -69,7 +69,7 @@ pub enum ExecOutcome {
 pub fn exec(ct_id: Vmid, argv: &[&str], timeout: Duration) -> Result<ExecOutcome> {
     let mut child = Command::new(Lxc::TOOL)
         .arg("exec")
-        .arg(ct_id.to_string())
+        .arg(ct_id.get().to_string())
         .arg("--")
         .args(argv)
         .stdout(Stdio::piped())
@@ -96,7 +96,7 @@ pub fn exec(ct_id: Vmid, argv: &[&str], timeout: Duration) -> Result<ExecOutcome
             let _ = child.wait();
             Err(AppError::CmdError(format!(
                 "pct exec {} {:?} did not return within {}s",
-                ct_id,
+                ct_id.get(),
                 argv,
                 timeout.as_secs()
             )))

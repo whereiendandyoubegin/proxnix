@@ -132,7 +132,7 @@ impl Bytes {
 }
 
 fn required<T>(value: Option<T>, id: Vmid, key: &str) -> Result<T> {
-    value.ok_or_else(|| AppError::ProxmoxError(format!("config of {id} is missing `{key}`")))
+    value.ok_or_else(|| AppError::ProxmoxError(format!("config of {} is missing `{key}`", id.get())))
 }
 
 fn narrowed<T: TryFrom<i128, Error = std::num::TryFromIntError>>(value: &impl BoundedInteger) -> Result<T> {
@@ -145,7 +145,7 @@ fn listed_qemu(item: qemu::GetOutputItems) -> Result<Listed<QemuListing>> {
         name: item.name.unwrap_or_default(),
         status: match item.status {
             qemu::Status::Running => GuestStatus::Running,
-            qemu::Status::Stopped => GuestStatus::from("stopped"),
+            qemu::Status::Stopped => GuestStatus::Stopped,
         },
         tags: item.tags,
         extra: QemuListing {
@@ -161,7 +161,7 @@ fn listed_lxc(item: lxc::GetOutputItems) -> Result<Listed<()>> {
         name: item.name.unwrap_or_default(),
         status: match item.status {
             lxc::Status::Running => GuestStatus::Running,
-            lxc::Status::Stopped => GuestStatus::from("stopped"),
+            lxc::Status::Stopped => GuestStatus::Stopped,
         },
         tags: item.tags,
         extra: (),
@@ -228,7 +228,7 @@ impl Observe for Qemu {
         .additional_properties
         .get("result")
         .and_then(agent_ipv4)
-        .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {id}")))
+        .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {}", id.get())))
     }
 }
 
@@ -283,7 +283,7 @@ impl Observe for Lxc {
             .into_iter()
             .filter(|iface| iface.name != "lo")
             .find_map(|iface| iface.inet.as_deref().and_then(cidr_ipv4))
-            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {id}")))
+            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {}", id.get())))
     }
 }
 
@@ -590,7 +590,7 @@ mod tests {
     }
 
     fn never_read<T>(id: Vmid) -> Result<T> {
-        panic!("the config of {id} must not be read")
+        panic!("the config of {} must not be read", id.get())
     }
 
     #[test]
@@ -706,7 +706,7 @@ mod tests {
             vec![Listed {
                 id: Vmid::new(833),
                 name: "pihole".to_string(),
-                status: GuestStatus::from("stopped"),
+                status: GuestStatus::Stopped,
                 tags: None,
                 extra: (),
             }]
@@ -758,13 +758,13 @@ mod tests {
             .map(|item| listed_qemu(item).unwrap())
             .collect();
         for id in managed_ids(&listed) {
-            let config: Option<qemu::vmid::config::GetOutput> = fixture(&format!("qemu/{id}/config.json"));
+            let config: Option<qemu::vmid::config::GetOutput> = fixture(&format!("qemu/{}/config.json", id.get()));
             let listing = QemuListing { memory_mb: 0, disk_gb: 0.0 };
             if let Some(config) = config {
-                assert!(Qemu::decode(id, listing, config).is_ok(), "config of {id} is unusable");
+                assert!(Qemu::decode(id, listing, config).is_ok(), "config of {} is unusable", id.get());
             }
             let agent: Option<qemu::vmid::agent::network_get_interfaces::GetOutput> =
-                fixture(&format!("qemu/{id}/agent/network-get-interfaces.json"));
+                fixture(&format!("qemu/{}/agent/network-get-interfaces.json", id.get()));
             if let Some(agent) = agent {
                 assert!(agent.additional_properties.get("result").and_then(agent_ipv4).is_some());
             }
@@ -779,12 +779,12 @@ mod tests {
             .map(|item| listed_lxc(item).unwrap())
             .collect();
         for id in managed_ids(&listed) {
-            let config: Option<lxc::vmid::config::GetOutput> = fixture(&format!("lxc/{id}/config.json"));
+            let config: Option<lxc::vmid::config::GetOutput> = fixture(&format!("lxc/{}/config.json", id.get()));
             if let Some(config) = config {
-                assert!(Lxc::decode(id, (), config).is_ok(), "config of {id} is unusable");
+                assert!(Lxc::decode(id, (), config).is_ok(), "config of {} is unusable", id.get());
             }
             let interfaces: Option<Vec<lxc::vmid::interfaces::GetOutputItems>> =
-                fixture(&format!("lxc/{id}/interfaces.json"));
+                fixture(&format!("lxc/{}/interfaces.json", id.get()));
             if let Some(interfaces) = interfaces {
                 assert!(
                     interfaces
@@ -821,5 +821,73 @@ mod tests {
         let partial = NIXOLOGY_APPCONFIG.replace("\"nix_build\":3600000,", "");
         assert_ne!(partial, NIXOLOGY_APPCONFIG);
         assert!(parse_appconfig(&partial).is_err());
+    }
+
+    fn raw_fixture(path: &str) -> serde_json::Value {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api").join(path),
+        )
+        .unwrap_or_else(|e| panic!("fixture {path} is missing: {e}"));
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn raw_tags(raw: &serde_json::Value) -> Vec<(u64, Option<String>)> {
+        raw.as_array()
+            .unwrap()
+            .iter()
+            .map(|item| (item["vmid"].as_u64().unwrap(), item["tags"].as_str().map(str::to_string)))
+            .collect()
+    }
+
+    #[test]
+    fn decoded_list_tags_match_what_proxmox_returned() {
+        let lxc_raw = raw_fixture("lxc.json");
+        let qemu_raw = raw_fixture("qemu.json");
+        let lxc: Vec<(u64, Option<String>)> = decoded::<Vec<lxc::GetOutputItems>>(&lxc_raw)
+            .into_iter()
+            .map(|item| listed_lxc(item).unwrap())
+            .map(|entry| (u64::from(entry.id.get()), entry.tags))
+            .collect();
+        let qemu: Vec<(u64, Option<String>)> = decoded::<Vec<qemu::GetOutputItems>>(&qemu_raw)
+            .into_iter()
+            .map(|item| listed_qemu(item).unwrap())
+            .map(|entry| (u64::from(entry.id.get()), entry.tags))
+            .collect();
+        assert_eq!(lxc, raw_tags(&lxc_raw));
+        assert_eq!(qemu, raw_tags(&qemu_raw));
+    }
+
+    fn names<X>(found: &HashMap<String, Deployed<X>>) -> std::collections::BTreeSet<String> {
+        found.keys().cloned().collect()
+    }
+
+    #[test]
+    fn the_inventory_built_from_real_responses_finds_every_managed_guest() {
+        let lxc = inventory::<Lxc>(
+            decoded::<Vec<lxc::GetOutputItems>>(&raw_fixture("lxc.json"))
+                .into_iter()
+                .map(|item| listed_lxc(item).unwrap())
+                .collect(),
+            |id| Ok(decoded(&raw_fixture(&format!("lxc/{}/config.json", id.get())))),
+        );
+        let qemu = inventory::<Qemu>(
+            decoded::<Vec<qemu::GetOutputItems>>(&raw_fixture("qemu.json"))
+                .into_iter()
+                .map(|item| listed_qemu(item).unwrap())
+                .collect(),
+            |id| Ok(decoded(&raw_fixture(&format!("qemu/{}/config.json", id.get())))),
+        );
+        match (lxc, qemu) {
+            (Ok(lxc), Ok(qemu)) => {
+                assert_eq!(
+                    names(&lxc),
+                    ["cloudflared", "flake-updater", "forgejo", "hydra", "monitoring", "postgres", "test-container"]
+                        .map(String::from)
+                        .into()
+                );
+                assert_eq!(names(&qemu), ["test-website"].map(String::from).into());
+            }
+            (lxc, qemu) => panic!("inventory failed: lxc {:?}, qemu {:?}", lxc.err(), qemu.err()),
+        }
     }
 }

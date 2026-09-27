@@ -1,0 +1,5 @@
+error: pure_only: `mut` is not allowed; return a new value instead
+ --> tests/ui/fail/static_mut.rs:4:8
+  |
+4 | static mut COUNTER: u8 = 0;
+  |        ^^^

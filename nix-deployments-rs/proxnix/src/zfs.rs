@@ -245,7 +245,7 @@ pub struct VolumeName(String);
 
 impl VolumeName {
     fn rootfs(target: SlotId) -> VolumeName {
-        VolumeName(format!("subvol-{}-disk-0", target.inner()))
+        VolumeName(format!("subvol-{}-disk-0", target.inner().get()))
     }
 }
 
@@ -370,7 +370,7 @@ impl BaseImage<Sealed> {
         if exists(dataset.as_str())? { Err(AppError::ZfsError(format!(
             "{} already exists; destroy the leftover volume before provisioning {}",
             dataset,
-            target.inner()
+            target.inner().get()
         ))) } else {
             zfs_clone(&Snapshot::base(&self.dataset), &dataset, size)?;
             Ok(RootfsClone { dataset, volume })

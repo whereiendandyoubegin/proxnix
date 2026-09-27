@@ -1,7 +1,7 @@
 use proxmox_api::nodes::node::qemu::Scsihw;
 use proxmox_api::types::bounded_integer::BoundedIntegerError;
 use proxmox_api::types::bounded_string::BoundedStringError;
-use proxnix_core::{Slot, SlotId, Vmid, Workload};
+use proxnix_core::{Slot, SlotId, Vmid};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -11,6 +11,14 @@ use std::{collections::HashMap, string::FromUtf8Error};
 
 use crate::context::ImageType;
 use crate::pipeline::WorkloadGroup;
+
+pub trait Workload {
+    fn name(&self) -> &str;
+    fn memory_mb(&self) -> u32;
+    fn cores(&self) -> u16;
+    fn disk_gb(&self) -> u32;
+    fn id_for_slot(&self, s: Slot) -> SlotId;
+}
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +59,7 @@ pub enum AppError {
     AddrParseErr(#[from] std::net::AddrParseError),
     #[error("Port out of range: {0}")]
     PortRangeError(#[from] std::num::TryFromIntError),
-    #[error("Timed out waiting for an IP address on instance {0}")]
+    #[error("Timed out waiting for an IP address on instance {}", .0.get())]
     IpTimeoutError(Vmid),
     #[error("Health check failed for {0}")]
     HealthCheckError(std::net::SocketAddr),

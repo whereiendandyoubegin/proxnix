@@ -1,0 +1,5 @@
+error: pure_only: strings are not allowed in signatures; take and return typed values
+ --> tests/ui/fail/nested_string.rs:4:15
+  |
+4 | fn names() -> Option<Vec<String>> {
+  |               ^^^^^^

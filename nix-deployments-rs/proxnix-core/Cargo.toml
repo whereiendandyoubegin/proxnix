@@ -5,5 +5,13 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+proxnix-pure = { path = "../proxnix-pure" }
 thiserror = "2.0.17"
 serde = { version = "1.0.228", features = ["derive"] }
+
+[dev-dependencies]
+trybuild = "1"
+
+[lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"

@@ -1,0 +1,5 @@
+error: pure_only: strings are not allowed in signatures; take and return typed values
+ --> tests/ui/fail/string_param.rs:4:17
+  |
+4 | fn length(text: &str) -> usize {
+  |                 ^

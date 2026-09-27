@@ -142,7 +142,7 @@ pub(crate) struct ConfPath(PathBuf);
 
 impl ConfPath {
     pub(crate) fn of(target: SlotId) -> ConfPath {
-        ConfPath(PathBuf::from(format!("/etc/pve/lxc/{}.conf", target.inner())))
+        ConfPath(PathBuf::from(format!("/etc/pve/lxc/{}.conf", target.inner().get())))
     }
 }
 

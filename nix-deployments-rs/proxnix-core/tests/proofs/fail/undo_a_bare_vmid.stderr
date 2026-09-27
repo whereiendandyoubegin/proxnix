@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/proofs/fail/undo_a_bare_vmid.rs:4:31
+  |
+4 |     let _ = GuestEffect::Undo(Vmid::new(844));
+  |             ----------------- ^^^^^^^^^^^^^^ expected `Provisioned`, found `Vmid`
+  |             |
+  |             arguments to this enum variant are incorrect
+  |
+note: tuple variant defined here
+ --> src/effect.rs
+  |
+  |     Undo(Provisioned),
+  |     ^^^^

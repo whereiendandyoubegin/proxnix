@@ -1,0 +1,5 @@
+error[E0451]: fields `id` and `kind` of struct `Provisioned` are private
+ --> tests/proofs/fail/forge_provisioned.rs:4:27
+  |
+4 |     let _ = Provisioned { id: Vmid::new(844), kind: GuestKind::Lxc };
+  |                           ^^ private field    ^^^^ private field

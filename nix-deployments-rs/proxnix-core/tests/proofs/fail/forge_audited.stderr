@@ -1,0 +1,5 @@
+error[E0451]: field `_proof` of struct `Audited` is private
+ --> tests/proofs/fail/forge_audited.rs:4:23
+  |
+4 |     let _ = Audited { _proof: () };
+  |                       ^^^^^^ private field

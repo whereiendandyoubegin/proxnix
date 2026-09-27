@@ -1,0 +1,5 @@
+error: pure_only: `mut` is not allowed; return a new value instead
+ --> tests/ui/fail/mut_self.rs:8:14
+  |
+8 |     fn bump(&mut self) {
+  |              ^^^

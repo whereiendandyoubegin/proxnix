@@ -2,11 +2,11 @@ use crate::api::{self, Cli, Execute, GuestOp, Lxc, Qemu};
 use crate::context::{ImageStore, StorePath, Tags};
 use crate::host::{ConfPath, LxcConf, copy_to_template_storage, prepare_bind_mount, write_conf};
 use crate::nix::find_in_repo;
-use crate::types::{AppError, BindMount, ContainerConfig, DiskBus, IdRange, MountMode, Result, VMConfig};
+use crate::types::{AppError, BindMount, ContainerConfig, DiskBus, IdRange, MountMode, Result, VMConfig, Workload};
 use crate::zfs::{BaseImage, DiskSize, ImageKey, Ownership, Sealed, Tarball, ZfsImages};
 use proxmox_api::nodes::node::lxc::{self, PostParams as LxcCreate, vmid::config::PutParams as LxcSet};
 use proxmox_api::nodes::node::qemu;
-use proxnix_core::{SlotId, Workload};
+use proxnix_core::SlotId;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -210,7 +210,7 @@ fn create_from_clone(
     };
     if let Err(e) = write_conf(&ConfPath::of(target), &conf) {
         if let Err(cleanup) = clone.discard() {
-            warn!("could not discard rootfs clone for {}: {}", target.inner(), cleanup);
+            warn!("could not discard rootfs clone for {}: {}", target.inner().get(), cleanup);
         }
         return Err(e);
     }
@@ -222,7 +222,7 @@ fn create_from_clone(
         Ok(_) => Ok(()),
         Err(e) => {
             if let Err(cleanup) = Cli.run(&GuestOp::<Lxc>::destroy(id)) {
-                warn!("could not remove half-configured container {}: {}", target.inner(), cleanup);
+                warn!("could not remove half-configured container {}: {}", target.inner().get(), cleanup);
             }
             Err(e)
         }

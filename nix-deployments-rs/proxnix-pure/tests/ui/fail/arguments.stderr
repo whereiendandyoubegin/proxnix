@@ -1,0 +1,5 @@
+error: pure_only takes no arguments
+ --> tests/ui/fail/arguments.rs:3:13
+  |
+3 | #[pure_only(strict)]
+  |             ^^^^^^
