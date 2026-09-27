@@ -45,6 +45,14 @@
       };
       proxnixPkg = rustPlatform.buildRustPackage commonAttrs;
 
+      proxnix = pkgs.writeShellApplication {
+        name = "proxnix";
+        text = ''
+          ${nixology.packages.${system}.proxnix-secrets}/bin/proxnix-secrets
+          exec ${proxnixPkg}/bin/proxnix "$@"
+        '';
+      };
+
       debtmap = rustPlatform.buildRustPackage {
         pname = "debtmap";
         version = "unstable";
@@ -97,8 +105,7 @@
         [Service]
         Type=simple
         Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
-        ExecStartPre=${nixology.packages.${system}.proxnix-secrets}/bin/proxnix-secrets
-        ExecStart=${proxnixPkg}/bin/proxnix
+        ExecStart=${proxnix}/bin/proxnix
         Restart=always
         RestartSec=5
 
@@ -125,7 +132,7 @@
       };
     in {
       packages.${system} = {
-        default = proxnixPkg;
+        default = proxnix;
         sozu = pkgs.sozu;
       };
 

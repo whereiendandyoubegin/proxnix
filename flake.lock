@@ -62,11 +62,11 @@
         "website": "website"
       },
       "locked": {
-        "lastModified": 1790373748,
-        "narHash": "sha256-EyPZDoMWKaQ9mERbeVmN+UyLx6SbQ2lA+3xcXKc37vw=",
+        "lastModified": 1790524805,
+        "narHash": "sha256-V4+9Ij2uxZBNhsn7jSyrOjaFNk2ubvuVJCXxTV1XK3s=",
         "ref": "refs/heads/main",
-        "rev": "3770b8f3321698e8f4fad6281eb956be21d89b95",
-        "revCount": 184,
+        "rev": "fbf30d0d1cd71a88afd8364446717ac96e65cb2b",
+        "revCount": 185,
         "type": "git",
         "url": "ssh://git@forgejo.lan:2222/dan/nixology.git"
       },
