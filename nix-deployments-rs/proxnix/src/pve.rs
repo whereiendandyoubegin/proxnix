@@ -1,4 +1,5 @@
 use crate::types::{AppError, Result};
+use proxmox_api::access::AccessClient;
 use proxmox_api::nodes::NodesClient;
 use proxmox_api::nodes::node::NodeClient;
 use std::future::Future;
@@ -61,6 +62,10 @@ impl Pve {
 
     pub fn node(&self) -> NodeClient<&proxmox_api::ReqwestClient> {
         NodesClient::new(&self.client).node(&self.node)
+    }
+
+    pub fn access(&self) -> AccessClient<&proxmox_api::ReqwestClient> {
+        AccessClient::new(&self.client)
     }
 
     pub fn call<T>(&self, request: impl Future<Output = std::result::Result<T, proxmox_api::ReqwestError>>) -> Result<T> {

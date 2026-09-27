@@ -4,7 +4,12 @@ use crate::pve::Pve;
 use crate::types::{AppConfig, AppError, BindMount, DesiredState, MountMode, Result};
 use proxmox_api::nodes::node::{lxc, qemu};
 use proxmox_api::types::bounded_integer::BoundedInteger;
-use proxnix_core::{GuestStatus, Slot, Vmid};
+use proxmox_api::access::permissions;
+use proxnix_core::{
+    Audited, Cores, DiskGib, Grant, GuestName, GuestPath, GuestStatus, HostPath, KindFacts, MemoryMb, Mount,
+    MountMode as CoreMountMode, Observation, Permissions, Privilege, RawTags, Resources as CoreResources, Sighting,
+    Slot, Sockets, VisibilityFault, Vmid,
+};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -97,7 +102,7 @@ pub struct LxcExtra {
 pub trait Observe: Kind {
     type Listing: Send;
     type Config: Send;
-    type Extra: Send + Sync;
+    type Extra: Send + Sync + Into<KindFacts>;
 
     fn list(pve: &Pve) -> Result<Vec<Listed<Self::Listing>>>;
     fn candidates(listed: Vec<Listed<Self::Listing>>) -> Vec<Listed<Self::Listing>> {
@@ -287,15 +292,122 @@ impl Observe for Lxc {
     }
 }
 
+pub fn audit(pve: &Pve) -> Result<Audited> {
+    audited(
+        &pve.call(pve.access().permissions().get(permissions::GetParams {
+            path: Some(String::from("/vms")),
+            ..permissions::GetParams::default()
+        }))?
+        .additional_properties,
+    )
+}
+
+fn audited(granted: &HashMap<String, serde_json::Value>) -> Result<Audited> {
+    let vm_audit = match granted
+        .get("/vms")
+        .and_then(|privileges| privileges.get("VM.Audit"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(1) => Grant::Granted,
+        _ => Grant::Denied,
+    };
+    Audited::try_from(Permissions { vm_audit }).map_err(|fault| match fault {
+        VisibilityFault::NoVmAudit => AppError::ProxmoxError(String::from(
+            "the api token lacks VM.Audit on /vms, so proxmox would hide every guest; refusing to observe",
+        )),
+    })
+}
+
+pub fn observe(pve: &Pve) -> Result<Observation> {
+    let audited = audit(pve)?;
+    let qemu = sightings::<Qemu>(Qemu::list(pve)?, |id| Qemu::config(pve, id))?;
+    let lxc = sightings::<Lxc>(Lxc::list(pve)?, |id| Lxc::config(pve, id))?;
+    Ok(Observation::new(audited, qemu.into_iter().chain(lxc).collect()))
+}
+
+fn sightings<K: Observe>(
+    listed: Vec<Listed<K::Listing>>,
+    config: impl Fn(Vmid) -> Result<K::Config> + Sync,
+) -> Result<Vec<Sighting>> {
+    listed
+        .into_par_iter()
+        .map(|entry| {
+            let fetched = config(entry.id)?;
+            sighting::<K>(entry, fetched)
+        })
+        .collect()
+}
+
+fn sighting<K: Observe>(entry: Listed<K::Listing>, config: K::Config) -> Result<Sighting> {
+    let Listed { id, name, status, extra, .. } = entry;
+    let tags = RawTags::from(K::tags_of(&config).map(str::to_string).unwrap_or_default());
+    let (resources, extra) = K::decode(id, extra, config)?;
+    Ok(Sighting {
+        id,
+        name: GuestName(name),
+        status,
+        tags,
+        resources: observed_resources(&resources, id)?,
+        facts: extra.into(),
+    })
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn observed_resources(resources: &Resources, id: Vmid) -> Result<CoreResources> {
+    let disk = resources.disk_gb.round();
+    if disk.is_finite() && (0.0..=f64::from(u32::MAX)).contains(&disk) {
+        Ok(CoreResources {
+            memory: MemoryMb(resources.memory_mb),
+            disk: DiskGib(disk as u32),
+            cores: Cores(resources.cores),
+        })
+    } else {
+        Err(AppError::ProxmoxError(format!(
+            "guest {} reports an unusable disk size of {} GiB",
+            id.get(),
+            resources.disk_gb
+        )))
+    }
+}
+
+impl From<QemuExtra> for KindFacts {
+    fn from(extra: QemuExtra) -> KindFacts {
+        KindFacts::Qemu { sockets: Sockets(extra.sockets) }
+    }
+}
+
+impl From<LxcExtra> for KindFacts {
+    fn from(extra: LxcExtra) -> KindFacts {
+        KindFacts::Lxc {
+            privilege: if extra.privileged { Privilege::Privileged } else { Privilege::Unprivileged },
+            mounts: extra
+                .bind_mounts
+                .into_iter()
+                .map(|mount| Mount {
+                    host: HostPath(mount.host_path),
+                    guest: GuestPath(mount.container_path),
+                    mode: match mount.mode {
+                        MountMode::ReadOnly => CoreMountMode::ReadOnly,
+                        MountMode::ReadWrite => CoreMountMode::ReadWrite,
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
 pub fn deployed<K: Observe>(pve: &Pve) -> Result<HashMap<String, Deployed<K::Extra>>> {
+    audit(pve)?;
     inventory::<K>(K::list(pve)?, |id| K::config(pve, id))
 }
 
 pub fn exists<K: Observe>(pve: &Pve, id: Vmid) -> Result<bool> {
+    audit(pve)?;
     Ok(K::list(pve)?.iter().any(|entry| entry.id == id))
 }
 
 pub fn tags<K: Observe>(pve: &Pve, id: Vmid) -> Result<Option<String>> {
+    audit(pve)?;
     Ok(K::tags_of(&K::config(pve, id)?).map(str::to_string))
 }
 
@@ -889,5 +1001,149 @@ mod tests {
             }
             (lxc, qemu) => panic!("inventory failed: lxc {:?}, qemu {:?}", lxc.err(), qemu.err()),
         }
+    }
+
+    #[test]
+    fn every_captured_config_decodes_including_unmanaged_guests() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api");
+        let failures: Vec<String> = ["qemu", "lxc"]
+            .into_iter()
+            .flat_map(|kind| {
+                std::fs::read_dir(dir.join(kind))
+                    .unwrap()
+                    .map(move |entry| (kind, entry.unwrap().file_name().to_string_lossy().to_string()))
+            })
+            .filter_map(|(kind, id)| {
+                let path = format!("{kind}/{id}/config.json");
+                let raw = raw_fixture(&path);
+                let decoded = match kind {
+                    "qemu" => serde_json::from_str::<qemu::vmid::config::GetOutput>(&raw.to_string()).map(|_| ()),
+                    _ => serde_json::from_str::<lxc::vmid::config::GetOutput>(&raw.to_string()).map(|_| ()),
+                };
+                decoded.err().map(|e| format!("{path}: {e}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    fn captured_permissions() -> HashMap<String, serde_json::Value> {
+        decoded::<permissions::GetOutput>(&raw_fixture("permissions.json")).additional_properties
+    }
+
+    fn observed_from_fixtures(granted: &HashMap<String, serde_json::Value>) -> Result<Observation> {
+        let audited = audited(granted)?;
+        let qemu = sightings::<Qemu>(
+            decoded::<Vec<qemu::GetOutputItems>>(&raw_fixture("qemu.json"))
+                .into_iter()
+                .map(|item| listed_qemu(item).unwrap())
+                .collect(),
+            |id| Ok(decoded(&raw_fixture(&format!("qemu/{}/config.json", id.get())))),
+        )?;
+        let lxc = sightings::<Lxc>(
+            decoded::<Vec<lxc::GetOutputItems>>(&raw_fixture("lxc.json"))
+                .into_iter()
+                .map(|item| listed_lxc(item).unwrap())
+                .collect(),
+            |id| Ok(decoded(&raw_fixture(&format!("lxc/{}/config.json", id.get())))),
+        )?;
+        Ok(Observation::new(audited, qemu.into_iter().chain(lxc).collect()))
+    }
+
+    fn without_vm_audit(granted: &HashMap<String, serde_json::Value>) -> HashMap<String, serde_json::Value> {
+        granted
+            .iter()
+            .map(|(path, privileges)| {
+                let kept: serde_json::Map<String, serde_json::Value> = privileges
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(privilege, _)| privilege.as_str() != "VM.Audit")
+                    .map(|(privilege, value)| (privilege.clone(), value.clone()))
+                    .collect();
+                (path.clone(), serde_json::Value::Object(kept))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_captured_token_permissions_prove_the_guests_are_visible() {
+        assert!(audited(&captured_permissions()).is_ok());
+    }
+
+    #[test]
+    fn a_token_without_vm_audit_is_refused_instead_of_seeing_an_empty_cluster() {
+        let stripped = without_vm_audit(&captured_permissions());
+        assert_ne!(stripped, captured_permissions());
+        assert!(audited(&stripped).is_err());
+        assert!(audited(&HashMap::new()).is_err());
+        assert!(audited(&[(String::from("/vms"), json!({ "VM.Audit": 0 }))].into()).is_err());
+        assert!(observed_from_fixtures(&stripped).is_err());
+    }
+
+    #[test]
+    fn the_observation_of_the_real_cluster_holds_every_managed_guest_and_nothing_else() {
+        let observed = observed_from_fixtures(&captured_permissions()).unwrap();
+        let managed: std::collections::BTreeSet<(u32, String)> = observed
+            .managed()
+            .iter()
+            .map(|managed| (managed.id().get(), managed.guest().name().0.clone()))
+            .collect();
+        assert_eq!(
+            managed,
+            [
+                (823, "test-website"),
+                (841, "flake-updater"),
+                (842, "postgres"),
+                (843, "monitoring"),
+                (844, "forgejo"),
+                (845, "cloudflared"),
+                (846, "hydra"),
+                (930, "test-container"),
+            ]
+            .map(|(id, name)| (id, String::from(name)))
+            .into()
+        );
+        assert!(observed.anomalies().is_empty(), "{:?}", observed.anomalies());
+    }
+
+    #[test]
+    fn unmanaged_guests_occupy_their_ids_and_free_ids_are_vacant() {
+        let observed = observed_from_fixtures(&captured_permissions()).unwrap();
+        for id in [200, 201, 801, 900] {
+            assert_eq!(
+                observed.slot(Vmid::new(id)),
+                proxnix_core::SlotState::Occupied(proxnix_core::Occupant::Unmanaged(Vmid::new(id)))
+            );
+        }
+        for id in [944, 923, 941] {
+            assert!(matches!(observed.slot(Vmid::new(id)), proxnix_core::SlotState::Vacant(v) if v.id() == Vmid::new(id)));
+        }
+    }
+
+    #[test]
+    fn a_managed_guest_carries_what_proxmox_reported_about_it() {
+        let observed = observed_from_fixtures(&captured_permissions()).unwrap();
+        let forgejo = match observed.slot(Vmid::new(844)) {
+            proxnix_core::SlotState::Occupied(proxnix_core::Occupant::Managed(managed)) => managed,
+            other => panic!("844 must be managed, got {other:?}"),
+        };
+        assert_eq!(forgejo.tags().slot, Slot::Blue);
+        assert_eq!(forgejo.tags().nix.as_ref(), "78s0iadvjz6s48aqvx4rw78lwrzkjzlw");
+        assert_eq!(forgejo.tags().service_ip, Some(Ipv4Addr::new(192, 168, 1, 214)));
+        assert_eq!(
+            forgejo.guest().resources(),
+            CoreResources { memory: MemoryMb(2048), disk: DiskGib(20), cores: Cores(2) }
+        );
+        assert!(matches!(
+            forgejo.guest().facts(),
+            KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts } if mounts.len() == 3
+        ));
+        let website = observed.managed_named(&GuestName(String::from("test-website")));
+        assert_eq!(website.len(), 1);
+        assert_eq!(
+            website[0].guest().resources(),
+            CoreResources { memory: MemoryMb(2048), disk: DiskGib(10), cores: Cores(2) }
+        );
+        assert_eq!(website[0].guest().facts(), &KindFacts::Qemu { sockets: Sockets(1) });
     }
 }
