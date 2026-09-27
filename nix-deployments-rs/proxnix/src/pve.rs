@@ -64,6 +64,10 @@ impl Pve {
         NodesClient::new(&self.client).node(&self.node)
     }
 
+    pub fn api(&self, poll: std::time::Duration, timeout: std::time::Duration) -> crate::remote::Api<proxmox_api::ReqwestClient> {
+        crate::remote::Api::new(self.client.clone(), self.node.clone(), self.runtime.clone(), poll, timeout)
+    }
+
     pub fn access(&self) -> AccessClient<&proxmox_api::ReqwestClient> {
         AccessClient::new(&self.client)
     }

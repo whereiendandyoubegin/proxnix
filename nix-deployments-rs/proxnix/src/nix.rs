@@ -148,93 +148,105 @@ pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
     Ok(parsed)
 }
 
-pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str, timeout: Duration) -> Result<String> {
-    let flake_path = find_in_repo(repo_path, "flake.nix")?;
-    let nix_dir = Path::new(&flake_path)
-        .parent()
-        .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NixFault {
+    NoFlake(String),
+    Spawn(String),
+    TimedOut(Duration),
+    Exited { code: Option<i32>, stderr: String },
+    NoOutput,
+}
 
-    info!(
-        "Running nix build for config '{}' ({}) in {}",
-        config_name,
-        build_attr,
-        nix_dir.display()
-    );
-    let installable = format!(".#nixosConfigurations.{config_name}.{build_attr}");
+impl From<NixFault> for AppError {
+    fn from(fault: NixFault) -> Self {
+        AppError::NixError(format!("{fault:?}"))
+    }
+}
+
+const STDERR_TAIL: usize = 20;
+
+fn flake_dir(repo_path: &str) -> std::result::Result<PathBuf, NixFault> {
+    let flake_path = find_in_repo(repo_path, "flake.nix").map_err(|e| NixFault::NoFlake(e.to_string()))?;
+    Path::new(&flake_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| NixFault::NoFlake(String::from("flake.nix has no parent directory")))
+}
+
+fn nix(dir: &Path, label: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, NixFault> {
     let mut child = Command::new("nix")
-        .current_dir(nix_dir)
-        .arg("build")
-        .arg(&installable)
-        .arg("--no-link")
-        .stdout(Stdio::null())
+        .current_dir(dir)
+        .args(args)
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {e}")))?;
-
-    let pump = child.stderr.take().map(|stderr| {
-        let label = config_name.to_string();
+        .map_err(|e| NixFault::Spawn(e.to_string()))?;
+    let stdout_pump = child.stdout.take().map(|out| {
         std::thread::spawn(move || {
-            BufReader::new(stderr).lines().for_each(|line| match line {
-                Ok(text) if !text.trim().is_empty() => info!("[nix {}] {}", label, text.trim()),
-                _ => {}
-            });
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut BufReader::new(out), &mut text).ok();
+            text
         })
     });
-
-    let outcome = child::wait(&mut child, timeout)?;
-    if let Some(handle) = pump {
-        handle.join().ok();
+    let stderr_pump = child.stderr.take().map(|err| {
+        let label = label.to_string();
+        std::thread::spawn(move || {
+            let lines: Vec<String> = BufReader::new(err)
+                .lines()
+                .map_while(std::result::Result::ok)
+                .filter(|line| !line.trim().is_empty())
+                .inspect(|line| info!("[nix {}] {}", label, line.trim()))
+                .collect();
+            lines[lines.len().saturating_sub(STDERR_TAIL)..].to_vec()
+        })
+    });
+    let outcome = child::wait(&mut child, timeout).map_err(|e| NixFault::Spawn(e.to_string()))?;
+    if let Exit::TimedOut = outcome {
+        warn!("nix {} exceeded {}s, killing it", label, timeout.as_secs());
+        child.kill().ok();
+        child.wait().ok();
     }
-
+    let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr: Vec<String> = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
     match outcome {
-        Exit::TimedOut => {
-            warn!(
-                "nix build for '{}' exceeded {}s, killing it",
-                config_name,
-                timeout.as_secs()
-            );
-            child.kill().ok();
-            child.wait().ok();
-            return Err(AppError::NixError(format!(
-                "build for '{}' timed out after {}s",
-                config_name,
-                timeout.as_secs()
-            )));
-        }
-        Exit::Finished(status) if !status.success() => {
-            return Err(AppError::NixError(format!(
-                "build for '{}' failed (exit: {:?})",
-                config_name,
-                status.code()
-            )));
-        }
-        Exit::Finished(_) => {}
+        Exit::TimedOut => Err(NixFault::TimedOut(timeout)),
+        Exit::Finished(status) if !status.success() => Err(NixFault::Exited { code: status.code(), stderr: stderr.join("\n") }),
+        Exit::Finished(_) => Ok(stdout),
     }
+}
 
-    let path_output = Command::new("nix")
-        .current_dir(nix_dir)
-        .arg("path-info")
-        .arg(&installable)
-        .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {e}")))?;
-    if !path_output.status.success() {
-        let stderr = String::from_utf8_lossy(&path_output.stderr);
-        return Err(AppError::CmdError(format!(
-            "nix path-info failed for '{}' (exit: {:?}): {}",
-            config_name,
-            path_output.status.code(),
-            stderr
-        )));
-    }
-    let stdout = String::from_utf8(path_output.stdout)?;
-    let store_path = stdout.lines().find(|l| !l.trim().is_empty())
-        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{config_name}'")))?
-        .trim()
-        .to_string();
+fn first_line(stdout: &str) -> std::result::Result<String, NixFault> {
+    stdout.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_string).ok_or(NixFault::NoOutput)
+}
+
+fn installable(config_name: &str, build_attr: &str) -> String {
+    format!(".#nixosConfigurations.{config_name}.{build_attr}")
+}
+
+pub fn realise(config_name: &str, build_attr: &str, repo_path: &str, impure: bool, timeout: Duration) -> std::result::Result<String, NixFault> {
+    let dir = flake_dir(repo_path)?;
+    let target = installable(config_name, build_attr);
+    let flags: &[&str] = if impure { &["--impure"] } else { &[] };
+    let build: Vec<&str> = ["build", target.as_str(), "--no-link"].into_iter().chain(flags.iter().copied()).collect();
+    nix(&dir, config_name, &build, timeout)?;
+    let path_info: Vec<&str> = ["path-info", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
+    let store_path = first_line(&nix(&dir, config_name, &path_info, timeout)?)?;
     info!("Nix build succeeded for '{}': {}", config_name, store_path);
-
     Ok(store_path)
 }
+
+pub fn out_path(config_name: &str, build_attr: &str, repo_path: &str, impure: bool, timeout: Duration) -> std::result::Result<String, NixFault> {
+    let dir = flake_dir(repo_path)?;
+    let target = format!("{}.outPath", installable(config_name, build_attr));
+    let flags: &[&str] = if impure { &["--impure"] } else { &[] };
+    let eval: Vec<&str> = ["eval", "--raw", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
+    first_line(&nix(&dir, config_name, &eval, timeout)?)
+}
+
+pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str, timeout: Duration) -> Result<String> {
+    Ok(realise(config_name, build_attr, repo_path, false, timeout)?)
+}
+
 
 // TODO I need to finish up some utils to initialise this dir on setup. I will probably do a utils module.
 // I probably wil want to init the user there as well rather than in this module

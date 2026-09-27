@@ -2,6 +2,7 @@ use crate::api::{GuestOp, Kind, Lxc, Qemu, vmid};
 use crate::sozu::Settled;
 use crate::state::{agent_ipv4, cidr_ipv4};
 use crate::types::{AppError, Result};
+use proxmox_api::access::{AccessClient, permissions};
 use proxmox_api::client::Client;
 use proxmox_api::nodes::NodesClient;
 use proxmox_api::nodes::node::NodeClient;
@@ -97,7 +98,7 @@ where
         });
         match attempted {
             Ok(()) => Ok(Settled::Changed),
-            Err(error) => match target(op).map(|id| K::presence(self, id)) {
+            Err(error) => match target(op).map(|id| self.presence::<K>(id)) {
                 Some(Ok(presence)) if already(op, &presence) => Ok(Settled::AlreadyApplied),
                 _ => Err(error),
             },
@@ -109,7 +110,18 @@ where
     }
 
     pub fn presence<K: Remote>(&self, id: Vmid) -> Result<Presence> {
-        K::presence(self, id)
+        match K::presence(self, id)? {
+            Presence::Absent => self.audited().map(|()| Presence::Absent),
+            present @ Presence::Present { .. } => Ok(present),
+        }
+    }
+
+    fn audited(&self) -> Result<()> {
+        let granted = self.call(AccessClient::new(&self.client).permissions().get(permissions::GetParams {
+            path: Some(String::from("/vms")),
+            ..permissions::GetParams::default()
+        }))?;
+        crate::state::audited(&granted.additional_properties).map(|_| ())
     }
 
     pub fn address<K: Remote>(&self, id: Vmid) -> Result<Option<Ipv4Addr>> {
@@ -346,6 +358,7 @@ mod tests {
     const UPID: &str = "UPID:pve01:000EAA5B:5CAA1660:6AB95076:vzstop:946:root@pam:";
     const STOPPED_OK: &str = include_str!("../fixtures/api/tasks/UPID_pve01_000EAA5B_5CAA1660_6AB95076_vzstop_946_root@pam_/status.json");
     const LXC_LIST: &str = include_str!("../fixtures/api/lxc.json");
+    const PERMISSIONS: &str = include_str!("../fixtures/api/permissions.json");
 
     fn status(state: &str, exit: Option<&str>) -> String {
         let value = serde_json::from_str::<serde_json::Value>(STOPPED_OK).unwrap();
@@ -369,6 +382,26 @@ mod tests {
 
     fn quoted(text: &str) -> String {
         serde_json::Value::from(text).to_string()
+    }
+
+    #[test]
+    #[ignore = "needs fixtures/api/failed-tasks.json: run `nu scripts/fixtures.nu pve01`"]
+    fn every_task_proxmox_reported_as_failed_classifies_as_a_failure() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api");
+        let listed: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("failed-tasks.json")).unwrap()).unwrap();
+        assert!(!listed.is_empty(), "the capture holds no failed tasks to check against");
+        for task in &listed {
+            let upid = task["upid"].as_str().unwrap();
+            assert!(upid.parse::<Upid>().is_ok(), "{upid} does not parse");
+            let exit = TaskExit::from(task["status"].as_str().map(String::from));
+            assert!(!exit.succeeded(), "{upid} failed on pve01 but classifies as {exit:?}");
+            let status = dir.join("tasks").join(upid.replace(':', "_")).join("status.json");
+            if let Ok(text) = std::fs::read_to_string(status) {
+                let decoded: proxmox_api::nodes::node::tasks::upid::status::GetOutput = serde_json::from_str(&text).unwrap();
+                assert!(matches!(TaskExit::from(decoded.exitstatus), TaskExit::Failed(_)), "{upid}");
+            }
+        }
     }
 
     #[test]
@@ -457,9 +490,24 @@ mod tests {
         let fake = Proxmox::replying(vec![
             (Method::Delete, "/nodes/pve01/lxc/999", Err("500 CT 999 does not exist")),
             (Method::Get, "/nodes/pve01/lxc", Ok(LXC_LIST)),
+            (Method::Get, "/access/permissions", Ok(PERMISSIONS)),
         ]);
         let (_runtime, api) = api(&fake);
         assert_eq!(api.apply(&GuestOp::<Lxc>::destroy(Vmid::new(999))).unwrap(), Settled::AlreadyApplied);
+        assert!(fake.exhausted());
+    }
+
+    #[test]
+    fn an_absence_the_token_cannot_vouch_for_is_never_taken_as_done() {
+        let blind = PERMISSIONS.replace("\"VM.Audit\": 1", "\"VM.Audit\": 0");
+        let fake = Proxmox::replying(vec![
+            (Method::Delete, "/nodes/pve01/lxc/844", Err("500 something went wrong")),
+            (Method::Get, "/nodes/pve01/lxc", Ok("[]")),
+            (Method::Get, "/access/permissions", Ok(blind.as_str())),
+        ]);
+        let (_runtime, api) = api(&fake);
+        assert!(api.apply(&GuestOp::<Lxc>::destroy(Vmid::new(844))).is_err());
+        assert!(fake.exhausted());
     }
 
     #[test]

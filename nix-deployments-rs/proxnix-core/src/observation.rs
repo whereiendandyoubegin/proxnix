@@ -101,6 +101,14 @@ impl Guest {
     pub fn ownership(&self) -> &Ownership {
         &self.ownership
     }
+
+    pub(crate) fn projected(sighting: Sighting, ownership: Ownership) -> Guest {
+        Guest { sighting, ownership }
+    }
+
+    pub(crate) fn revised(&self, status: GuestStatus, resources: Resources, ownership: Ownership) -> Guest {
+        Guest { sighting: Sighting { status, resources, ..self.sighting.clone() }, ownership }
+    }
 }
 
 #[pure_only]
@@ -237,6 +245,23 @@ impl Observation {
     #[must_use]
     pub fn anomalies(&self) -> &[Anomaly] {
         &self.anomalies
+    }
+
+    pub(crate) fn guest(&self, id: Vmid) -> Option<&Guest> {
+        self.guests.get(&id)
+    }
+
+    pub(crate) fn replaced(&self, id: Vmid, guest: Option<Guest>) -> Observation {
+        Observation {
+            guests: self
+                .guests
+                .iter()
+                .filter(|(existing, _)| **existing != id)
+                .map(|(existing, kept)| (*existing, kept.clone()))
+                .chain(guest.map(|guest| (id, guest)))
+                .collect(),
+            anomalies: self.anomalies.clone(),
+        }
     }
 }
 

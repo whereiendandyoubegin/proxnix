@@ -31,6 +31,7 @@ mod nix;
 mod parsing;
 mod pipeline;
 mod probe;
+mod render;
 mod pve;
 mod remote;
 mod sozu;
@@ -99,14 +100,57 @@ async fn webhook_handler(
 enum Mode {
     Serve,
     DeployOnce,
+    DeployCore,
+    Plan,
 }
 
 impl Mode {
     fn from_args() -> Self {
-        if std::env::args().any(|a| a == "--deploy-once") {
-            Mode::DeployOnce
-        } else {
-            Mode::Serve
+        let args: Vec<String> = std::env::args().collect();
+        let has = |flag: &str| args.iter().any(|a| a == flag);
+        match (has("--plan"), has("--deploy-once"), has("--core")) {
+            (true, _, _) => Mode::Plan,
+            (false, true, true) => Mode::DeployCore,
+            (false, true, false) => Mode::DeployOnce,
+            (false, false, _) => Mode::Serve,
+        }
+    }
+}
+
+fn repo_arg(appconfig: &AppConfig) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|a| a == "--repo")
+        .and_then(|at| args.get(at + 1).cloned())
+        .or_else(|| appconfig.local_repo.clone())
+}
+
+async fn run_engine(mode: Mode, appconfig: AppConfig, pve: Pve) {
+    let Some(repo) = repo_arg(&appconfig) else {
+        error!("--plan and --deploy-once --core need --repo PATH or services.proxnix.local_repo");
+        std::process::exit(2);
+    };
+    let finished = tokio::task::spawn_blocking(move || match mode {
+        Mode::Plan => engine::plan(&appconfig, &pve, &repo).map(|(prepared, projections)| {
+            println!("{}", render::plan(&prepared.commit, &projections));
+            true
+        }),
+        _ => engine::deploy(&appconfig, &pve, &repo).map(|outcomes| {
+            outcomes.iter().for_each(|(name, outcome)| match outcome {
+                Ok(report) => report.workloads.iter().for_each(|workload| info!("{}: {:?}", workload.name.0, workload.stage)),
+                Err(e) => error!("{}: {}", name.0, e),
+            });
+            outcomes.iter().all(|(_, outcome)| outcome.is_ok())
+        }),
+    })
+    .await
+    .expect("engine task panicked");
+    match finished {
+        Ok(true) => {}
+        Ok(false) => std::process::exit(1),
+        Err(e) => {
+            error!("{:?}", e);
+            std::process::exit(1);
         }
     }
 }
@@ -127,7 +171,12 @@ async fn main() {
     let pve = Pve::connect(&appconfig.proxmox, tokio::runtime::Handle::current())
         .expect("Failed to set up the Proxmox API client");
 
-    if let Mode::DeployOnce = Mode::from_args() {
+    let mode = Mode::from_args();
+    if let Mode::Plan | Mode::DeployCore = mode {
+        run_engine(mode, appconfig, pve).await;
+        return;
+    }
+    if let Mode::DeployOnce = mode {
         let result = tokio::task::spawn_blocking(move || pipeline::run_local(&appconfig, &pve))
             .await
             .expect("deploy task panicked");

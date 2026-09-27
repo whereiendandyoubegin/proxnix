@@ -1,13 +1,14 @@
 use crate::context::{ImageStore, RepoPath, StorePath, Tags};
 use crate::interpret::{Declared, Interpreter, Probes, Provision, Routes};
 use crate::materialise::Materialise;
+use crate::nix::NixFault;
 use crate::probe::{ExecOutcome, exec, guest_check_script};
 use crate::remote::Api;
 use crate::types::{AppConfig, AppError, BindMount, ContainerConfig, MountMode as ShellMountMode, Result, Timing, VMConfig};
 use proxmox_api::client::Client;
 use rayon::prelude::*;
 use proxnix_core::{
-    Artifact, BridgeName, BuildFault, Built, ConfigFault, Cores, Cutover, Desired, Detail, DiskGib, DurationMs, GuestKind,
+    Artifact, BridgeName, BuildFault, Built, ConfigFault, ExitCode, Cores, Cutover, Desired, Detail, DiskGib, DurationMs, GuestKind,
     GuestName, GuestPath, HostPath, ImageType, Images, KindSpec, MemoryMb, Memo, Moment, Mount, MountMode, Observation,
     Pacing, Port, Privilege, ProxySpec, Purity, Registry, Report, SlotId, SlotPair, Sockets, Tick, Timeouts, Vmid,
     WorkloadSpec, step,
@@ -80,13 +81,6 @@ impl Declared {
         }
     }
 
-    fn impure(&self) -> bool {
-        match self {
-            Declared::Vm(config) => config.impure,
-            Declared::Container(config) => config.impure,
-        }
-    }
-
     pub fn spec(&self) -> std::result::Result<WorkloadSpec, ConfigFault> {
         match self {
             Declared::Vm(config) => vm_spec(config),
@@ -156,32 +150,58 @@ pub fn desired(declared: &BTreeMap<GuestName, Declared>) -> Desired {
     )
 }
 
-pub fn build(repo: RepoPath<'_>, declared: &Declared, timeout: Duration) -> Built {
-    let image = declared.image();
-    let raw = if declared.impure() {
-        match declared {
-            Declared::Vm(config) => config.nix_build(repo.as_str()).map(|path| path.as_str().to_string()),
-            Declared::Container(config) => config.nix_build(repo.as_str()).map(|path| path.as_str().to_string()),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Realisation {
+    Build,
+    Evaluate,
+}
+
+fn fault(fault: NixFault, stage: Realisation) -> BuildFault {
+    let failed = |code: Option<i32>, detail: String| match stage {
+        Realisation::Build => BuildFault::Build(code.map(ExitCode), Detail(detail)),
+        Realisation::Evaluate => BuildFault::Eval(code.map(ExitCode), Detail(detail)),
+    };
+    match fault {
+        NixFault::TimedOut(after) => BuildFault::TimedOut(DurationMs(u64::try_from(after.as_millis()).unwrap_or(u64::MAX))),
+        NixFault::Exited { code, stderr } => failed(code, stderr),
+        NixFault::NoFlake(detail) => BuildFault::Checkout(Detail(detail)),
+        NixFault::Spawn(detail) => failed(None, detail),
+        NixFault::NoOutput => failed(None, String::from("nix printed no store path")),
+    }
+}
+
+impl Declared {
+    fn impure(&self) -> bool {
+        match self {
+            Declared::Vm(config) => config.impure,
+            Declared::Container(config) => config.impure,
         }
-    } else {
-        crate::nix::nix_build(&image.0, declared.target().attr(), repo.as_str(), timeout)
+    }
+}
+
+pub fn build(repo: RepoPath<'_>, declared: &Declared, timeout: Duration, stage: Realisation) -> Built {
+    let image = declared.image();
+    let attr = declared.target().attr();
+    let raw = match stage {
+        Realisation::Build => crate::nix::realise(&image.0, attr, repo.as_str(), declared.impure(), timeout),
+        Realisation::Evaluate => crate::nix::out_path(&image.0, attr, repo.as_str(), declared.impure(), timeout),
     };
     let outcome = raw
-        .map_err(|error| BuildFault::Build(None, Detail(error.to_string())))
+        .map_err(|nix| fault(nix, stage))
         .and_then(|text| text.trim().parse().map_err(BuildFault::Output))
         .map(|path| Artifact { path });
     Built { image, outcome }
 }
 
-pub fn build_all(repo: RepoPath<'_>, declared: &BTreeMap<GuestName, Declared>, timeout: Duration) -> Images {
+pub fn build_all(repo: RepoPath<'_>, declared: &BTreeMap<GuestName, Declared>, timeout: Duration, stage: Realisation) -> Images {
     let unique: BTreeMap<ImageType, &Declared> = declared.values().map(|declared| (declared.image(), declared)).collect();
     let built: Vec<Built> = unique
         .into_values()
         .collect::<Vec<_>>()
         .into_par_iter()
         .map(|declared| {
-            info!("building image '{}'", declared.image().0);
-            build(repo, declared, timeout)
+            info!("{} image '{}'", if stage == Realisation::Build { "building" } else { "evaluating" }, declared.image().0);
+            build(repo, declared, timeout, stage)
         })
         .collect();
     built.into_iter().collect()
@@ -388,6 +408,78 @@ where
     });
     let teardown = loop_for(&inputs.desired.teardown());
     workloads.into_iter().chain([(GuestName(String::from("(teardown)")), teardown)]).collect()
+}
+
+pub struct Prepared {
+    pub commit: proxnix_core::CommitHash,
+    pub declared: BTreeMap<GuestName, Declared>,
+    pub desired: Desired,
+    groups: Vec<crate::pipeline::WorkloadGroup>,
+}
+
+pub fn prepare(settings: &AppConfig, repo: &str) -> Result<Prepared> {
+    let head = crate::git::git_head_commit(repo)?;
+    let commit = head
+        .parse::<proxnix_core::CommitHash>()
+        .map_err(|fault| AppError::GitError(format!("HEAD of {repo} is not a commit hash ({fault:?}): {head}")))?;
+    let state = crate::state::parse_config(&crate::nix::eval_config(repo, settings.timings_ms.get(Timing::NixEval))?)?;
+    let groups = state.clone().into_workload_groups();
+    let declared = declare(state);
+    let desired = desired(&declared);
+    Ok(Prepared { commit, declared, desired, groups })
+}
+
+pub fn plan(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result<(Prepared, Vec<proxnix_core::Projection>)> {
+    let prepared = prepare(settings, repo)?;
+    let images = build_all(RepoPath::try_from(repo)?, &prepared.declared, settings.timings_ms.get(Timing::NixEval), Realisation::Evaluate);
+    let observed = crate::state::observe(pve)?;
+    let tick = Tick::Push(proxnix_core::Push::new(prepared.commit.clone()));
+    let projections = proxnix_core::project::<proxnix_core::Builtin>(&prepared.desired, &images, &observed, &tick, &pacing(settings));
+    Ok((prepared, projections))
+}
+
+fn live_hashes(images: &Images, declared: &BTreeMap<GuestName, Declared>) -> std::collections::HashSet<crate::context::NixHash> {
+    declared
+        .values()
+        .filter_map(|declared| match images.knowledge(&declared.image()) {
+            proxnix_core::Knowledge::Built(artifact) => crate::context::NixHash::try_from(artifact.nix().as_ref()).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn deploy(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result<Vec<(GuestName, Result<Report>)>> {
+    let prepared = prepare(settings, repo)?;
+    crate::pipeline::hold_service_addresses(&prepared.groups, settings.backend_pool.as_ref(), settings.timings_ms.get(Timing::ArpProbe))?;
+    let images = build_all(RepoPath::try_from(repo)?, &prepared.declared, settings.timings_ms.get(Timing::NixBuild), Realisation::Build);
+    let api = pve.api(settings.timings_ms.get(Timing::TaskPoll), settings.timings_ms.get(Timing::TaskTimeout));
+    let host = Host {
+        api: &api,
+        settings,
+        image_store: ImageStore {
+            template_cache_path: crate::context::TemplateCachePath::try_from(settings.template_cache_path.as_str())?,
+            zfs: settings.zfs_images.as_ref(),
+            idmap: settings.unprivileged_idmap,
+        },
+        declared: &prepared.declared,
+    };
+    let tick = Tick::Push(proxnix_core::Push::new(prepared.commit.clone()));
+    let pace = pacing(settings);
+    let inputs = Inputs { desired: &prepared.desired, images: &images, tick: &tick, pacing: &pace, limit: 1_000_000 };
+    let observe = || crate::state::observe(pve);
+    let outcomes = drive_all::<proxnix_core::Builtin, _, _>(&host, crate::sozu::SozuClient::connect(settings)?, &observe, &inputs, &Clock::start());
+    let live = live_hashes(&images, &prepared.declared);
+    match crate::host::reap_template_cache(settings.template_cache_path.as_str(), &live) {
+        Ok(reaped) if reaped.files > 0 => info!("reaped {} stale container templates", reaped.files),
+        Ok(_) => {}
+        Err(error) => tracing::warn!("could not reap the template cache: {}", error),
+    }
+    match settings.zfs_images.as_ref().map(|zfs| crate::zfs::reap_images(zfs, &live)) {
+        Some(Ok(crate::zfs::ReapedImages(0))) | None => {}
+        Some(Ok(crate::zfs::ReapedImages(count))) => info!("reaped {} stale base images", count),
+        Some(Err(error)) => tracing::warn!("could not reap base images: {}", error),
+    }
+    Ok(outcomes)
 }
 
 #[cfg(test)]

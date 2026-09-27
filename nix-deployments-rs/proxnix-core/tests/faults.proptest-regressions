@@ -8,3 +8,4 @@ cc bafe52453168dc338c2bef1d00efaef7d8f8d592a838ddaed9d3206bc3a09615 # shrinks to
 cc f5e1ca0d99e240cf73e598011d126020ef8405ce84df0b4ebcefb6a53a44c60b # shrinks to fail = {}, crash = None, unhealthy = false, silent = false, stop_start = false, container = false
 cc b09e8b9362fd9c935b27f31917ec3ea4a7a30b19f7f09b55fcf0116411f59fd5 # shrinks to fail = {}, crash = None, die_after = Some(8), unhealthy = false, silent = false, stop_start = false, container = true
 cc c7dd6660a1f14d545a37e34e2fa6f32362bfa953d52404560a8c5a2f85d0e4ec # shrinks to fail = {9}, crash = None, die_after = None, lying = {10}, unhealthy = false, silent = false, stop_start = false, container = true
+cc 358ae146cb4df5cb1d6c1a40f4e92f82144ce1480aad0297e718228e3c33e1ee # shrinks to fail = {2}, crash = None, die_after = Some(5), lying = {}, unhealthy = false, silent = false, stop_start = false, container = false

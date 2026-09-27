@@ -12,7 +12,10 @@ fn scenario(kind: KindSpec, cutover: Cutover) -> (WorkloadSpec, World) {
 }
 
 fn settle(done: Run, desired: &Desired) -> World {
-    let calm = World { faults: Faults { fail: BTreeSet::new(), lying: BTreeSet::new(), ..done.world.faults.clone() }, ..done.world };
+    let calm = World {
+        faults: Faults { fail: BTreeSet::new(), lying: BTreeSet::new(), die_after: None, ..done.world.faults.clone() },
+        ..done.world
+    };
     let first = run::<Builtin>(calm, desired, &Images::default(), &Tick::Periodic, None);
     let second = run::<Builtin>(first.world, desired, &Images::default(), &Tick::Periodic, None);
     assert!(
@@ -200,6 +203,40 @@ fn every_effect_that_happened_but_reported_failure_is_never_built_upon() {
             let world = settle(pushed, &desired);
             settled(&world, &desired);
             assert_eq!(world.members("forgejo").len(), 1, "lying effect {index} ({cutover:?}) left extra guests");
+        }
+    }
+}
+
+#[test]
+fn the_plan_for_the_incident_push_adopts_then_rebuilds_each_workload_into_its_free_slot() {
+    let (world, workloads) = pve01();
+    let desired = Desired::validate(workloads.clone());
+    let deployed: BTreeMap<String, String> = world
+        .guests
+        .values()
+        .filter_map(|guest| guest.tags.as_ref().map(|tags| (guest.name.clone(), tags.nix.clone())))
+        .collect();
+    let changed = images(workloads.iter().map(|workload| built(workload, if deployed[&workload.name.0] == NIX_B { NIX_A } else { NIX_B })).collect());
+    let plan = proxnix_core::project::<Builtin>(&desired, &changed, &world.observe(), &push(COMMIT_B), &sim::pacing());
+    for projection in &plan {
+        let seen = kinds(&projection.effects);
+        match &projection.scope {
+            proxnix_core::Scope::Teardown => assert!(seen.is_empty(), "teardown planned {seen:?}"),
+            proxnix_core::Scope::Workload(name) => {
+                assert!(projection.settled, "{} did not settle", name.0);
+                assert_eq!(seen.first(), Some(&Kind::Commit), "{} must be adopted first", name.0);
+                assert_eq!(seen.iter().filter(|kind| **kind == Kind::Create).count(), 1, "{}: {seen:?}", name.0);
+                assert_eq!(seen.last(), Some(&Kind::Retire), "{}: {seen:?}", name.0);
+                let touched: Vec<Vmid> = projection
+                    .effects
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        proxnix_core::Effect::Guest(guest) => Some(guest.id()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(touched.iter().all(|id| world.guests.get(id).is_none_or(|guest| guest.tags.is_some())), "{} touches an unmanaged guest", name.0);
+            }
         }
     }
 }

@@ -302,7 +302,7 @@ pub fn audit(pve: &Pve) -> Result<Audited> {
     )
 }
 
-fn audited(granted: &HashMap<String, serde_json::Value>) -> Result<Audited> {
+pub(crate) fn audited(granted: &HashMap<String, serde_json::Value>) -> Result<Audited> {
     let vm_audit = match granted
         .get("/vms")
         .and_then(|privileges| privileges.get("VM.Audit"))

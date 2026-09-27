@@ -11,6 +11,7 @@ mod ids;
 mod memo;
 mod observation;
 mod pair;
+mod project;
 mod spec;
 mod step;
 mod strategy;
@@ -51,6 +52,8 @@ pub use observation::{
 };
 #[pure_only]
 pub use pair::{Fence, Keep, Overlap, PairPhase, StopStart, pair_phase, pair_plan};
+#[pure_only]
+pub use project::{Projection, Scope, assume, placeholder_address, project};
 #[pure_only]
 pub use spec::{BridgeName, Cutover, GuestName, Hostname, ImageType, KindSpec, ProxySpec, Purity, Timeouts, WorkloadSpec};
 #[pure_only]
