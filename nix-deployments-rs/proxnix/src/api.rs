@@ -1,4 +1,3 @@
-use crate::context::Tags;
 use crate::sozu::Settled;
 use crate::types::{AppError, Result};
 use proxmox_api::nodes::node::{lxc, qemu};
@@ -28,7 +27,6 @@ pub trait Kind {
     fn words(verb: Verb) -> &'static [&'static str] {
         verb.words()
     }
-    fn tags(tags: &Tags) -> Self::Set;
     fn protection(protected: bool) -> Self::Set;
 }
 
@@ -51,12 +49,6 @@ impl Kind for Qemu {
             other => other.words(),
         }
     }
-    fn tags(tags: &Tags) -> Self::Set {
-        Self::Set {
-            tags: Some(tags.render()),
-            ..Default::default()
-        }
-    }
     fn protection(protected: bool) -> Self::Set {
         Self::Set {
             protection: Some(protected),
@@ -75,12 +67,6 @@ impl Kind for Lxc {
     type Destroy = lxc::vmid::DeleteParams;
     type Resize = lxc::vmid::resize::PutParams;
 
-    fn tags(tags: &Tags) -> Self::Set {
-        Self::Set {
-            tags: Some(tags.render()),
-            ..Default::default()
-        }
-    }
     fn protection(protected: bool) -> Self::Set {
         Self::Set {
             protection: Some(protected),
@@ -261,10 +247,6 @@ impl<K: Kind> GuestOp<K> {
         GuestOp::Destroy(id, K::Destroy::default())
     }
 
-    pub fn tags(id: Vmid, tags: &Tags) -> Self {
-        GuestOp::Set(id, K::tags(tags))
-    }
-
     pub fn protection(id: Vmid, protected: bool) -> Self {
         GuestOp::Set(id, K::protection(protected))
     }
@@ -302,9 +284,6 @@ impl<K: Kind> GuestOp<K> {
 pub trait Execute {
     fn run<K: Kind>(&self, op: &GuestOp<K>) -> Result<Settled>;
 
-    fn run_all<K: Kind>(&self, ops: &[GuestOp<K>]) -> Result<()> {
-        ops.iter().try_for_each(|op| self.run(op).map(|_| ()))
-    }
 }
 
 pub struct Cli;

@@ -159,13 +159,6 @@ impl Tags {
         })
     }
 
-    pub fn with_service_ip(&self, ip: Ipv4Addr) -> Self {
-        Self {
-            service_ip: Some(ip),
-            ..self.clone()
-        }
-    }
-
     pub fn render(&self) -> String {
         let base = format!(
             "proxnix;nix-{};commit-{};{}",
@@ -207,29 +200,6 @@ pub fn render_managed(tags: &proxnix_core::ManagedTags) -> String {
     .flatten()
     .collect::<Vec<_>>()
     .join(";")
-}
-
-/// A git commit hash, borrowed from its owner.
-#[derive(Debug, Clone, Copy)]
-pub struct CommitHash<'a>(&'a str);
-
-impl<'a> CommitHash<'a> {
-    pub fn as_str(self) -> &'a str {
-        self.0
-    }
-}
-
-impl<'a> TryFrom<&'a str> for CommitHash<'a> {
-    type Error = AppError;
-    fn try_from(s: &'a str) -> Result<Self> {
-        if s.is_empty() {
-            Err(AppError::CmdError(
-                "commit hash cannot be empty".to_string(),
-            ))
-        } else {
-            Ok(CommitHash(s))
-        }
-    }
 }
 
 /// Path to the template cache directory, borrowed from app config.
@@ -281,22 +251,6 @@ impl<'a> TryFrom<&'a str> for RepoPath<'a> {
             Ok(RepoPath(s))
         }
     }
-}
-
-/// All inputs needed for a reconcile pass, fully typed.
-pub struct ReconcileContext<'a> {
-    /// Nix hash for each successfully built image type.
-    pub image_hashes: &'a HashMap<ImageType, NixHash>,
-    /// Store path for each successfully built image type.
-    pub pre_built: &'a HashMap<ImageType, StorePath>,
-    /// Build errors keyed by image type.
-    pub image_type_errors: &'a HashMap<ImageType, String>,
-    pub repo_path: RepoPath<'a>,
-    pub commit_hash: CommitHash<'a>,
-    pub image_store: ImageStore<'a>,
-    pub settings: &'a crate::types::AppConfig,
-    pub backend_pool: Option<&'a BackendPool>,
-    pub pve: &'a crate::pve::Pve,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -444,7 +398,6 @@ mod tests {
 
     #[test]
     fn empty_borrowed_paths_are_rejected() {
-        assert!(CommitHash::try_from("").is_err());
         assert!(TemplateCachePath::try_from("").is_err());
         assert!(RepoPath::try_from("").is_err());
     }

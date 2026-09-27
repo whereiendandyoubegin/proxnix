@@ -26,7 +26,6 @@ pub struct Routed {
     service_address: Option<Ipv4Addr>,
     backend_port: u16,
     tcp_ports: Vec<u16>,
-    bridge: String,
 }
 
 impl Routed {
@@ -37,7 +36,6 @@ impl Routed {
             service_address: proxy.service_address,
             backend_port: proxy.backend_port.0,
             tcp_ports: proxy.tcp_ports.iter().map(|port| port.0).collect(),
-            bridge: proxy.bridge.0.clone(),
         }
     }
 }
@@ -57,9 +55,6 @@ impl Proxied for Routed {
     }
     fn hostname(&self) -> &str {
         &self.hostname
-    }
-    fn network_bridge(&self) -> &str {
-        &self.bridge
     }
 }
 

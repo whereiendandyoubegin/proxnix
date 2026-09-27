@@ -1,7 +1,7 @@
 use proxmox_api::nodes::node::qemu::Scsihw;
 use proxmox_api::types::bounded_integer::BoundedIntegerError;
 use proxmox_api::types::bounded_string::BoundedStringError;
-use proxnix_core::{Slot, SlotId, Vmid};
+use proxnix_core::Vmid;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -10,15 +10,6 @@ use std::str::FromStr;
 use std::{collections::HashMap, string::FromUtf8Error};
 
 use crate::context::ImageType;
-use crate::pipeline::WorkloadGroup;
-
-pub trait Workload {
-    fn name(&self) -> &str;
-    fn memory_mb(&self) -> u32;
-    fn cores(&self) -> u16;
-    fn disk_gb(&self) -> u32;
-    fn id_for_slot(&self, s: Slot) -> SlotId;
-}
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
@@ -128,26 +119,6 @@ pub enum CutoverChoice {
     StopStart,
 }
 
-impl Workload for VMConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn memory_mb(&self) -> u32 {
-        self.memory_mb
-    }
-    fn cores(&self) -> u16 {
-        self.cores
-    }
-    fn disk_gb(&self) -> u32 {
-        self.disk_gb
-    }
-    fn id_for_slot(&self, s: Slot) -> SlotId {
-        match s {
-            Slot::Blue => SlotId::Blue(self.blue_id),
-            Slot::Green => SlotId::Green(self.green_id),
-        }
-    }
-}
 
 // Defaults for VMConfig
 fn default_network_bridge() -> String {
@@ -266,26 +237,6 @@ pub struct BindMount {
     pub mode: MountMode,
 }
 
-impl Workload for ContainerConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn memory_mb(&self) -> u32 {
-        self.memory_mb
-    }
-    fn cores(&self) -> u16 {
-        self.cores
-    }
-    fn disk_gb(&self) -> u32 {
-        self.disk_gb
-    }
-    fn id_for_slot(&self, s: Slot) -> SlotId {
-        match s {
-            Slot::Blue => SlotId::Blue(self.blue_id),
-            Slot::Green => SlotId::Green(self.green_id),
-        }
-    }
-}
 
 fn default_container_network_bridge() -> String {
     "vmbr0".to_string()
@@ -390,65 +341,8 @@ pub struct DesiredState {
     pub containers: HashMap<String, ContainerConfig>,
 }
 
-impl DesiredState {
-    pub fn into_workload_groups(self) -> Vec<WorkloadGroup> {
-        vec![
-            WorkloadGroup::Vms(self.vms.into_values().collect()),
-            WorkloadGroup::Containers(self.containers.into_values().collect()),
-        ]
-    }
-}
-
-#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
-pub enum FieldChange {
-    Memory,
-    Cores,
-    Sockets,
-    Disk,
-    Image,
-}
-
 #[derive(Debug)]
 pub struct ParsedWebhook {
     pub repository: String,
     pub hash: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum SkipReason {
-    Protected,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum OutcomeKind {
-    Created,
-    Rebuilt,
-    Updated,
-    Destroyed,
-    Skipped(SkipReason),
-    NoOp,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum RebuildStrategy {
-    Rebuild,
-    InPlace,
-    Protected,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct Outcome {
-    pub name: String,
-    pub kind: OutcomeKind,
-    pub error: Option<String>,
-}
-
-impl Outcome {
-    pub fn new(name: &str, kind: OutcomeKind, result: Result<()>) -> Self {
-        Self {
-            name: name.to_string(),
-            kind,
-            error: result.err().map(|e| e.to_string()),
-        }
-    }
 }

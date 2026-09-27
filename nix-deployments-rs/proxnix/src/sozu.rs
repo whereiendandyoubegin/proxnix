@@ -31,7 +31,6 @@ pub trait Proxied {
     fn tcp_ports(&self) -> &[u16];
     fn cluster_id(&self) -> &str;
     fn hostname(&self) -> &str;
-    fn network_bridge(&self) -> &str;
 
     fn backend_address(&self, ip: Ipv4Addr) -> SocketAddress {
         socket_address(ip, self.backend_port())
@@ -101,9 +100,6 @@ impl Proxied for VMConfig {
     fn hostname(&self) -> &str {
         &self.hostname
     }
-    fn network_bridge(&self) -> &str {
-        &self.network_bridge
-    }
 }
 
 impl Proxied for ContainerConfig {
@@ -121,9 +117,6 @@ impl Proxied for ContainerConfig {
     }
     fn hostname(&self) -> &str {
         &self.hostname
-    }
-    fn network_bridge(&self) -> &str {
-        &self.network_bridge
     }
 }
 

@@ -1,60 +1,9 @@
-use crate::api::{Kind, Lxc, Qemu};
+use crate::api::{Kind, Lxc};
 use crate::child::{self, Exit};
-use crate::types::{AppError, GuestCheck, Result, Timing, Timings};
+use crate::types::{AppError, Result};
 use proxnix_core::Vmid;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-use tracing::info;
-
-pub trait Probe: Kind {
-    fn guest_check(name: &str, id: Vmid, timeout: Duration, check: &GuestCheck, timings: &Timings) -> Result<()>;
-}
-
-impl Probe for Qemu {
-    fn guest_check(name: &str, _id: Vmid, _timeout: Duration, _check: &GuestCheck, _timings: &Timings) -> Result<()> {
-        info!(
-            "[{}] guest health checks are only supported for containers; only the port check ran",
-            name
-        );
-        Ok(())
-    }
-}
-
-impl Probe for Lxc {
-    fn guest_check(name: &str, id: Vmid, timeout: Duration, check: &GuestCheck, timings: &Timings) -> Result<()> {
-        let script = guest_check_script(&check.command);
-        let argv = [check.shell.as_str(), "-c", script.as_str()];
-        let poll = timings.get(Timing::GuestCheckPoll);
-        let run = timings.get(Timing::GuestCheckRun);
-        let started = Instant::now();
-        (0_u32..)
-            .take_while(|_| started.elapsed() < timeout)
-            .find_map(|attempt| match exec(id, &argv, run) {
-                Ok(ExecOutcome::Succeeded { .. }) => Some(Ok(())),
-                Ok(ExecOutcome::Failed { code, output }) => {
-                    if attempt % 5 == 0 {
-                        info!(
-                            "[{}] guest health check not passing yet after {}s (exit {:?}): {}",
-                            name,
-                            started.elapsed().as_secs(),
-                            code,
-                            output
-                        );
-                    }
-                    std::thread::sleep(poll.min(timeout.saturating_sub(started.elapsed())));
-                    None
-                }
-                Err(e) => Some(Err(e)),
-            })
-            .unwrap_or_else(|| {
-                Err(AppError::CmdError(format!(
-                    "{} guest health check did not pass within {}s",
-                    name,
-                    timeout.as_secs()
-                )))
-            })
-    }
-}
+use std::time::Duration;
 
 pub(crate) fn guest_check_script(command: &str) -> String {
     format!("if [ -x {command} ]; then exec {command}; fi")

@@ -418,7 +418,22 @@ pub struct Prepared {
     pub commit: proxnix_core::CommitHash,
     pub declared: BTreeMap<GuestName, Declared>,
     pub desired: Desired,
-    groups: Vec<crate::pipeline::WorkloadGroup>,
+}
+
+impl Declared {
+    fn binding(&self) -> Option<crate::host_net::ServiceBinding> {
+        let (address, bridge) = match self {
+            Declared::Vm(config) => (config.service_address, &config.network_bridge),
+            Declared::Container(config) => (config.service_address, &config.network_bridge),
+        };
+        address.map(|address| crate::host_net::ServiceBinding { bridge: bridge.clone(), address })
+    }
+}
+
+fn load(settings: &AppConfig, repo: &str) -> Result<(BTreeMap<GuestName, Declared>, Desired)> {
+    let declared = declare(crate::state::parse_config(&crate::nix::eval_config(repo, settings.timings_ms.get(Timing::NixEval))?)?);
+    let desired = desired(&declared);
+    Ok((declared, desired))
 }
 
 pub fn prepare(settings: &AppConfig, repo: &str) -> Result<Prepared> {
@@ -426,11 +441,8 @@ pub fn prepare(settings: &AppConfig, repo: &str) -> Result<Prepared> {
     let commit = head
         .parse::<proxnix_core::CommitHash>()
         .map_err(|fault| AppError::GitError(format!("HEAD of {repo} is not a commit hash ({fault:?}): {head}")))?;
-    let state = crate::state::parse_config(&crate::nix::eval_config(repo, settings.timings_ms.get(Timing::NixEval))?)?;
-    let groups = state.clone().into_workload_groups();
-    let declared = declare(state);
-    let desired = desired(&declared);
-    Ok(Prepared { commit, declared, desired, groups })
+    let (declared, desired) = load(settings, repo)?;
+    Ok(Prepared { commit, declared, desired })
 }
 
 pub fn plan(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result<(Prepared, Vec<proxnix_core::Projection>)> {
@@ -452,10 +464,14 @@ fn live_hashes(images: &Images, declared: &BTreeMap<GuestName, Declared>) -> std
         .collect()
 }
 
-pub fn deploy(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result<Vec<(GuestName, Result<Report>)>> {
-    let prepared = prepare(settings, repo)?;
-    crate::pipeline::hold_service_addresses(&prepared.groups, settings.backend_pool.as_ref(), settings.timings_ms.get(Timing::ArpProbe))?;
-    let images = build_all(RepoPath::try_from(repo)?, &prepared.declared, settings.timings_ms.get(Timing::NixBuild), Realisation::Build);
+fn run(
+    settings: &AppConfig,
+    pve: &crate::pve::Pve,
+    declared: &BTreeMap<GuestName, Declared>,
+    desired: &Desired,
+    images: &Images,
+    tick: &Tick,
+) -> Result<Vec<(GuestName, Result<Report>)>> {
     let api = pve.api(settings.timings_ms.get(Timing::TaskPoll), settings.timings_ms.get(Timing::TaskTimeout));
     let host = Host {
         api: &api,
@@ -465,13 +481,21 @@ pub fn deploy(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result
             zfs: settings.zfs_images.as_ref(),
             idmap: settings.unprivileged_idmap,
         },
-        declared: &prepared.declared,
+        declared,
     };
-    let tick = Tick::Push(proxnix_core::Push::new(prepared.commit.clone()));
     let pace = pacing(settings);
-    let inputs = Inputs { desired: &prepared.desired, images: &images, tick: &tick, pacing: &pace, limit: 1_000_000 };
+    let inputs = Inputs { desired, images, tick, pacing: &pace, limit: 1_000_000 };
     let observe = || crate::state::observe(pve);
-    let outcomes = drive_all::<proxnix_core::Builtin, _, _>(&host, crate::sozu::SozuClient::connect(settings)?, &observe, &inputs, &Clock::start());
+    Ok(drive_all::<proxnix_core::Builtin, _, _>(&host, crate::sozu::SozuClient::connect(settings)?, &observe, &inputs, &Clock::start()))
+}
+
+pub fn deploy(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result<Vec<(GuestName, Result<Report>)>> {
+    let prepared = prepare(settings, repo)?;
+    let bindings: Vec<crate::host_net::ServiceBinding> = prepared.declared.values().filter_map(Declared::binding).collect();
+    crate::pipeline::hold_service_addresses(&bindings, settings.backend_pool.as_ref(), settings.timings_ms.get(Timing::ArpProbe))?;
+    let images = build_all(RepoPath::try_from(repo)?, &prepared.declared, settings.timings_ms.get(Timing::NixBuild), Realisation::Build);
+    let tick = Tick::Push(proxnix_core::Push::new(prepared.commit.clone()));
+    let outcomes = run(settings, pve, &prepared.declared, &prepared.desired, &images, &tick)?;
     let live = live_hashes(&images, &prepared.declared);
     match crate::host::reap_template_cache(settings.template_cache_path.as_str(), &live) {
         Ok(reaped) if reaped.files > 0 => info!("reaped {} stale container templates", reaped.files),
@@ -484,6 +508,21 @@ pub fn deploy(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result
         Some(Err(error)) => tracing::warn!("could not reap base images: {}", error),
     }
     Ok(outcomes)
+}
+
+pub fn periodic(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result<Vec<(GuestName, Result<Report>)>> {
+    let (declared, desired) = load(settings, repo)?;
+    run(settings, pve, &declared, &desired, &Images::default(), &Tick::Periodic)
+}
+
+pub fn outcome_ok(outcomes: &[(GuestName, Result<Report>)]) -> bool {
+    for (name, outcome) in outcomes {
+        match outcome {
+            Ok(report) => report.workloads.iter().for_each(|workload| info!("{}: {:?}", workload.name.0, workload.stage)),
+            Err(e) => tracing::error!("{}: {}", name.0, e),
+        }
+    }
+    outcomes.iter().all(|(_, outcome)| outcome.is_ok())
 }
 
 #[cfg(test)]

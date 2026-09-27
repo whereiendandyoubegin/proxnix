@@ -1,5 +1,4 @@
 use crate::api::{self, Kind, Lxc, Qemu};
-use crate::context::NixHash;
 use crate::pve::Pve;
 use crate::types::{AppConfig, AppError, BindMount, DesiredState, MountMode, Result};
 use proxmox_api::nodes::node::{lxc, qemu};
@@ -8,41 +7,12 @@ use proxmox_api::access::permissions;
 use proxnix_core::{
     Audited, Cores, DiskGib, Grant, GuestName, GuestPath, GuestStatus, HostPath, KindFacts, MemoryMb, Mount,
     MountMode as CoreMountMode, Observation, Permissions, Privilege, RawTags, Resources as CoreResources, Sighting,
-    Slot, Sockets, VisibilityFault, Vmid,
+    Sockets, VisibilityFault, Vmid,
 };
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-
-pub(crate) fn slot_from_tags(tags: Option<&str>) -> Slot {
-    tags.and_then(|t| {
-        t.split(';')
-            .find(|tag| tag.trim().starts_with("slot-"))
-            .and_then(|tag| Slot::try_from(tag.trim()).ok())
-    })
-    .unwrap_or(Slot::Blue)
-}
-
-pub(crate) fn nix_hash_from_tags(tags: Option<&str>) -> Option<NixHash> {
-    tags.and_then(|t| {
-        t.split(';')
-            .find(|tag| tag.trim().starts_with("nix-"))
-            .and_then(|tag| NixHash::try_from(tag.trim().trim_start_matches("nix-")).ok())
-    })
-}
-
-pub(crate) fn service_ip_from_tags(tags: Option<&str>) -> Option<Ipv4Addr> {
-    tags.and_then(|t| {
-        t.split(';')
-            .find(|tag| tag.trim().starts_with("ip-"))
-            .and_then(|tag| tag.trim().trim_start_matches("ip-").parse().ok())
-    })
-}
-
-pub(crate) fn is_proxnix_managed(tags: Option<&str>) -> bool {
-    tags.is_some_and(|t| t.split(';').any(|tag| tag.trim() == "proxnix"))
-}
 
 pub fn parse_config(json: &str) -> Result<DesiredState> {
     let state: DesiredState = serde_json::from_str(json)?;
@@ -70,18 +40,6 @@ pub struct Resources {
     pub cores: u16,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Deployed<X> {
-    pub id: Vmid,
-    pub name: String,
-    pub status: GuestStatus,
-    pub nix_hash: Option<NixHash>,
-    pub active_slot: Slot,
-    pub service_ip: Option<Ipv4Addr>,
-    pub resources: Resources,
-    pub extra: X,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QemuListing {
     pub memory_mb: u32,
@@ -105,13 +63,9 @@ pub trait Observe: Kind {
     type Extra: Send + Sync + Into<KindFacts>;
 
     fn list(pve: &Pve) -> Result<Vec<Listed<Self::Listing>>>;
-    fn candidates(listed: Vec<Listed<Self::Listing>>) -> Vec<Listed<Self::Listing>> {
-        listed
-    }
     fn config(pve: &Pve, id: Vmid) -> Result<Self::Config>;
     fn tags_of(config: &Self::Config) -> Option<&str>;
     fn decode(id: Vmid, listing: Self::Listing, config: Self::Config) -> Result<(Resources, Self::Extra)>;
-    fn address(pve: &Pve, id: Vmid) -> Result<Ipv4Addr>;
 }
 
 fn vmid_of(id: &impl BoundedInteger) -> Result<Vmid> {
@@ -185,15 +139,6 @@ impl Observe for Qemu {
             .collect()
     }
 
-    fn candidates(listed: Vec<Listed<QemuListing>>) -> Vec<Listed<QemuListing>> {
-        listed
-            .into_iter()
-            .map(|entry| (entry.name.clone(), entry))
-            .collect::<HashMap<_, _>>()
-            .into_values()
-            .collect()
-    }
-
     fn config(pve: &Pve, id: Vmid) -> Result<Self::Config> {
         pve.call(
             pve.node()
@@ -219,21 +164,6 @@ impl Observe for Qemu {
                 sockets: config.sockets.map_or(Ok(1), |n| u8::try_from(n.get()))?,
             },
         ))
-    }
-
-    fn address(pve: &Pve, id: Vmid) -> Result<Ipv4Addr> {
-        pve.call(
-            pve.node()
-                .qemu()
-                .vmid(api::vmid(id)?)
-                .agent()
-                .network_get_interfaces()
-                .get(),
-        )?
-        .additional_properties
-        .get("result")
-        .and_then(agent_ipv4)
-        .ok_or_else(|| AppError::CmdError(format!("no IPv4 address found for VM {}", id.get())))
     }
 }
 
@@ -281,14 +211,6 @@ impl Observe for Lxc {
                     .collect::<Result<_>>()?,
             },
         ))
-    }
-
-    fn address(pve: &Pve, id: Vmid) -> Result<Ipv4Addr> {
-        pve.call(pve.node().lxc().vmid(api::vmid(id)?).interfaces().get())?
-            .into_iter()
-            .filter(|iface| iface.name != "lo")
-            .find_map(|iface| iface.inet.as_deref().and_then(cidr_ipv4))
-            .ok_or_else(|| AppError::CmdError(format!("no IPv4 found for container {}", id.get())))
     }
 }
 
@@ -396,58 +318,6 @@ impl From<LxcExtra> for KindFacts {
     }
 }
 
-pub fn deployed<K: Observe>(pve: &Pve) -> Result<HashMap<String, Deployed<K::Extra>>> {
-    audit(pve)?;
-    inventory::<K>(K::list(pve)?, |id| K::config(pve, id))
-}
-
-pub fn exists<K: Observe>(pve: &Pve, id: Vmid) -> Result<bool> {
-    audit(pve)?;
-    Ok(K::list(pve)?.iter().any(|entry| entry.id == id))
-}
-
-pub fn tags<K: Observe>(pve: &Pve, id: Vmid) -> Result<Option<String>> {
-    audit(pve)?;
-    Ok(K::tags_of(&K::config(pve, id)?).map(str::to_string))
-}
-
-fn inventory<K: Observe>(
-    listed: Vec<Listed<K::Listing>>,
-    config: impl Fn(Vmid) -> Result<K::Config> + Sync,
-) -> Result<HashMap<String, Deployed<K::Extra>>> {
-    Ok(K::candidates(listed)
-        .into_par_iter()
-        .map(|entry| inspect::<K>(entry, &config))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .map(|deployed| (deployed.name.clone(), deployed))
-        .collect())
-}
-
-fn inspect<K: Observe>(
-    entry: Listed<K::Listing>,
-    config: &(impl Fn(Vmid) -> Result<K::Config> + Sync),
-) -> Result<Option<Deployed<K::Extra>>> {
-    let Listed { id, name, status, tags, extra } = entry;
-    if is_proxnix_managed(tags.as_deref()) {
-        K::decode(id, extra, config(id)?).map(|(resources, extra)| {
-            Some(Deployed {
-                id,
-                name,
-                status,
-                nix_hash: nix_hash_from_tags(tags.as_deref()),
-                active_slot: slot_from_tags(tags.as_deref()),
-                service_ip: service_ip_from_tags(tags.as_deref()),
-                resources,
-                extra,
-            })
-        })
-    } else {
-        Ok(None)
-    }
-}
-
 pub(crate) fn agent_ipv4(result: &serde_json::Value) -> Option<Ipv4Addr> {
     result
         .as_array()?
@@ -527,12 +397,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    use crate::context::Tags;
+    use proxnix_core::{Ownership, RawTags, Slot};
     use std::net::Ipv4Addr;
-
-    fn tags_for(nix: &str, commit: &str, slot: Slot) -> String {
-        Tags::new(NixHash::try_from(nix).unwrap(), commit, slot).render()
-    }
 
     const NIX_EVAL_SAMPLE: &str = r#"{
       "vms": {
@@ -578,229 +444,10 @@ mod tests {
         assert_eq!(parsed.containers["pihole"].service_address, None);
     }
 
-    #[test]
-    fn a_registered_service_ip_survives_a_tag_round_trip() {
-        let ip = Ipv4Addr::new(10, 42, 0, 7);
-        let rendered = Tags::new(
-            NixHash::try_from("abc123").unwrap(),
-            "deadbeef",
-            Slot::Green,
-        )
-        .with_service_ip(ip)
-        .render();
-
-        assert_eq!(service_ip_from_tags(Some(&rendered)), Some(ip));
-        assert_eq!(slot_from_tags(Some(&rendered)), Slot::Green);
-        assert_eq!(
-            nix_hash_from_tags(Some(&rendered)).unwrap().as_str(),
-            "abc123"
-        );
-        assert!(is_proxnix_managed(Some(&rendered)));
-    }
-
-    #[test]
-    fn an_instance_with_no_observed_ip_yet_has_none() {
-        let rendered = tags_for("abc123", "deadbeef", Slot::Blue);
-        assert_eq!(service_ip_from_tags(Some(&rendered)), None);
-    }
-
-    #[test]
-    fn the_service_ip_tag_is_not_confused_with_the_nix_tag() {
-        let rendered = Tags::new(NixHash::try_from("abc123").unwrap(), "x", Slot::Blue)
-            .with_service_ip(Ipv4Addr::new(192, 168, 1, 50))
-            .render();
-        assert_eq!(
-            service_ip_from_tags(Some(&rendered)),
-            Some(Ipv4Addr::new(192, 168, 1, 50))
-        );
-        assert_eq!(
-            nix_hash_from_tags(Some(&rendered)).unwrap().as_str(),
-            "abc123"
-        );
-    }
-
-    #[test]
-    fn slot_round_trips_through_proxmox_tags() {
-        for slot in [Slot::Blue, Slot::Green] {
-            let tags = tags_for("abc123", "deadbeef", slot);
-            assert_eq!(slot_from_tags(Some(&tags)), slot);
-        }
-    }
-
-    #[test]
-    fn nix_hash_round_trips_through_proxmox_tags() {
-        let tags = tags_for("0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7", "deadbeef", Slot::Green);
-        assert_eq!(
-            nix_hash_from_tags(Some(&tags)).unwrap().as_str(),
-            "0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7"
-        );
-    }
-
-    #[test]
-    fn untagged_vm_defaults_to_blue() {
-        assert_eq!(slot_from_tags(None), Slot::Blue);
-        assert_eq!(slot_from_tags(Some("proxnix;nix-abc")), Slot::Blue);
-    }
-
-    #[test]
-    fn slot_tag_is_not_confused_with_other_tags() {
-        let tags = "proxnix;nix-slot-green-looking-hash;commit-abc;slot-blue";
-        assert_eq!(slot_from_tags(Some(tags)), Slot::Blue);
-    }
-
-    #[test]
-    fn only_proxnix_tagged_resources_are_managed() {
-        assert!(is_proxnix_managed(Some("proxnix;nix-abc;slot-blue")));
-        assert!(!is_proxnix_managed(Some("nix-abc;slot-blue")));
-        assert!(!is_proxnix_managed(None));
-    }
-
-    #[test]
-    fn ownership_depends_on_the_proxnix_tag_not_the_nix_hash() {
-        assert!(is_proxnix_managed(Some(
-            "proxnix;nix-abc123;commit-x;slot-green"
-        )));
-        assert!(is_proxnix_managed(Some(
-            "proxnix;nix-somethingelse;commit-x;slot-green"
-        )));
-        assert!(!is_proxnix_managed(Some("nix-abc123;commit-x;slot-green")));
-        assert!(!is_proxnix_managed(Some("a-hand-made-vm")));
-        assert!(!is_proxnix_managed(None));
-    }
-
-    #[test]
-    fn tags_tolerate_surrounding_whitespace() {
-        assert_eq!(slot_from_tags(Some("proxnix; slot-green ")), Slot::Green);
-        assert_eq!(
-            nix_hash_from_tags(Some("proxnix; nix-abc123 "))
-                .unwrap()
-                .as_str(),
-            "abc123"
-        );
-    }
-
     const MANAGED: &str = "proxnix;nix-abc123;commit-x;slot-green;ip-10.0.0.7";
-
-    fn listed<X>(id: u32, name: &str, tags: Option<&str>, extra: X) -> Listed<X> {
-        Listed {
-            id: Vmid::new(id),
-            name: name.to_string(),
-            status: GuestStatus::Running,
-            tags: tags.map(str::to_string),
-            extra,
-        }
-    }
 
     fn decoded<T: serde::de::DeserializeOwned>(json: &serde_json::Value) -> T {
         serde_json::from_str(&json.to_string()).unwrap()
-    }
-
-    fn qemu_config(json: &serde_json::Value) -> qemu::vmid::config::GetOutput {
-        decoded(json)
-    }
-
-    fn lxc_config(json: &serde_json::Value) -> lxc::vmid::config::GetOutput {
-        decoded(json)
-    }
-
-    fn web_vm() -> Listed<QemuListing> {
-        listed(823, "web", Some(MANAGED), QemuListing { memory_mb: 2048, disk_gb: 10.0 })
-    }
-
-    fn never_read<T>(id: Vmid) -> Result<T> {
-        panic!("the config of {} must not be read", id.get())
-    }
-
-    #[test]
-    fn an_unmanaged_guest_is_skipped_before_its_config_is_read() {
-        let found = inventory::<Qemu>(
-            vec![listed(900, "windows", Some("gaming"), QemuListing { memory_mb: 8192, disk_gb: 64.0 })],
-            never_read,
-        )
-        .unwrap();
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn a_ballooned_vm_config_decodes() {
-        let found = inventory::<Qemu>(vec![web_vm()], |_| {
-            Ok(qemu_config(&json!({
-                "digest": "0123", "balloon": 1024, "cores": 2, "sockets": 1,
-                "memory": "2048", "tags": MANAGED
-            })))
-        })
-        .unwrap();
-        assert_eq!(
-            found["web"],
-            Deployed {
-                id: Vmid::new(823),
-                name: "web".to_string(),
-                status: GuestStatus::Running,
-                nix_hash: Some(NixHash::try_from("abc123").unwrap()),
-                active_slot: Slot::Green,
-                service_ip: Some(Ipv4Addr::new(10, 0, 0, 7)),
-                resources: Resources { memory_mb: 2048, disk_gb: 10.0, cores: 2 },
-                extra: QemuExtra { sockets: 1 },
-            }
-        );
-    }
-
-    #[test]
-    fn vms_are_narrowed_by_name_before_ownership_is_checked() {
-        let found = inventory::<Qemu>(
-            vec![web_vm(), listed(900, "web", None, QemuListing { memory_mb: 2048, disk_gb: 10.0 })],
-            never_read,
-        )
-        .unwrap();
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn containers_are_checked_for_ownership_before_being_keyed_by_name() {
-        let found = inventory::<Lxc>(
-            vec![listed(833, "pihole", Some(MANAGED), ()), listed(900, "pihole", None, ())],
-            |id| {
-                assert_eq!(id, Vmid::new(833));
-                Ok(lxc_config(&json!({
-                    "digest": "0123", "memory": 1024, "cores": 2,
-                    "rootfs": "local-lvm:vm-833-disk-0,size=8G", "unprivileged": 1,
-                    "mp0": "/srv/pihole,mp=/etc/pihole,ro=1", "tags": MANAGED
-                })))
-            },
-        )
-        .unwrap();
-        assert_eq!(found["pihole"].id, Vmid::new(833));
-        assert_eq!(
-            found["pihole"].extra,
-            LxcExtra {
-                privileged: false,
-                bind_mounts: vec![BindMount {
-                    host_path: "/srv/pihole".to_string(),
-                    container_path: "/etc/pihole".to_string(),
-                    mode: MountMode::ReadOnly,
-                }],
-            }
-        );
-    }
-
-    #[test]
-    fn a_managed_container_missing_its_memory_fails_the_inventory() {
-        assert!(
-            inventory::<Lxc>(vec![listed(833, "pihole", Some(MANAGED), ())], |_| {
-                Ok(lxc_config(&json!({ "digest": "0123", "cores": 2, "rootfs": "x:y,size=8G" })))
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn a_failed_config_read_fails_the_whole_inventory() {
-        assert!(
-            inventory::<Lxc>(vec![listed(833, "pihole", Some(MANAGED), ())], |_| {
-                Err(AppError::ProxmoxError("unreachable".to_string()))
-            })
-            .is_err()
-        );
     }
 
     #[test]
@@ -811,8 +458,37 @@ mod tests {
         }]));
         assert_eq!(
             items.into_iter().map(listed_qemu).collect::<Result<Vec<_>>>().unwrap(),
-            vec![web_vm()]
+            vec![Listed {
+                id: Vmid::new(823),
+                name: "web".to_string(),
+                status: GuestStatus::Running,
+                tags: Some(MANAGED.to_string()),
+                extra: QemuListing { memory_mb: 2048, disk_gb: 10.0 },
+            }]
         );
+    }
+
+    #[test]
+    fn a_ballooned_vm_config_still_becomes_a_sighting() {
+        let listing = Listed {
+            id: Vmid::new(823),
+            name: "web".to_string(),
+            status: GuestStatus::Running,
+            tags: Some(MANAGED.to_string()),
+            extra: QemuListing { memory_mb: 2048, disk_gb: 10.0 },
+        };
+        let config: qemu::vmid::config::GetOutput =
+            decoded(&json!({ "digest": "0123", "balloon": 1024, "cores": 2, "sockets": 1, "memory": "2048", "tags": MANAGED }));
+        let seen = sighting::<Qemu>(listing, config).unwrap();
+        assert_eq!(seen.resources, CoreResources { memory: MemoryMb(2048), disk: DiskGib(10), cores: Cores(2) });
+        assert_eq!(seen.facts, KindFacts::Qemu { sockets: Sockets(1) });
+    }
+
+    #[test]
+    fn a_container_config_missing_its_memory_is_an_error_not_a_guess() {
+        let listing = Listed { id: Vmid::new(833), name: "pihole".to_string(), status: GuestStatus::Running, tags: Some(MANAGED.to_string()), extra: () };
+        let config: lxc::vmid::config::GetOutput = decoded(&json!({ "digest": "0123", "cores": 2, "rootfs": "x:y,size=8G" }));
+        assert!(sighting::<Lxc>(listing, config).is_err());
     }
 
     #[test]
@@ -863,7 +539,7 @@ mod tests {
     fn managed_ids<X>(listed: &[Listed<X>]) -> Vec<Vmid> {
         listed
             .iter()
-            .filter(|entry| is_proxnix_managed(entry.tags.as_deref()))
+            .filter(|entry| matches!(Ownership::from(&RawTags::from(entry.tags.clone().unwrap_or_default())), Ownership::Managed(_)))
             .map(|entry| entry.id)
             .collect()
     }
@@ -972,40 +648,6 @@ mod tests {
             .collect();
         assert_eq!(lxc, raw_tags(&lxc_raw));
         assert_eq!(qemu, raw_tags(&qemu_raw));
-    }
-
-    fn names<X>(found: &HashMap<String, Deployed<X>>) -> std::collections::BTreeSet<String> {
-        found.keys().cloned().collect()
-    }
-
-    #[test]
-    fn the_inventory_built_from_real_responses_finds_every_managed_guest() {
-        let lxc = inventory::<Lxc>(
-            decoded::<Vec<lxc::GetOutputItems>>(&raw_fixture("lxc.json"))
-                .into_iter()
-                .map(|item| listed_lxc(item).unwrap())
-                .collect(),
-            |id| Ok(decoded(&raw_fixture(&format!("lxc/{}/config.json", id.get())))),
-        );
-        let qemu = inventory::<Qemu>(
-            decoded::<Vec<qemu::GetOutputItems>>(&raw_fixture("qemu.json"))
-                .into_iter()
-                .map(|item| listed_qemu(item).unwrap())
-                .collect(),
-            |id| Ok(decoded(&raw_fixture(&format!("qemu/{}/config.json", id.get())))),
-        );
-        match (lxc, qemu) {
-            (Ok(lxc), Ok(qemu)) => {
-                assert_eq!(
-                    names(&lxc),
-                    ["cloudflared", "flake-updater", "forgejo", "hydra", "monitoring", "postgres", "test-container"]
-                        .map(String::from)
-                        .into()
-                );
-                assert_eq!(names(&qemu), ["test-website"].map(String::from).into());
-            }
-            (lxc, qemu) => panic!("inventory failed: lxc {:?}, qemu {:?}", lxc.err(), qemu.err()),
-        }
     }
 
     #[test]

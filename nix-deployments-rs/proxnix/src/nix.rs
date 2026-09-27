@@ -116,38 +116,6 @@ pub fn eval_config(repo_path: &str, timeout: Duration) -> Result<String> {
     }
 }
 
-
-
-pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
-    let flake_path = find_in_repo(repo_path, "flake.nix")?;
-    let nix_dir = Path::new(&flake_path)
-        .parent()
-        .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
-
-    let nix_eval = Command::new("nix")
-        .current_dir(nix_dir)
-        .arg("eval")
-        .arg(".#nixosConfigurations")
-        .arg("--apply")
-        .arg("builtins.attrNames")
-        .arg("--json")
-        .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {e}")))?;
-    if !nix_eval.status.success() {
-        let stderr = String::from_utf8_lossy(&nix_eval.stderr);
-        return Err(AppError::CmdError(format!(
-            "Nix eval failed (exit: {:?}): {}",
-            nix_eval.status.code(),
-            stderr
-        )));
-    }
-    let stdout_bytes = nix_eval.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-    let parsed: Vec<String> = serde_json::from_str(&output_string)?;
-
-    Ok(parsed)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NixFault {
     NoFlake(String),
@@ -241,22 +209,4 @@ pub fn out_path(config_name: &str, build_attr: &str, repo_path: &str, impure: bo
     let flags: &[&str] = if impure { &["--impure"] } else { &[] };
     let eval: Vec<&str> = ["eval", "--raw", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
     first_line(&nix(&dir, config_name, &eval, timeout)?)
-}
-
-pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str, timeout: Duration) -> Result<String> {
-    Ok(realise(config_name, build_attr, repo_path, false, timeout)?)
-}
-
-
-// TODO I need to finish up some utils to initialise this dir on setup. I will probably do a utils module.
-// I probably wil want to init the user there as well rather than in this module
-pub fn configure_dirs(configs: Vec<String>, repo_path: &str) -> Result<()> {
-    let repo_base = std::path::Path::new(repo_path);
-    std::fs::create_dir_all(repo_base)?;
-
-    for config in configs {
-        std::fs::create_dir_all(repo_base.join(config))?;
-    }
-
-    Ok(())
 }
