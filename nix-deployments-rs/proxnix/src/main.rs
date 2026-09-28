@@ -1,4 +1,9 @@
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{get, post},
+};
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -9,13 +14,17 @@ use crate::types::{AppConfig, Timing};
 
 #[derive(Clone)]
 struct AppState {
+    mode: Mode,
     semaphore: Arc<Semaphore>,
+    synced: Arc<tokio::sync::Notify>,
+    syncer: Option<Arc<sync::Syncer>>,
     last_repo: Arc<RwLock<Option<String>>>,
     appconfig: AppConfig,
     pve: Pve,
 }
 
 mod api;
+mod builds;
 mod child;
 mod context;
 mod hydra;
@@ -26,6 +35,7 @@ mod host_net;
 mod interpret;
 mod materialise;
 mod nix;
+mod nixstore;
 mod parsing;
 mod pipeline;
 mod probe;
@@ -34,6 +44,7 @@ mod remote;
 mod render;
 mod sozu;
 mod state;
+mod sync;
 mod types;
 mod zfs;
 
@@ -47,6 +58,23 @@ async fn webhook_handler(State(state): State<AppState>, Json(payload): Json<serd
         }
     };
 
+    if state.mode == Mode::BuildOnly {
+        let appconfig = state.appconfig.clone();
+        let last_repo = state.last_repo.clone();
+        let synced = state.synced.clone();
+        tokio::task::spawn_blocking(move || {
+            match pipeline::RepoSource::pushed(&appconfig, &parsed.repository, &parsed.hash).resolve(&appconfig) {
+                Ok(repo) => {
+                    info!("build-only: syncing the store for commit {}", parsed.hash);
+                    *last_repo.blocking_write() = Some(repo);
+                    synced.notify_one();
+                }
+                Err(e) => error!("build-only: could not check out commit {}: {:?}", parsed.hash, e),
+            }
+        });
+        return StatusCode::OK;
+    }
+
     let lock_wait = state.appconfig.timings_ms.get(Timing::WebhookLockWait);
     let Ok(Ok(permit)) = tokio::time::timeout(lock_wait, state.semaphore.clone().acquire_owned()).await else {
         warn!("Deploy still busy after {}s, rejecting webhook for commit {}", lock_wait.as_secs(), parsed.hash);
@@ -56,6 +84,7 @@ async fn webhook_handler(State(state): State<AppState>, Json(payload): Json<serd
     let appconfig = state.appconfig.clone();
     let pve = state.pve.clone();
     let last_repo = state.last_repo.clone();
+    let synced = state.synced.clone();
     tokio::task::spawn_blocking(move || {
         info!("Deploy started for repo: {}, commit: {}", parsed.repository, parsed.hash);
         let resolved = pipeline::RepoSource::pushed(&appconfig, &parsed.repository, &parsed.hash).resolve(&appconfig);
@@ -63,6 +92,7 @@ async fn webhook_handler(State(state): State<AppState>, Json(payload): Json<serd
             Ok((repo, outcomes)) => {
                 let clean = engine::outcome_ok(&outcomes);
                 *last_repo.blocking_write() = Some(repo);
+                synced.notify_one();
                 info!("Deploy finished for commit {}{}", parsed.hash, if clean { "" } else { " with failures" });
             }
             Err(e) => error!("Deploy failed for repo: {}, commit: {}, error: {:?}", parsed.repository, parsed.hash, e),
@@ -76,8 +106,19 @@ async fn webhook_handler(State(state): State<AppState>, Json(payload): Json<serd
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Serve,
+    BuildOnly,
     DeployOnce,
     Plan,
+}
+
+async fn builds_handler(State(state): State<AppState>) -> std::result::Result<Json<Vec<builds::BuildView>>, StatusCode> {
+    state.syncer.as_ref().map(|syncer| Json(syncer.views())).ok_or(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+async fn build_handler(State(state): State<AppState>, Path(job): Path<String>) -> std::result::Result<Json<Vec<builds::BuildView>>, StatusCode> {
+    let syncer = state.syncer.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let rows: Vec<builds::BuildView> = syncer.views().into_iter().filter(|row| row.job == job).collect();
+    if rows.is_empty() { Err(StatusCode::NOT_FOUND) } else { Ok(Json(rows)) }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -86,7 +127,7 @@ struct Cli {
     repo: Option<std::path::PathBuf>,
 }
 
-const USAGE: &str = "usage:\n  proxnix                            serve webhooks and run the periodic reconcile\n  proxnix --deploy-once [--repo DIR] deploy the repo once\n  proxnix --plan [--repo DIR]        print what a deploy would do; writes nothing\n--repo defaults to services.proxnix.local_repo";
+const USAGE: &str = "usage:\n  proxnix                            serve webhooks and run the periodic reconcile\n  proxnix --build-only               keep the store synced and serve /builds; never deploy\n  proxnix --deploy-once [--repo DIR] deploy the repo once\n  proxnix --plan [--repo DIR]        print what a deploy would do; writes nothing\n--repo defaults to services.proxnix.local_repo";
 
 fn parse_args(args: &[String]) -> std::result::Result<Cli, String> {
     let (flags, repo) = match args.iter().position(|arg| arg == "--repo") {
@@ -102,12 +143,13 @@ fn parse_args(args: &[String]) -> std::result::Result<Cli, String> {
     let words: Vec<&str> = flags.iter().map(String::as_str).collect();
     let mode = match words.as_slice() {
         [] => Mode::Serve,
+        ["--build-only"] => Mode::BuildOnly,
         ["--deploy-once"] => Mode::DeployOnce,
         ["--plan"] => Mode::Plan,
         other => return Err(format!("unrecognised arguments {other:?}")),
     };
     match (mode, &repo) {
-        (Mode::Serve, Some(_)) => Err(String::from("--repo only applies to --plan and --deploy-once")),
+        (Mode::Serve | Mode::BuildOnly, Some(_)) => Err(String::from("--repo only applies to --plan and --deploy-once")),
         _ => Ok(Cli { mode, repo }),
     }
 }
@@ -142,6 +184,63 @@ async fn run_once(mode: Mode, repo: Option<std::path::PathBuf>, appconfig: AppCo
     }
 }
 
+fn sync_pass(syncer: &sync::Syncer, settings: &AppConfig, pve: &Pve, repo: &str) -> types::Result<()> {
+    let prepared = engine::prepare(settings, repo)?;
+    let observed = state::observe(pve)?;
+    syncer.pass(std::path::PathBuf::from(repo), &prepared.declared, &prepared.commit, &observed)
+}
+
+fn store_syncer(appconfig: &AppConfig) -> Option<Arc<sync::Syncer>> {
+    let Some(config) = appconfig.store_sync.clone() else {
+        info!("store sync is off; set services.proxnix.store_sync to enable it");
+        return None;
+    };
+    let Some(layout) = engine::layout(appconfig) else {
+        warn!("store sync needs zfs_images to place the store; it stays off");
+        return None;
+    };
+    let store = layout.store();
+    let root = std::path::PathBuf::from(host::host_text(&store.mountpoint()));
+    let ensured = host::ensure(&proxnix_core::HostEffect::EnsureDataset { dataset: store, owner: proxnix_core::Owner::HostRoot }, appconfig.unprivileged_idmap);
+    match ensured {
+        Err(error) => {
+            warn!("store sync cannot prepare its dataset and stays off: {error}");
+            None
+        }
+        Ok(()) => Some(Arc::new(sync::Syncer::new(appconfig, config, root, tokio::runtime::Handle::current()))),
+    }
+}
+
+fn spawn_store_sync(state: &AppState, nixology_path: &'static str) {
+    let (Some(syncer), Some(config)) = (state.syncer.clone(), state.appconfig.store_sync.clone()) else {
+        return;
+    };
+    let interval = config.interval();
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            let syncer = syncer.clone();
+            let settings = state.appconfig.clone();
+            let pve = state.pve.clone();
+            let last_repo = state.last_repo.clone();
+            let passed = tokio::task::spawn_blocking(move || {
+                let repo = last_repo.blocking_read().clone().or_else(|| settings.local_repo.clone()).unwrap_or_else(|| nixology_path.to_string());
+                sync_pass(&syncer, &settings, &pve, &repo)
+            })
+            .await;
+            match passed {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => warn!("store sync pass failed: {:?}", error),
+                Err(error) => warn!("store sync pass panicked: {error}"),
+            }
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {}
+                () = state.synced.notified() => {}
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -167,10 +266,24 @@ async fn main() {
         return;
     }
 
-    let app_state = AppState { semaphore: Arc::new(Semaphore::new(1)), last_repo: Arc::new(RwLock::new(None)), appconfig, pve };
+    let app_state = AppState {
+        mode: cli.mode,
+        semaphore: Arc::new(Semaphore::new(1)),
+        synced: Arc::new(tokio::sync::Notify::new()),
+        syncer: store_syncer(&appconfig),
+        last_repo: Arc::new(RwLock::new(None)),
+        appconfig,
+        pve,
+    };
+    spawn_store_sync(&app_state, nixology_path);
 
     let periodic_state = app_state.clone();
+    let periodic = cli.mode == Mode::Serve;
     tokio::spawn(async move {
+        if !periodic {
+            info!("build-only: the periodic reconcile is off");
+            return;
+        }
         let mut interval = tokio::time::interval(periodic_state.appconfig.timings_ms.get(Timing::PeriodicReconcile));
         loop {
             interval.tick().await;
@@ -199,7 +312,11 @@ async fn main() {
         }
     });
 
-    let app = Router::new().route("/whlisten", post(webhook_handler)).with_state(app_state);
+    let app = Router::new()
+        .route("/whlisten", post(webhook_handler))
+        .route("/builds", get(builds_handler))
+        .route("/builds/{job}", get(build_handler))
+        .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(server_address).await.unwrap();
     info!("Listening on {}", server_address);
@@ -218,6 +335,9 @@ mod cli_tests {
     #[test]
     fn only_no_arguments_serves() {
         assert_eq!(parse(&[]).unwrap().mode, Mode::Serve);
+        assert_eq!(parse(&["--build-only"]).unwrap().mode, Mode::BuildOnly);
+        assert!(parse(&["--build-only", "--repo", "/r"]).is_err());
+        assert!(parse(&["--build-only", "--plan"]).is_err());
         assert!(parse(&["--plna"]).is_err());
         assert!(parse(&["--plan", "--deploy-once"]).is_err());
         assert!(parse(&["--core"]).is_err());

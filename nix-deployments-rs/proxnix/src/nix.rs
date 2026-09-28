@@ -142,7 +142,11 @@ fn flake_dir(repo_path: &str) -> std::result::Result<PathBuf, NixFault> {
 }
 
 fn nix(dir: &Path, label: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, NixFault> {
-    let mut child = Command::new("nix")
+    run("nix", dir, label, args, timeout)
+}
+
+pub(crate) fn run(program: &str, dir: &Path, label: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, NixFault> {
+    let mut child = Command::new(program)
         .current_dir(dir)
         .args(args)
         .stdout(Stdio::piped())

@@ -193,7 +193,7 @@ pub enum Realisation {
     Evaluate,
 }
 
-fn fault(fault: NixFault, stage: Realisation) -> BuildFault {
+pub(crate) fn fault(fault: NixFault, stage: Realisation) -> BuildFault {
     let failed = |code: Option<i32>, detail: String| match stage {
         Realisation::Build => BuildFault::Build(code.map(ExitCode), Detail(detail)),
         Realisation::Evaluate => BuildFault::Eval(code.map(ExitCode), Detail(detail)),
@@ -293,7 +293,7 @@ impl Clock {
         Clock(Instant::now())
     }
 
-    fn now(&self) -> Moment {
+    pub(crate) fn now(&self) -> Moment {
         Moment(u64::try_from(self.0.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 

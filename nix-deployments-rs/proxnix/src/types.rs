@@ -273,6 +273,8 @@ pub struct AppConfig {
     pub unprivileged_idmap: IdRange,
     #[serde(default = "default_secrets_dir")]
     pub secrets_dir: String,
+    #[serde(default)]
+    pub store_sync: Option<crate::sync::StoreSyncConfig>,
     pub guest_check: GuestCheck,
     pub proxmox: crate::pve::PveConfig,
 }

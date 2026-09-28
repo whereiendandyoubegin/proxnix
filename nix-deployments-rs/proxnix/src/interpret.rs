@@ -12,7 +12,7 @@ use proxnix_core::{
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU64;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct Placed {
@@ -134,6 +134,19 @@ fn effect_error(error: &AppError) -> EffectError {
     }
 }
 
+fn report(workload: &str, step: &str, effect: &Effect, outcome: &Result<Outcome>) {
+    match (effect, outcome) {
+        (_, Err(error)) => warn!("[{workload}] {step} failed: {error}"),
+        (Effect::Probe(_), Ok(Outcome::Done | Outcome::AlreadyApplied)) => info!("[{workload}] {step}: passed"),
+        (Effect::Probe(_), Ok(Outcome::Address(address))) => debug!("[{workload}] {step}: {address}"),
+        (Effect::Probe(_), Ok(Outcome::Failed(error))) => debug!("[{workload}] {step}: not yet ({error:?})"),
+        (Effect::Guest(_) | Effect::Route(_), Ok(Outcome::Done)) => info!("[{workload}] {step}: done"),
+        (Effect::Guest(_) | Effect::Route(_), Ok(Outcome::AlreadyApplied)) => info!("[{workload}] {step}: already done"),
+        (Effect::Guest(_) | Effect::Route(_), Ok(Outcome::Address(address))) => info!("[{workload}] {step}: {address}"),
+        (Effect::Guest(_) | Effect::Route(_), Ok(Outcome::Failed(error))) => warn!("[{workload}] {step} failed: {error:?}"),
+    }
+}
+
 fn settled(result: Result<Settled>) -> Result<Outcome> {
     result.map(|settled| match settled {
         Settled::Changed => Outcome::Done,
@@ -178,12 +191,16 @@ where
     pub fn execute(&mut self, planned: &[Planned]) -> Vec<Event> {
         planned
             .iter()
-            .map(|planned| Event {
-                effect: planned.id,
-                outcome: self.outcome(&planned.effect).unwrap_or_else(|error| {
-                    warn!("[{}] effect failed: {}", planned.workload.0, error);
-                    Outcome::Failed(effect_error(&error))
-                }),
+            .map(|planned| {
+                let workload = &planned.workload.0;
+                let step = crate::render::effect(&planned.effect, &[]);
+                match planned.effect {
+                    Effect::Probe(_) => debug!("[{workload}] {step}"),
+                    Effect::Guest(_) | Effect::Route(_) => info!("[{workload}] {step}"),
+                }
+                let outcome = self.outcome(&planned.effect);
+                report(workload, &step, &planned.effect, &outcome);
+                Event { effect: planned.id, outcome: outcome.unwrap_or_else(|error| Outcome::Failed(effect_error(&error))) }
             })
             .collect()
     }
