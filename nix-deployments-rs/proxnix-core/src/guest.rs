@@ -74,7 +74,67 @@ pub enum MountMode {
 
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HostPath(pub String);
+pub struct PathPart(String);
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFault {
+    Relative,
+    EmptyPart,
+    Climbs,
+    InStore,
+}
+
+#[pure_only]
+impl TryFrom<&str> for PathPart {
+    type Error = PathFault;
+
+    fn try_from(text: &str) -> Result<PathPart, PathFault> {
+        match text {
+            "" | "." => Err(PathFault::EmptyPart),
+            ".." => Err(PathFault::Climbs),
+            part if part.contains('/') => Err(PathFault::EmptyPart),
+            part => Ok(PathPart(String::from(part))),
+        }
+    }
+}
+
+#[pure_only]
+impl AsRef<str> for PathPart {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[pure_only]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HostPath(Vec<PathPart>);
+
+#[pure_only]
+impl TryFrom<&str> for HostPath {
+    type Error = PathFault;
+
+    fn try_from(text: &str) -> Result<HostPath, PathFault> {
+        let relative = text.strip_prefix('/').ok_or(PathFault::Relative)?;
+        let parts: Vec<PathPart> = relative.split('/').filter(|part| !part.is_empty()).map(PathPart::try_from).collect::<Result<_, _>>()?;
+        match parts.as_slice() {
+            [nix, store, ..] if nix.0 == "nix" && store.0 == "store" => Err(PathFault::InStore),
+            _ => Ok(HostPath(parts)),
+        }
+    }
+}
+
+#[pure_only]
+impl HostPath {
+    #[must_use]
+    pub fn parts(&self) -> &[PathPart] {
+        &self.0
+    }
+
+    pub(crate) fn within(dataset: &crate::layout::Dataset, rest: &[crate::layout::Segment]) -> HostPath {
+        HostPath(dataset.segments().iter().chain(rest).map(|segment| PathPart(String::from(segment.as_ref()))).collect())
+    }
+}
 
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

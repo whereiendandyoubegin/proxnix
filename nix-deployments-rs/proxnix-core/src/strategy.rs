@@ -7,13 +7,13 @@ use crate::desired::ConfigFault;
 #[pure_only]
 use crate::effect::{Backend, Check, Effect, EffectError, Provisioned};
 #[pure_only]
-use crate::guest::DurationMs;
+use crate::guest::{DurationMs, GuestPath, HostPath};
 #[pure_only]
 use crate::ids::Vmid;
 #[pure_only]
 use crate::memo::{Action, Failure, Memo, Progress};
 #[pure_only]
-use crate::observation::Observation;
+use crate::observation::{Observation, Unsettled};
 #[pure_only]
 use crate::effect::ProbeEffect;
 #[pure_only]
@@ -106,9 +106,11 @@ pub enum SkipReason {
 }
 
 #[pure_only]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Blocker {
     SlotTaken(Vmid),
+    Unsettled(Vmid, Unsettled),
+    StateMoved { at: GuestPath, from: HostPath, to: HostPath },
     Ambiguous,
     NoAddress,
     NoProof,

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/proofs/fail/host_path_from_a_nix_hash.rs:5:28
+  |
+5 |     let _ = HostPath::from(nix);
+  |             -------------- ^^^ expected `HostPath`, found `Digest<Nix>`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected struct `HostPath`
+             found struct `Digest<Nix>`
+note: associated function defined here
+ --> $RUST/core/src/convert/mod.rs
+  |
+  |     fn from(value: T) -> Self;
+  |        ^^^^

@@ -252,7 +252,7 @@ impl Expendable {
 mod tests {
     use super::*;
     use crate::guest::{Cores, DiskGib, DurationMs, KindFacts, MemoryMb, Port, Resources, Sockets};
-    use crate::observation::{Audited, Grant, Permissions, Sighting};
+    use crate::observation::{Audited, Grant, Permissions, Settled, Sighting};
     use crate::spec::{BridgeName, Cutover, Hostname, ImageType, KindSpec, ProxySpec, Purity, Timeouts};
     use crate::tags::RawTags;
 
@@ -280,14 +280,14 @@ mod tests {
     }
 
     fn sighting(id: u32, name: &str, tags: &str) -> Sighting {
-        Sighting {
+        Sighting::Settled(Settled {
             id: Vmid::new(id),
             name: GuestName(String::from(name)),
             status: GuestStatus::Running,
             tags: RawTags::from(String::from(tags)),
             resources: Resources { memory: MemoryMb(2048), disk: DiskGib(16), cores: Cores(2) },
             facts: KindFacts::Qemu { sockets: Sockets(1) },
-        }
+        })
     }
 
     fn managed(slot: &str, generation: Option<u64>) -> String {

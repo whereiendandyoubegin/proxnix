@@ -81,7 +81,7 @@ mod tests {
     use crate::build::{Artifact, BuildFault};
     use crate::guest::{Cores, DiskGib, DurationMs, GuestStatus, MemoryMb, Port, Privilege, Resources, Sockets};
     use crate::ids::{SlotPair, Vmid};
-    use crate::observation::Sighting;
+    use crate::observation::Settled;
     use crate::spec::{BridgeName, Cutover, GuestName, Hostname, ImageType, ProxySpec, Timeouts};
     use crate::tags::RawTags;
 
@@ -109,7 +109,7 @@ mod tests {
     }
 
     fn guest(facts: KindFacts, resources: Resources) -> Guest {
-        Guest::from(Sighting {
+        Guest::from(Settled {
             id: Vmid::new(823),
             name: GuestName(String::from("website")),
             status: GuestStatus::Running,

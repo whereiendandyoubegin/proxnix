@@ -1,11 +1,12 @@
 use crate::api::{self, Cli, Execute, GuestOp, Lxc, Qemu};
 use crate::context::{ImageStore, StorePath, Tags};
-use crate::host::{ConfPath, LxcConf, copy_to_template_storage, prepare_bind_mount, write_conf};
-use crate::types::{AppError, BindMount, ContainerConfig, DiskBus, IdRange, MountMode, Result, VMConfig};
-use crate::zfs::{BaseImage, DiskSize, ImageKey, Ownership, Sealed, Tarball, ZfsImages};
-use proxmox_api::nodes::node::lxc::{self, PostParams as LxcCreate, vmid::config::PutParams as LxcSet};
+use crate::host::{LxcConf, PveFs, copy_to_template_storage, ensure_all, mount_spec, write_conf};
+use crate::interpret::Placed;
+use crate::types::{AppError, ContainerConfig, DiskBus, IdRange, Result, VMConfig};
+use crate::zfs::{BaseImage, DiskSize, ImageKey, Ownership, RootfsVolume, Sealed, Tarball, ZfsImages};
+use proxmox_api::nodes::node::lxc::{self, PostParams as LxcCreate};
 use proxmox_api::nodes::node::qemu;
-use proxnix_core::SlotId;
+use proxnix_core::{Mount, SlotId, Storage};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use tracing::warn;
@@ -19,7 +20,7 @@ pub trait Materialise {
 }
 
 macro_rules! lxc_settings {
-    ($params:ident, $config:expr, $tags:expr, $base:expr) => {
+    ($params:ident, $config:expr, $mounts:expr, $tags:expr, $base:expr) => {
         $params {
             hostname: Some($config.name.clone().try_into()?),
             memory: Some(i128::from($config.memory_mb).try_into()?),
@@ -27,26 +28,17 @@ macro_rules! lxc_settings {
             nets: [(0, format!("name=eth0,bridge={}", $config.network_bridge))].into(),
             features: Some("nesting=1".to_string()),
             tags: Some($tags.render()),
-            mps: mount_points(&$config.bind_mounts)?,
+            mps: mount_points($mounts)?,
             ..$base
         }
     };
 }
 
-fn mount_points(mounts: &[BindMount]) -> Result<HashMap<u32, String>> {
+fn mount_points(mounts: &[Mount]) -> Result<HashMap<u32, String>> {
     mounts
         .iter()
         .enumerate()
-        .map(|(i, mount)| {
-            let suffix = match mount.mode {
-                MountMode::ReadOnly => ",ro=1",
-                MountMode::ReadWrite => "",
-            };
-            Ok((
-                u32::try_from(i)?,
-                format!("{},mp={}{}", mount.host_path, mount.container_path, suffix),
-            ))
-        })
+        .map(|(i, mount)| Ok((u32::try_from(i)?, mount_spec(mount))))
         .collect()
 }
 
@@ -91,10 +83,11 @@ fn vm_resize(config: &VMConfig) -> Result<qemu::vmid::resize::PutParams> {
     ))
 }
 
-fn container_create(config: &ContainerConfig, ostemplate: String, tags: &Tags, target: SlotId) -> Result<LxcCreate> {
+fn container_create(config: &ContainerConfig, mounts: &[Mount], ostemplate: String, tags: &Tags, target: SlotId) -> Result<LxcCreate> {
     Ok(lxc_settings!(
         LxcCreate,
         config,
+        mounts,
         tags,
         LxcCreate {
             rootfs: Some(format!("{}:{}", config.storage_location, config.disk_gb)),
@@ -106,49 +99,26 @@ fn container_create(config: &ContainerConfig, ostemplate: String, tags: &Tags, t
     ))
 }
 
-fn container_settings(config: &ContainerConfig, tags: &Tags) -> Result<LxcSet> {
-    Ok(lxc_settings!(LxcSet, config, tags, LxcSet::default()))
-}
-
 fn create_from_clone(
     config: &ContainerConfig,
+    storage: &Storage,
     idmap: IdRange,
     zfs: &ZfsImages,
     image: &BaseImage<Sealed>,
     tags: &Tags,
     target: SlotId,
 ) -> Result<()> {
-    let id = target.inner();
-    let settings = container_settings(config, tags)?;
-    config
-        .bind_mounts
-        .iter()
-        .try_for_each(|mount| prepare_bind_mount(mount, config.privileged, idmap))?;
-
-    let clone = image.clone_rootfs(zfs, target, DiskSize::gib(config.disk_gb))?;
-    let conf = LxcConf {
-        rootfs: clone.volume(),
-        ownership: Ownership::of(config.privileged),
-    };
-    if let Err(e) = write_conf(&ConfPath::of(target), &conf) {
-        if let Err(cleanup) = clone.discard() {
-            warn!("could not discard rootfs clone for {}: {}", target.inner().get(), cleanup);
-        }
-        return Err(e);
+    let volume = RootfsVolume::for_slot(zfs.storage.clone(), target, DiskSize::gib(config.disk_gb));
+    let conf = LxcConf::of(config, &storage.mounts, tags, &volume, target)?;
+    ensure_all(&storage.prepare, idmap)?;
+    let clone = image.clone_rootfs(zfs, &volume)?;
+    let written = write_conf(&PveFs::live(), target, &conf);
+    if let Err(e) = &written
+        && let Err(cleanup) = clone.discard()
+    {
+        warn!("could not discard rootfs clone for {} after {}: {}", target.inner().get(), e, cleanup);
     }
-
-    let configured = Cli
-        .run(&GuestOp::<Lxc>::Set(id, settings))
-        .and_then(|_| Cli.run(&GuestOp::<Lxc>::protection(id, config.protected)));
-    match configured {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            if let Err(cleanup) = Cli.run(&GuestOp::<Lxc>::destroy(id)) {
-                warn!("could not remove half-configured container {}: {}", target.inner().get(), cleanup);
-            }
-            Err(e)
-        }
-    }
+    written
 }
 
 impl Materialise for VMConfig {
@@ -162,23 +132,22 @@ impl Materialise for VMConfig {
     }
 }
 
-impl Materialise for ContainerConfig {
+impl Materialise for Placed {
     fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, image_store: ImageStore<'_>, target: SlotId) -> Result<()> {
+        let config = &self.config;
+        let storage = self
+            .storage
+            .as_ref()
+            .map_err(|fault| AppError::CmdError(format!("{} has no usable storage: {fault:?}", config.name)))?;
         let tarball = Tarball::find(artifact.as_str())?;
-        if let Some(zfs) = image_store.zfs.filter(|zfs| zfs.storage.is(&self.storage_location)) {
-            let key = ImageKey::new(tags.nix_hash.clone(), Ownership::of(self.privileged));
+        if let Some(zfs) = image_store.zfs.filter(|zfs| zfs.storage.is(&config.storage_location)) {
+            let key = ImageKey::new(tags.nix_hash.clone(), Ownership::of(config.privileged));
             let image = BaseImage::ensure(zfs, &key, &tarball, image_store.idmap)?;
-            create_from_clone(self, image_store.idmap, zfs, &image, tags, target)
+            create_from_clone(config, storage, image_store.idmap, zfs, &image, tags, target)
         } else {
-            let ostemplate = copy_to_template_storage(
-                &tarball,
-                image_store.template_cache_path.as_str(),
-                &tags.nix_hash,
-            )?;
-            let create = container_create(self, ostemplate, tags, target)?;
-            self.bind_mounts
-                .iter()
-                .try_for_each(|mount| prepare_bind_mount(mount, self.privileged, image_store.idmap))?;
+            let ostemplate = copy_to_template_storage(&tarball, image_store.template_cache_path.as_str(), &tags.nix_hash)?;
+            let create = container_create(config, &storage.mounts, ostemplate, tags, target)?;
+            ensure_all(&storage.prepare, image_store.idmap)?;
             Cli.run(&GuestOp::<Lxc>::Create(create)).map(|_| ())
         }
     }
@@ -233,11 +202,9 @@ mod tests {
             disk_gb: 8,
             protected: true,
             privileged: false,
-            bind_mounts: vec![BindMount {
-                host_path: "/var/lib/proxnix/web".to_string(),
-                container_path: "/var/lib/web".to_string(),
-                mode: MountMode::ReadOnly,
-            }],
+            state: vec![],
+            mounts: vec![],
+            secrets: false,
             network_bridge: "vmbr0".to_string(),
             impure: false,
             cutover: None,
@@ -282,7 +249,12 @@ mod tests {
 
     #[test]
     fn a_container_is_created_from_its_template() {
-        let create = container_create(&container("web"), "local:vztmpl/web.tar.xz".to_string(), &tags(), SlotId::Blue(Vmid::new(946))).unwrap();
+        let mounts = [Mount {
+            host: proxnix_core::HostPath::try_from("/var/lib/proxnix/web").unwrap(),
+            guest: proxnix_core::GuestPath(String::from("/var/lib/web")),
+            mode: proxnix_core::MountMode::ReadOnly,
+        }];
+        let create = container_create(&container("web"), &mounts, "local:vztmpl/web.tar.xz".to_string(), &tags(), SlotId::Blue(Vmid::new(946))).unwrap();
         assert_eq!(
             rendered(&GuestOp::<Lxc>::Create(create)),
             "pct create 946 local:vztmpl/web.tar.xz --cores 2 --features nesting=1 --hostname web \
@@ -290,24 +262,6 @@ mod tests {
              --net0 name=eth0,bridge=vmbr0 --ostype unmanaged --protection 1 --rootfs ZFS:8 \
              --tags proxnix;nix-k8whj0lg7k95jn6h57k99kvikc0zrpp3;commit-abc123;slot-blue --unprivileged 1"
         );
-    }
-
-    #[test]
-    fn a_cloned_container_gets_the_same_settings_without_protection() {
-        assert_eq!(
-            rendered(&GuestOp::<Lxc>::Set(Vmid::new(946), container_settings(&container("web"), &tags()).unwrap())),
-            "pct set 946 --cores 2 --features nesting=1 --hostname web --memory 512 \
-             --mp0 /var/lib/proxnix/web,mp=/var/lib/web,ro=1 --net0 name=eth0,bridge=vmbr0 \
-             --tags proxnix;nix-k8whj0lg7k95jn6h57k99kvikc0zrpp3;commit-abc123;slot-blue"
-        );
-    }
-
-    #[test]
-    fn a_hostname_longer_than_proxmox_allows_is_rejected_before_anything_runs() {
-        assert!(matches!(
-            container_settings(&container(&"a".repeat(256)), &tags()),
-            Err(AppError::ProxmoxString(_))
-        ));
     }
 
     fn vm_with(key: &str, value: &str) -> serde_json::Result<VMConfig> {

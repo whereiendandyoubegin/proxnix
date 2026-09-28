@@ -1,15 +1,17 @@
 use crate::context::{ImageStore, RepoPath, StorePath, Tags};
-use crate::interpret::{Declared, Interpreter, Probes, Provision, Routes};
+use crate::interpret::{Declared, Interpreter, Placed, Probes, Provision, Routes};
 use crate::materialise::Materialise;
 use crate::nix::NixFault;
 use crate::probe::{ExecOutcome, exec, guest_check_script};
 use crate::remote::{Api, ApiError};
-use crate::types::{AppConfig, AppError, BindMount, ContainerConfig, MountMode as ShellMountMode, Result, Timing, VMConfig};
+use crate::state::ObserveFault;
+use crate::types::{AppConfig, AppError, ContainerConfig, MountMode as ShellMountMode, Result, Timing, VMConfig};
 use proxmox_api::client::Client;
 use rayon::prelude::*;
 use proxnix_core::{
     Artifact, BridgeName, BuildFault, Built, ConfigFault, ExitCode, Cores, Cutover, Desired, Detail, DiskGib, DurationMs, GuestKind,
-    GuestName, GuestPath, HostPath, ImageType, Images, KindSpec, MemoryMb, Memo, Moment, Mount, MountMode, Observation,
+    GuestName, GuestPath, HostPath, ImageType, Images, KindSpec, Layout, MemoryMb, Memo, Moment, Mount, MountMode, Observation,
+    StorageFault, StorageSpec,
     Pacing, Port, Privilege, ProxySpec, Purity, Registry, Report, SlotId, SlotPair, Sockets, Tick, Timeouts, Vmid,
     WorkloadSpec, step,
 };
@@ -17,7 +19,7 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildTarget {
@@ -48,29 +50,61 @@ fn proxy(hostname: &str, service_address: Option<std::net::Ipv4Addr>, backend_po
     }
 }
 
-fn mount(mount: &BindMount) -> Mount {
-    Mount {
-        host: HostPath(mount.host_path.clone()),
-        guest: GuestPath(mount.container_path.clone()),
-        mode: match mount.mode {
-            ShellMountMode::ReadOnly => MountMode::ReadOnly,
-            ShellMountMode::ReadWrite => MountMode::ReadWrite,
-        },
+fn mode(mode: ShellMountMode) -> MountMode {
+    match mode {
+        ShellMountMode::ReadOnly => MountMode::ReadOnly,
+        ShellMountMode::ReadWrite => MountMode::ReadWrite,
     }
+}
+
+fn privilege(privileged: bool) -> Privilege {
+    if privileged { Privilege::Privileged } else { Privilege::Unprivileged }
+}
+
+fn storage_spec(config: &ContainerConfig) -> std::result::Result<StorageSpec, StorageFault> {
+    Ok(StorageSpec {
+        state: config.state.iter().map(|at| GuestPath(at.clone())).collect(),
+        mounts: config
+            .mounts
+            .iter()
+            .map(|mount| {
+                let at = GuestPath(mount.at.clone());
+                HostPath::try_from(mount.host.as_str())
+                    .map(|host| Mount { host, guest: at.clone(), mode: mode(mount.mode) })
+                    .map_err(|fault| StorageFault::BadHostPath(at, fault))
+            })
+            .collect::<std::result::Result<_, _>>()?,
+        secrets: config.secrets,
+        privilege: privilege(config.privileged),
+    })
+}
+
+pub fn layout(settings: &AppConfig) -> Option<Layout> {
+    let pool = settings.zfs_images.as_ref().and_then(|zfs| proxnix_core::Dataset::try_from(zfs.pool.as_str()).ok())?;
+    let secrets = HostPath::try_from(settings.secrets_dir.as_str()).ok()?;
+    Some(Layout::under(&pool, secrets))
+}
+
+fn placed(config: ContainerConfig, layout: Option<&Layout>) -> Placed {
+    let name = GuestName(config.name.clone());
+    let storage = layout
+        .ok_or(StorageFault::NoLayout)
+        .and_then(|layout| storage_spec(&config).and_then(|wanted| layout.storage(&name, &wanted)));
+    Placed { config, storage }
 }
 
 impl Declared {
     pub fn name(&self) -> GuestName {
         GuestName(match self {
             Declared::Vm(config) => config.name.clone(),
-            Declared::Container(config) => config.name.clone(),
+            Declared::Container(placed) => placed.config.name.clone(),
         })
     }
 
     pub fn image(&self) -> ImageType {
         ImageType(match self {
             Declared::Vm(config) => config.image_type.as_str().to_string(),
-            Declared::Container(config) => config.image_type.as_str().to_string(),
+            Declared::Container(placed) => placed.config.image_type.as_str().to_string(),
         })
     }
 
@@ -84,7 +118,7 @@ impl Declared {
     pub fn spec(&self) -> std::result::Result<WorkloadSpec, ConfigFault> {
         match self {
             Declared::Vm(config) => vm_spec(config),
-            Declared::Container(config) => container_spec(config),
+            Declared::Container(placed) => container_spec(placed),
         }
     }
 }
@@ -119,7 +153,9 @@ fn vm_spec(config: &VMConfig) -> std::result::Result<WorkloadSpec, ConfigFault> 
     })
 }
 
-fn container_spec(config: &ContainerConfig) -> std::result::Result<WorkloadSpec, ConfigFault> {
+fn container_spec(placed: &Placed) -> std::result::Result<WorkloadSpec, ConfigFault> {
+    let config = &placed.config;
+    let storage = placed.storage.as_ref().map_err(|fault| ConfigFault::Storage(fault.clone()))?;
     Ok(WorkloadSpec {
         name: GuestName(config.name.clone()),
         slots: slots(config.blue_id, config.green_id)?,
@@ -129,19 +165,16 @@ fn container_spec(config: &ContainerConfig) -> std::result::Result<WorkloadSpec,
         purity: purity(config.impure),
         proxy: proxy(&config.hostname, config.service_address, config.backend_port, &config.tcp_ports, &config.network_bridge),
         timeouts: Timeouts { dhcp: millis(config.dhcp_timeout_seconds), health_check: millis(config.health_check_timeout_seconds) },
-        kind: KindSpec::Lxc {
-            privilege: if config.privileged { Privilege::Privileged } else { Privilege::Unprivileged },
-            mounts: config.bind_mounts.iter().map(mount).collect(),
-        },
+        kind: KindSpec::Lxc { privilege: privilege(config.privileged), mounts: storage.mounts.clone() },
     })
 }
 
-pub fn declare(desired: crate::types::DesiredState) -> BTreeMap<GuestName, Declared> {
+pub fn declare(desired: crate::types::DesiredState, layout: Option<&Layout>) -> BTreeMap<GuestName, Declared> {
     desired
         .vms
         .into_values()
         .map(Declared::Vm)
-        .chain(desired.containers.into_values().map(Declared::Container))
+        .chain(desired.containers.into_values().map(|config| Declared::Container(Box::new(placed(config, layout)))))
         .map(|declared| (declared.name(), declared))
         .collect()
 }
@@ -178,7 +211,7 @@ impl Declared {
     fn impure(&self) -> bool {
         match self {
             Declared::Vm(config) => config.impure,
-            Declared::Container(config) => config.impure,
+            Declared::Container(placed) => placed.config.impure,
         }
     }
 }
@@ -248,7 +281,7 @@ impl Provision for HostProvision<'_> {
         let _storage = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         match declared {
             Declared::Vm(config) => config.provision_inactive(artifact, tags, self.image_store, target),
-            Declared::Container(config) => config.provision_inactive(artifact, tags, self.image_store, target),
+            Declared::Container(placed) => placed.provision_inactive(artifact, tags, self.image_store, target),
         }
     }
 }
@@ -277,9 +310,29 @@ pub struct Inputs<'a> {
     pub limit: usize,
 }
 
+const OBSERVE_ATTEMPTS: u32 = 4;
+const OBSERVE_BACKOFF: Duration = Duration::from_secs(2);
+
+pub fn observing(
+    observe: &impl Fn() -> std::result::Result<Observation, ObserveFault>,
+    pause: &impl Fn(Duration),
+    attempt: u32,
+) -> Result<Observation> {
+    match observe() {
+        Ok(observed) => Ok(observed),
+        Err(ObserveFault::Denied(error)) => Err(error),
+        Err(ObserveFault::Transient(error)) if attempt >= OBSERVE_ATTEMPTS => Err(error),
+        Err(ObserveFault::Transient(error)) => {
+            warn!("observing the cluster failed on attempt {attempt} of {OBSERVE_ATTEMPTS}, retrying: {error}");
+            pause(OBSERVE_BACKOFF * attempt);
+            observing(observe, pause, attempt + 1)
+        }
+    }
+}
+
 pub fn drive<Reg: Registry, C: Client, R: Routes, P: Probes, M: Provision>(
     interpreter: &mut Interpreter<'_, C, R, P, M>,
-    observe: impl Fn() -> Result<Observation>,
+    observe: impl Fn() -> std::result::Result<Observation, ObserveFault>,
     inputs: &Inputs<'_>,
     clock: &Clock,
 ) -> Result<Report>
@@ -287,7 +340,7 @@ where
     C::Error: ApiError,
 {
     let finished = (0..inputs.limit).try_fold((Memo::default(), Vec::new()), |(memo, events), _| {
-        let observed = match observe() {
+        let observed = match observing(&observe, &std::thread::sleep, 1) {
             Ok(observed) => observed,
             Err(error) => return Err(Err(error)),
         };
@@ -364,7 +417,7 @@ pub struct Host<'a, C> {
 pub fn drive_all<Reg: Registry, C: Client + Sync, R: Routes + Send>(
     host: &Host<'_, C>,
     routes: R,
-    observe: &(dyn Fn() -> Result<Observation> + Sync),
+    observe: &(dyn Fn() -> std::result::Result<Observation, ObserveFault> + Sync),
     inputs: &Inputs<'_>,
     clock: &Clock,
 ) -> Vec<(GuestName, Result<Report>)>
@@ -424,14 +477,17 @@ impl Declared {
     fn binding(&self) -> Option<crate::host_net::ServiceBinding> {
         let (address, bridge) = match self {
             Declared::Vm(config) => (config.service_address, &config.network_bridge),
-            Declared::Container(config) => (config.service_address, &config.network_bridge),
+            Declared::Container(placed) => (placed.config.service_address, &placed.config.network_bridge),
         };
         address.map(|address| crate::host_net::ServiceBinding { bridge: bridge.clone(), address })
     }
 }
 
 fn load(settings: &AppConfig, repo: &str) -> Result<(BTreeMap<GuestName, Declared>, Desired)> {
-    let declared = declare(crate::state::parse_config(&crate::nix::eval_config(repo, settings.timings_ms.get(Timing::NixEval))?)?);
+    let declared = declare(
+        crate::state::parse_config(&crate::nix::eval_config(repo, settings.timings_ms.get(Timing::NixEval))?)?,
+        layout(settings).as_ref(),
+    );
     let desired = desired(&declared);
     Ok((declared, desired))
 }
@@ -443,6 +499,25 @@ pub fn prepare(settings: &AppConfig, repo: &str) -> Result<Prepared> {
         .map_err(|fault| AppError::GitError(format!("HEAD of {repo} is not a commit hash ({fault:?}): {head}")))?;
     let (declared, desired) = load(settings, repo)?;
     Ok(Prepared { commit, declared, desired })
+}
+
+pub fn host_effects(declared: &BTreeMap<GuestName, Declared>) -> Vec<proxnix_core::HostEffect> {
+    declared
+        .values()
+        .filter_map(|declared| match declared {
+            Declared::Container(placed) => placed.storage.as_ref().ok().map(|storage| storage.prepare.clone()),
+            Declared::Vm(_) => None,
+        })
+        .flatten()
+        .fold(Vec::new(), |seen, effect| if seen.contains(&effect) { seen } else { seen.into_iter().chain([effect]).collect() })
+}
+
+fn prepare_host(declared: &BTreeMap<GuestName, Declared>, idmap: crate::types::IdRange) {
+    host_effects(declared).iter().for_each(|effect| {
+        if let Err(error) = crate::host::ensure(effect, idmap) {
+            warn!("could not prepare {} up front, its create will try again: {error}", crate::host::host_effect_text(effect));
+        }
+    });
 }
 
 pub fn plan(settings: &AppConfig, pve: &crate::pve::Pve, repo: &str) -> Result<(Prepared, Vec<proxnix_core::Projection>)> {
@@ -483,6 +558,7 @@ fn run(
         },
         declared,
     };
+    prepare_host(declared, settings.unprivileged_idmap);
     let pace = pacing(settings);
     let inputs = Inputs { desired, images, tick, pacing: &pace, limit: 1_000_000 };
     let observe = || crate::state::observe(pve);
@@ -529,6 +605,55 @@ pub fn outcome_ok(outcomes: &[(GuestName, Result<Report>)]) -> bool {
 mod tests {
     use super::*;
     use crate::state::{parse_appconfig, parse_config};
+    use std::cell::{Cell, RefCell};
+
+    fn nothing_seen() -> Observation {
+        Observation::new(
+            proxnix_core::Audited::try_from(proxnix_core::Permissions { vm_audit: proxnix_core::Grant::Granted }).unwrap(),
+            vec![],
+        )
+    }
+
+    fn timed_out() -> ObserveFault {
+        ObserveFault::Transient(AppError::ProxmoxError(String::from("timed out")))
+    }
+
+    #[test]
+    fn a_transient_observe_failure_is_retried_with_growing_pauses() {
+        let calls = Cell::new(0_u32);
+        let pauses = RefCell::new(Vec::new());
+        let observe = || {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 { Err(timed_out()) } else { Ok(nothing_seen()) }
+        };
+        assert!(observing(&observe, &|wait| pauses.borrow_mut().push(wait), 1).is_ok());
+        assert_eq!(calls.get(), 3);
+        assert_eq!(pauses.into_inner(), vec![Duration::from_secs(2), Duration::from_secs(4)]);
+    }
+
+    #[test]
+    fn a_transient_observe_failure_gives_up_after_the_last_attempt() {
+        let calls = Cell::new(0_u32);
+        let observe = || {
+            calls.set(calls.get() + 1);
+            Err(timed_out())
+        };
+        assert!(observing(&observe, &|_| (), 1).is_err());
+        assert_eq!(calls.get(), OBSERVE_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_denied_audit_is_fatal_at_once() {
+        let calls = Cell::new(0_u32);
+        let pauses = RefCell::new(Vec::new());
+        let observe = || {
+            calls.set(calls.get() + 1);
+            Err(ObserveFault::Denied(AppError::ProxmoxError(String::from("no VM.Audit"))))
+        };
+        assert!(observing(&observe, &|wait| pauses.borrow_mut().push(wait), 1).is_err());
+        assert_eq!(calls.get(), 1);
+        assert!(pauses.into_inner().is_empty());
+    }
 
     const EVAL: &str = r#"{
       "vms": {
@@ -544,7 +669,7 @@ mod tests {
           "name": "postgres", "hostname": "postgres", "blue_id": 842, "green_id": 942, "tcp_ports": [5432],
           "dhcp_timeout_seconds": 240, "health_check_timeout_seconds": 180, "image_type": "build-lxc-postgres",
           "cores": 2, "memory_mb": 2048, "disk_gb": 10, "storage_location": "ZFS", "protected": true, "impure": false,
-          "bind_mounts": [{"host_path": "/var/lib/proxnix/postgres", "container_path": "/var/lib/postgresql", "mode": "read_write"}]
+          "state": ["/var/lib/postgresql"], "secrets": true
         },
         "broken": {
           "name": "broken", "hostname": "broken", "blue_id": 850, "green_id": 850,
@@ -554,8 +679,20 @@ mod tests {
       }
     }"#;
 
+    fn nixology_layout() -> Layout {
+        layout(&parse_appconfig(crate::state::tests_support::NIXOLOGY_APPCONFIG).unwrap()).unwrap()
+    }
+
     fn declared() -> BTreeMap<GuestName, Declared> {
-        declare(parse_config(EVAL).unwrap())
+        declare(parse_config(EVAL).unwrap(), Some(&nixology_layout()))
+    }
+
+    fn host(text: &str) -> HostPath {
+        HostPath::try_from(text).unwrap()
+    }
+
+    fn at(text: &str) -> GuestPath {
+        GuestPath(String::from(text))
     }
 
     fn named(name: &str) -> GuestName {
@@ -579,11 +716,11 @@ mod tests {
             postgres.kind,
             KindSpec::Lxc {
                 privilege: Privilege::Unprivileged,
-                mounts: vec![Mount {
-                    host: HostPath(String::from("/var/lib/proxnix/postgres")),
-                    guest: GuestPath(String::from("/var/lib/postgresql")),
-                    mode: MountMode::ReadWrite,
-                }],
+                mounts: vec![
+                    Mount { host: host("/ZFS/proxnix/state/postgres/postgresql"), guest: at("/var/lib/postgresql"), mode: MountMode::ReadWrite },
+                    Mount { host: host("/ZFS/proxnix/logs/postgres"), guest: at("/var/log/journal"), mode: MountMode::ReadWrite },
+                    Mount { host: host("/var/lib/proxnix/sops"), guest: at("/var/lib/sops-key"), mode: MountMode::ReadOnly },
+                ],
             }
         );
     }
@@ -622,12 +759,68 @@ mod tests {
                 base.as_object().unwrap().clone().into_iter().chain(extra.as_object().unwrap().clone()).collect();
             serde_json::from_value(serde_json::Value::Object(merged)).unwrap()
         };
-        assert_eq!(container_spec(&container(serde_json::json!({}))).unwrap().cutover, Cutover::Overlap);
-        assert_eq!(container_spec(&container(serde_json::json!({"cutover": "stop_start"}))).unwrap().cutover, Cutover::StopStart);
-        assert_eq!(
-            container_spec(&container(serde_json::json!({"cutover": "stop_start", "protected": true}))).unwrap().cutover,
-            Cutover::Protected
-        );
+        let layout = nixology_layout();
+        let spec = |extra: serde_json::Value| container_spec(&placed(container(extra), Some(&layout)));
+        assert_eq!(spec(serde_json::json!({})).unwrap().cutover, Cutover::Overlap);
+        assert_eq!(spec(serde_json::json!({"cutover": "stop_start"})).unwrap().cutover, Cutover::StopStart);
+        assert_eq!(spec(serde_json::json!({"cutover": "stop_start", "protected": true})).unwrap().cutover, Cutover::Protected);
         assert!(serde_json::from_value::<ContainerConfig>(serde_json::json!({"cutover": "sometimes"})).is_err());
+    }
+
+    const CONTAINER: &str = r#"{
+        "name": "nixflix", "hostname": "media.thesta.rs", "dhcp_timeout_seconds": 240, "health_check_timeout_seconds": 900,
+        "blue_id": 847, "green_id": 947, "image_type": "build-lxc-nixflix", "cores": 4, "memory_mb": 4096,
+        "storage_location": "ZFS", "disk_gb": 16, "protected": false, "impure": false"#;
+
+    fn parsed(extra: &str) -> serde_json::Result<ContainerConfig> {
+        serde_json::from_str(&format!("{CONTAINER}{extra}}}"))
+    }
+
+    #[test]
+    fn a_config_still_using_bind_mounts_is_rejected_instead_of_losing_its_mounts() {
+        let old = parsed(r#", "bind_mounts": [{"host_path": "/var/lib/proxnix/nixflix", "container_path": "/data/.state"}]"#);
+        assert!(old.unwrap_err().to_string().contains("bind_mounts"));
+        assert!(parsed(r#", "mounts": [{"host": "/ZFS/nixflix", "at": "/data/media", "host_path": "/x"}]"#).is_err());
+    }
+
+    #[test]
+    fn state_mounts_and_secrets_become_the_containers_mounts() {
+        let config = parsed(r#", "state": ["/data/.state"], "mounts": [{"host": "/ZFS/nixflix", "at": "/data/media"}], "secrets": true"#).unwrap();
+        let KindSpec::Lxc { mounts, .. } = container_spec(&placed(config, Some(&nixology_layout()))).unwrap().kind else { panic!("a container") };
+        assert_eq!(
+            mounts,
+            vec![
+                Mount { host: host("/ZFS/proxnix/state/nixflix/state"), guest: at("/data/.state"), mode: MountMode::ReadWrite },
+                Mount { host: host("/ZFS/nixflix"), guest: at("/data/media"), mode: MountMode::ReadWrite },
+                Mount { host: host("/ZFS/proxnix/logs/nixflix"), guest: at("/var/log/journal"), mode: MountMode::ReadWrite },
+                Mount { host: host("/var/lib/proxnix/sops"), guest: at("/var/lib/sops-key"), mode: MountMode::ReadOnly },
+            ]
+        );
+    }
+
+    #[test]
+    fn storage_that_cannot_be_laid_out_makes_the_workload_invalid_not_mountless() {
+        let config = parsed(r#", "mounts": [{"host": "relative/path", "at": "/data/media"}]"#).unwrap();
+        assert_eq!(
+            container_spec(&placed(config, Some(&nixology_layout()))).unwrap_err(),
+            ConfigFault::Storage(StorageFault::BadHostPath(at("/data/media"), proxnix_core::PathFault::Relative))
+        );
+        assert_eq!(container_spec(&placed(parsed("").unwrap(), None)).unwrap_err(), ConfigFault::Storage(StorageFault::NoLayout));
+    }
+
+    #[test]
+    #[ignore = "needs PROXNIX_EVAL pointing at `nix eval --json .#proxnix` output from nixology"]
+    fn a_real_nixology_eval_parses_and_every_container_lays_out() {
+        let path = std::env::var("PROXNIX_EVAL").expect("PROXNIX_EVAL");
+        let declared = declare(parse_config(&std::fs::read_to_string(path).unwrap()).unwrap(), Some(&nixology_layout()));
+        let unplaced: Vec<(String, String)> = declared
+            .values()
+            .filter_map(|declared| match declared {
+                Declared::Container(placed) => placed.storage.as_ref().err().map(|fault| (placed.config.name.clone(), format!("{fault:?}"))),
+                Declared::Vm(_) => None,
+            })
+            .collect();
+        assert!(unplaced.is_empty(), "{unplaced:#?}");
+        println!("{}", crate::render::host(&host_effects(&declared)));
     }
 }

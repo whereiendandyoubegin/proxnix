@@ -4,8 +4,8 @@ use proxnix_core::{
     Audited, BridgeName, Built, Artifact, Cores, Cutover, Desired, DiskGib, DurationMs, Effect, EffectError, Endpoint, Event,
     Grant, GuestEffect, GuestName, GuestStatus, Hostname, ImageType, Images, KindFacts, KindSpec, Memo,
     MemoryMb, Moment, Observation, Outcome, Pacing, Permissions, Port, Privilege, ProbeEffect, ProxySpec, Purity, RawTags,
-    Registry, Report, ResourceChange, Resources, RouteEffect, Sighting, Slot, SlotPair, Sockets, Stage, Timeouts, Tick,
-    Vmid, WorkloadSpec, Input, Push, Detail, step,
+    Registry, Report, ResourceChange, Resources, RouteEffect, Settled, Sighting, Slot, SlotPair, Sockets, Stage, Timeouts, Tick,
+    Unsettled, Vmid, WorkloadSpec, Input, Push, Detail, step,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
@@ -56,6 +56,7 @@ pub struct Faults {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct World {
     pub guests: BTreeMap<Vmid, SimGuest>,
+    pub unsettled: BTreeMap<Vmid, Unsettled>,
     pub routes: BTreeMap<(String, Endpoint), SimRoute>,
     pub faults: Faults,
     pub applied: usize,
@@ -183,6 +184,10 @@ impl World {
         )
     }
 
+    pub fn half_made(self, id: Vmid, why: Unsettled) -> World {
+        World { unsettled: self.unsettled.into_iter().chain([(id, why)]).collect(), ..self }
+    }
+
     pub fn unmanaged(self, id: Vmid, name: &str) -> World {
         self.with_guest(
             id,
@@ -201,14 +206,17 @@ impl World {
             Audited::try_from(Permissions { vm_audit: Grant::Granted }).unwrap(),
             self.guests
                 .iter()
-                .map(|(id, guest)| Sighting {
-                    id: *id,
-                    name: GuestName(guest.name.clone()),
-                    status: if guest.running { GuestStatus::Running } else { GuestStatus::Stopped },
-                    tags: RawTags::from(guest.tags.as_ref().map(render).unwrap_or_default()),
-                    resources: guest.resources,
-                    facts: guest.facts.clone(),
+                .map(|(id, guest)| {
+                    Sighting::Settled(Settled {
+                        id: *id,
+                        name: GuestName(guest.name.clone()),
+                        status: if guest.running { GuestStatus::Running } else { GuestStatus::Stopped },
+                        tags: RawTags::from(guest.tags.as_ref().map(render).unwrap_or_default()),
+                        resources: guest.resources,
+                        facts: guest.facts.clone(),
+                    })
                 })
+                .chain(self.unsettled.iter().map(|(id, why)| Sighting::Unsettled(*id, *why)))
                 .collect(),
         )
     }
@@ -376,7 +384,10 @@ pub fn guard(world: &World, effect: &Effect, desired: &Desired, tick: &Tick) {
     if let Effect::Guest(guest) = effect {
         let id = guest.id();
         match guest {
-            GuestEffect::Create { .. } => assert!(!world.guests.contains_key(&id), "created into occupied {id:?}"),
+            GuestEffect::Create { .. } => assert!(
+                !world.guests.contains_key(&id) && !world.unsettled.contains_key(&id),
+                "created into occupied {id:?}"
+            ),
             _ => assert!(
                 world.guests.get(&id).is_some_and(|sim| sim.tags.is_some()),
                 "{effect:?} targets {id:?}, which is not a managed guest"

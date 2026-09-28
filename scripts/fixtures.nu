@@ -4,9 +4,9 @@ def default-out [] {
   "~/cloned/proxnix/nix-deployments-rs/nix-deployments-rs/proxnix/fixtures/api" | path expand
 }
 
-def fetch [host: string, header: string, path: string] {
+def fetch [host: string, socket: path, header: string, path: string] {
   $header
-  | ^ssh $host curl --silent --show-error --fail --cacert /etc/pve/pve-root-ca.pem --header @- $"https://localhost:8006/api2/json($path)"
+  | ^ssh -o $"ControlPath=($socket)" $host curl --silent --show-error --fail --cacert /etc/pve/pve-root-ca.pem --header @- $"https://localhost:8006/api2/json($path)"
   | from json
   | get data
 }
@@ -43,11 +43,21 @@ export def main [
 ] {
   let out = $out | default (default-out) | path expand
   let api = ^nix eval $"($nixology | path expand)#proxnixcfg.proxmox" --json | from json
-  let token = ^ssh $host cat $api.token_file | str trim
+  let control = mktemp --directory
+  let socket = $control | path join ssh.sock
+  ^ssh -o ControlMaster=yes -o $"ControlPath=($socket)" -o ControlPersist=300 -fN $host
+  let token = ^ssh -o $"ControlPath=($socket)" $host cat $api.token_file | str trim
   let header = $"Authorization: PVEAPIToken=($api.user)@($api.realm)!($api.token_id)=($token)"
-  let get = {|path| fetch $host $header $"/nodes/($api.node)/($path)" }
+  let get = {|path| fetch $host $socket $header $"/nodes/($api.node)/($path)" }
 
-  [qemu lxc]
+  let tasks = do $get "tasks?limit=5"
+  let failed = do $get "tasks?errors=1&limit=10"
+  let task_files = [(store $out "tasks.json" $tasks) (store $out "failed-tasks.json" $failed)]
+    | append ($tasks | first 3 | append ($failed | first 5) | each {|task|
+        try { store $out $"tasks/($task.upid | str replace --all ':' '_')/status.json" (do $get $"tasks/($task.upid)/status") } catch {|e| $"skipped task ($task.upid): ($e.msg)" }
+      })
+
+  let guest_files = [qemu lxc]
   | each {|kind|
       let guests = do $get $kind
       [(store $out $"($kind).json" $guests)]
@@ -59,4 +69,8 @@ export def main [
         } | flatten)
     }
   | flatten
+
+  ^ssh -o $"ControlPath=($socket)" -O exit $host
+  rm --recursive $control
+  $task_files | append $guest_files
 }

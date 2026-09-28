@@ -124,6 +124,7 @@ async fn run_once(mode: Mode, repo: Option<std::path::PathBuf>, appconfig: AppCo
     let finished = tokio::task::spawn_blocking(move || match mode {
         Mode::Plan => engine::plan(&appconfig, &pve, &repo).map(|(prepared, projections)| {
             println!("{}", render::plan(&prepared.commit, &projections));
+            println!("{}", render::host(&engine::host_effects(&prepared.declared)));
             true
         }),
         _ => engine::deploy(&appconfig, &pve, &repo).map(|outcomes| engine::outcome_ok(&outcomes)),

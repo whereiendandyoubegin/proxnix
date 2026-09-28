@@ -5,11 +5,12 @@ use proxmox_api::nodes::node::{lxc, qemu};
 use proxmox_api::types::bounded_integer::BoundedInteger;
 use proxmox_api::access::permissions;
 use proxnix_core::{
-    Audited, Cores, DiskGib, Grant, GuestName, GuestPath, GuestStatus, HostPath, KindFacts, MemoryMb, Mount,
-    MountMode as CoreMountMode, Observation, Permissions, Privilege, RawTags, Resources as CoreResources, Sighting,
-    Sockets, VisibilityFault, Vmid,
+    Audited, Cores, DiskGib, Grant, GuestName, GuestPath, GuestStatus, HostPath, KindFacts, LockKind, MemoryMb, Mount,
+    MountMode as CoreMountMode, Observation, Permissions, Privilege, RawTags, Resources as CoreResources, Settled,
+    Sighting, Sockets, Unsettled, VisibilityFault, Vmid,
 };
 use rayon::prelude::*;
+use tracing::{debug, warn};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -30,7 +31,47 @@ pub struct Listed<X> {
     pub name: String,
     pub status: GuestStatus,
     pub tags: Option<String>,
+    pub lock: Option<LockKind>,
     pub extra: X,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKey {
+    Memory,
+    Rootfs,
+    Cores,
+}
+
+#[derive(Debug)]
+pub enum DecodeFault {
+    Missing(ConfigKey),
+    Invalid(AppError),
+}
+
+impl From<AppError> for DecodeFault {
+    fn from(error: AppError) -> DecodeFault {
+        DecodeFault::Invalid(error)
+    }
+}
+
+impl From<std::num::TryFromIntError> for DecodeFault {
+    fn from(error: std::num::TryFromIntError) -> DecodeFault {
+        DecodeFault::Invalid(AppError::from(error))
+    }
+}
+
+#[derive(Debug)]
+pub enum ObserveFault {
+    Denied(AppError),
+    Transient(AppError),
+}
+
+impl From<ObserveFault> for AppError {
+    fn from(fault: ObserveFault) -> AppError {
+        match fault {
+            ObserveFault::Denied(error) | ObserveFault::Transient(error) => error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,7 +106,9 @@ pub trait Observe: Kind {
     fn list(pve: &Pve) -> Result<Vec<Listed<Self::Listing>>>;
     fn config(pve: &Pve, id: Vmid) -> Result<Self::Config>;
     fn tags_of(config: &Self::Config) -> Option<&str>;
-    fn decode(id: Vmid, listing: Self::Listing, config: Self::Config) -> Result<(Resources, Self::Extra)>;
+    fn lock_of(config: &Self::Config) -> Option<LockKind>;
+    fn lock_named(name: &str) -> LockKind;
+    fn decode(listing: Self::Listing, config: Self::Config) -> std::result::Result<(Resources, Self::Extra), DecodeFault>;
 }
 
 fn vmid_of(id: &impl BoundedInteger) -> Result<Vmid> {
@@ -90,8 +133,37 @@ impl Bytes {
     }
 }
 
-fn required<T>(value: Option<T>, id: Vmid, key: &str) -> Result<T> {
-    value.ok_or_else(|| AppError::ProxmoxError(format!("config of {} is missing `{key}`", id.get())))
+fn required<T>(value: Option<T>, key: ConfigKey) -> std::result::Result<T, DecodeFault> {
+    value.ok_or(DecodeFault::Missing(key))
+}
+
+fn lxc_lock(lock: &lxc::vmid::config::Lock) -> LockKind {
+    match lock {
+        lxc::vmid::config::Lock::Backup => LockKind::Backup,
+        lxc::vmid::config::Lock::Create => LockKind::Create,
+        lxc::vmid::config::Lock::Destroyed => LockKind::Destroyed,
+        lxc::vmid::config::Lock::Disk => LockKind::Disk,
+        lxc::vmid::config::Lock::Fstrim => LockKind::Fstrim,
+        lxc::vmid::config::Lock::Migrate => LockKind::Migrate,
+        lxc::vmid::config::Lock::Mounted => LockKind::Mounted,
+        lxc::vmid::config::Lock::Rollback => LockKind::Rollback,
+        lxc::vmid::config::Lock::Snapshot => LockKind::Snapshot,
+        lxc::vmid::config::Lock::SnapshotDelete => LockKind::SnapshotDelete,
+    }
+}
+
+fn qemu_lock(lock: &qemu::vmid::config::Lock) -> LockKind {
+    match lock {
+        qemu::vmid::config::Lock::Backup => LockKind::Backup,
+        qemu::vmid::config::Lock::Clone => LockKind::Clone,
+        qemu::vmid::config::Lock::Create => LockKind::Create,
+        qemu::vmid::config::Lock::Migrate => LockKind::Migrate,
+        qemu::vmid::config::Lock::Rollback => LockKind::Rollback,
+        qemu::vmid::config::Lock::Snapshot => LockKind::Snapshot,
+        qemu::vmid::config::Lock::SnapshotDelete => LockKind::SnapshotDelete,
+        qemu::vmid::config::Lock::Suspended => LockKind::Suspended,
+        qemu::vmid::config::Lock::Suspending => LockKind::Suspending,
+    }
 }
 
 fn narrowed<T: TryFrom<i128, Error = std::num::TryFromIntError>>(value: &impl BoundedInteger) -> Result<T> {
@@ -107,6 +179,7 @@ fn listed_qemu(item: qemu::GetOutputItems) -> Result<Listed<QemuListing>> {
             qemu::Status::Stopped => GuestStatus::Stopped,
         },
         tags: item.tags,
+        lock: item.lock.as_deref().map(Qemu::lock_named),
         extra: QemuListing {
             memory_mb: Bytes::reported(item.maxmem).mebibytes()?,
             disk_gb: Bytes::reported(item.maxdisk).gibibytes(),
@@ -123,6 +196,7 @@ fn listed_lxc(item: lxc::GetOutputItems) -> Result<Listed<()>> {
             lxc::Status::Stopped => GuestStatus::Stopped,
         },
         tags: item.tags,
+        lock: item.lock.as_deref().map(Lxc::lock_named),
         extra: (),
     })
 }
@@ -153,7 +227,15 @@ impl Observe for Qemu {
         config.tags.as_deref()
     }
 
-    fn decode(_id: Vmid, listing: QemuListing, config: Self::Config) -> Result<(Resources, QemuExtra)> {
+    fn lock_of(config: &Self::Config) -> Option<LockKind> {
+        config.lock.as_ref().map(qemu_lock)
+    }
+
+    fn lock_named(name: &str) -> LockKind {
+        qemu::vmid::config::Lock::try_from(name).map_or(LockKind::Other, |lock| qemu_lock(&lock))
+    }
+
+    fn decode(listing: QemuListing, config: Self::Config) -> std::result::Result<(Resources, QemuExtra), DecodeFault> {
         Ok((
             Resources {
                 memory_mb: listing.memory_mb,
@@ -193,12 +275,20 @@ impl Observe for Lxc {
         config.tags.as_deref()
     }
 
-    fn decode(id: Vmid, (): (), config: Self::Config) -> Result<(Resources, LxcExtra)> {
+    fn lock_of(config: &Self::Config) -> Option<LockKind> {
+        config.lock.as_ref().map(lxc_lock)
+    }
+
+    fn lock_named(name: &str) -> LockKind {
+        lxc::vmid::config::Lock::try_from(name).map_or(LockKind::Other, |lock| lxc_lock(&lock))
+    }
+
+    fn decode((): (), config: Self::Config) -> std::result::Result<(Resources, LxcExtra), DecodeFault> {
         Ok((
             Resources {
-                memory_mb: narrowed(&required(config.memory, id, "memory")?)?,
-                disk_gb: rootfs_size_gb(&required(config.rootfs, id, "rootfs")?)?,
-                cores: narrowed(&required(config.cores, id, "cores")?)?,
+                memory_mb: narrowed(&required(config.memory, ConfigKey::Memory)?)?,
+                disk_gb: rootfs_size_gb(&required(config.rootfs, ConfigKey::Rootfs)?)?,
+                cores: narrowed(&required(config.cores, ConfigKey::Cores)?)?,
             },
             LxcExtra {
                 privileged: !config.unprivileged.unwrap_or(false),
@@ -214,14 +304,13 @@ impl Observe for Lxc {
     }
 }
 
-pub fn audit(pve: &Pve) -> Result<Audited> {
-    audited(
-        &pve.call(pve.access().permissions().get(permissions::GetParams {
+fn granted(pve: &Pve) -> Result<HashMap<String, serde_json::Value>> {
+    Ok(pve
+        .call(pve.access().permissions().get(permissions::GetParams {
             path: Some(String::from("/vms")),
             ..permissions::GetParams::default()
         }))?
-        .additional_properties,
-    )
+        .additional_properties)
 }
 
 pub(crate) fn audited(granted: &HashMap<String, serde_json::Value>) -> Result<Audited> {
@@ -240,31 +329,56 @@ pub(crate) fn audited(granted: &HashMap<String, serde_json::Value>) -> Result<Au
     })
 }
 
-pub fn observe(pve: &Pve) -> Result<Observation> {
-    let audited = audit(pve)?;
-    let qemu = sightings::<Qemu>(Qemu::list(pve)?, |id| Qemu::config(pve, id))?;
-    let lxc = sightings::<Lxc>(Lxc::list(pve)?, |id| Lxc::config(pve, id))?;
-    Ok(Observation::new(audited, qemu.into_iter().chain(lxc).collect()))
+pub fn observe(pve: &Pve) -> std::result::Result<Observation, ObserveFault> {
+    let audited = audited(&granted(pve).map_err(ObserveFault::Transient)?).map_err(ObserveFault::Denied)?;
+    let qemu = Qemu::list(pve).map_err(ObserveFault::Transient)?;
+    let lxc = Lxc::list(pve).map_err(ObserveFault::Transient)?;
+    Ok(Observation::new(
+        audited,
+        sightings::<Qemu>(qemu, |id| Qemu::config(pve, id))
+            .into_iter()
+            .chain(sightings::<Lxc>(lxc, |id| Lxc::config(pve, id)))
+            .collect(),
+    ))
 }
 
-fn sightings<K: Observe>(
-    listed: Vec<Listed<K::Listing>>,
-    config: impl Fn(Vmid) -> Result<K::Config> + Sync,
-) -> Result<Vec<Sighting>> {
+fn sightings<K: Observe>(listed: Vec<Listed<K::Listing>>, config: impl Fn(Vmid) -> Result<K::Config> + Sync) -> Vec<Sighting> {
     listed
         .into_par_iter()
         .map(|entry| {
-            let fetched = config(entry.id)?;
+            let fetched = config(entry.id);
             sighting::<K>(entry, fetched)
         })
         .collect()
 }
 
-fn sighting<K: Observe>(entry: Listed<K::Listing>, config: K::Config) -> Result<Sighting> {
+fn sighting<K: Observe>(entry: Listed<K::Listing>, fetched: Result<K::Config>) -> Sighting {
+    let id = entry.id;
+    let lock = fetched.as_ref().ok().and_then(K::lock_of).or(entry.lock);
+    match (lock, fetched) {
+        (Some(LockKind::Create), _) => Sighting::Unsettled(id, Unsettled::Locked(LockKind::Create)),
+        (_, Err(error)) => unreadable(id, &error),
+        (lock, Ok(config)) => match settled::<K>(entry, config) {
+            Ok(settled) => Sighting::Settled(settled),
+            Err(DecodeFault::Missing(key)) => {
+                debug!("guest {} has no {key:?} yet and stays occupied", id.get());
+                Sighting::Unsettled(id, lock.map_or(Unsettled::Incomplete, Unsettled::Locked))
+            }
+            Err(DecodeFault::Invalid(error)) => unreadable(id, &error),
+        },
+    }
+}
+
+fn unreadable(id: Vmid, error: &AppError) -> Sighting {
+    warn!("guest {} cannot be read and stays occupied: {error}", id.get());
+    Sighting::Unsettled(id, Unsettled::Unreadable)
+}
+
+fn settled<K: Observe>(entry: Listed<K::Listing>, config: K::Config) -> std::result::Result<Settled, DecodeFault> {
     let Listed { id, name, status, extra, .. } = entry;
     let tags = RawTags::from(K::tags_of(&config).map(str::to_string).unwrap_or_default());
-    let (resources, extra) = K::decode(id, extra, config)?;
-    Ok(Sighting {
+    let (resources, extra) = K::decode(extra, config)?;
+    Ok(Settled {
         id,
         name: GuestName(name),
         status,
@@ -305,13 +419,19 @@ impl From<LxcExtra> for KindFacts {
             mounts: extra
                 .bind_mounts
                 .into_iter()
-                .map(|mount| Mount {
-                    host: HostPath(mount.host_path),
-                    guest: GuestPath(mount.container_path),
-                    mode: match mount.mode {
-                        MountMode::ReadOnly => CoreMountMode::ReadOnly,
-                        MountMode::ReadWrite => CoreMountMode::ReadWrite,
-                    },
+                .filter_map(|mount| match HostPath::try_from(mount.host_path.as_str()) {
+                    Ok(host) => Some(Mount {
+                        host,
+                        guest: GuestPath(mount.container_path),
+                        mode: match mount.mode {
+                            MountMode::ReadOnly => CoreMountMode::ReadOnly,
+                            MountMode::ReadWrite => CoreMountMode::ReadWrite,
+                        },
+                    }),
+                    Err(fault) => {
+                        debug!("mount source {} is not a host path ({fault:?}); it is a volume, not a bind mount", mount.host_path);
+                        None
+                    }
                 })
                 .collect(),
         }
@@ -463,6 +583,7 @@ mod tests {
                 name: "web".to_string(),
                 status: GuestStatus::Running,
                 tags: Some(MANAGED.to_string()),
+                lock: None,
                 extra: QemuListing { memory_mb: 2048, disk_gb: 10.0 },
             }]
         );
@@ -475,20 +596,84 @@ mod tests {
             name: "web".to_string(),
             status: GuestStatus::Running,
             tags: Some(MANAGED.to_string()),
+            lock: None,
             extra: QemuListing { memory_mb: 2048, disk_gb: 10.0 },
         };
         let config: qemu::vmid::config::GetOutput =
             decoded(&json!({ "digest": "0123", "balloon": 1024, "cores": 2, "sockets": 1, "memory": "2048", "tags": MANAGED }));
-        let seen = sighting::<Qemu>(listing, config).unwrap();
+        let Sighting::Settled(seen) = sighting::<Qemu>(listing, Ok(config)) else { panic!("a full vm config must settle") };
         assert_eq!(seen.resources, CoreResources { memory: MemoryMb(2048), disk: DiskGib(10), cores: Cores(2) });
         assert_eq!(seen.facts, KindFacts::Qemu { sockets: Sockets(1) });
     }
 
+    fn container(id: u32, lock: Option<LockKind>) -> Listed<()> {
+        Listed { id: Vmid::new(id), name: format!("guest-{id}"), status: GuestStatus::Stopped, tags: None, lock, extra: () }
+    }
+
+    fn lxc_config(json: &serde_json::Value) -> Result<lxc::vmid::config::GetOutput> {
+        Ok(decoded(json))
+    }
+
+    fn full() -> serde_json::Value {
+        json!({ "digest": "0123", "memory": 512, "cores": 1, "rootfs": "ZFS:subvol-930-disk-0,size=10G", "tags": MANAGED })
+    }
+
+    fn half_written() -> serde_json::Value {
+        json!({ "digest": "0123", "arch": "amd64", "ostype": "unmanaged", "rootfs": "ZFS:subvol-947-disk-0,size=16G", "unprivileged": 1 })
+    }
+
     #[test]
-    fn a_container_config_missing_its_memory_is_an_error_not_a_guess() {
-        let listing = Listed { id: Vmid::new(833), name: "pihole".to_string(), status: GuestStatus::Running, tags: Some(MANAGED.to_string()), extra: () };
-        let config: lxc::vmid::config::GetOutput = decoded(&json!({ "digest": "0123", "cores": 2, "rootfs": "x:y,size=8G" }));
-        assert!(sighting::<Lxc>(listing, config).is_err());
+    fn a_half_written_container_occupies_its_id_instead_of_failing_the_observation() {
+        let seen = sightings::<Lxc>(vec![container(930, None), container(947, None)], |id| match id.get() {
+            947 => lxc_config(&half_written()),
+            _ => lxc_config(&full()),
+        });
+        assert_eq!(seen.len(), 2);
+        assert!(matches!(&seen[0], Sighting::Settled(settled) if settled.id == Vmid::new(930)));
+        assert_eq!(seen[1], Sighting::Unsettled(Vmid::new(947), Unsettled::Incomplete));
+    }
+
+    #[test]
+    fn a_container_proxmox_is_still_creating_is_never_settled() {
+        let locked = json!({ "digest": "0123", "memory": 512, "cores": 1, "rootfs": "ZFS:subvol-947-disk-0,size=16G", "lock": "create" });
+        assert_eq!(
+            sighting::<Lxc>(container(947, None), lxc_config(&locked)),
+            Sighting::Unsettled(Vmid::new(947), Unsettled::Locked(LockKind::Create))
+        );
+    }
+
+    #[test]
+    fn a_half_written_config_under_a_lock_names_the_lock() {
+        let backup = json!({ "digest": "0123", "rootfs": "ZFS:subvol-947-disk-0,size=16G", "lock": "backup" });
+        assert_eq!(
+            sighting::<Lxc>(container(947, None), lxc_config(&backup)),
+            Sighting::Unsettled(Vmid::new(947), Unsettled::Locked(LockKind::Backup))
+        );
+    }
+
+    #[test]
+    fn a_guest_gone_between_list_and_config_still_occupies_its_id() {
+        let gone = || Err(AppError::ProxmoxError(String::from("Configuration file does not exist")));
+        assert_eq!(sighting::<Lxc>(container(947, None), gone()), Sighting::Unsettled(Vmid::new(947), Unsettled::Unreadable));
+        assert_eq!(
+            sighting::<Lxc>(container(947, Some(LockKind::Create)), gone()),
+            Sighting::Unsettled(Vmid::new(947), Unsettled::Locked(LockKind::Create))
+        );
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_decoded_is_unreadable_not_fatal() {
+        let bad_mount = json!({ "digest": "0123", "memory": 512, "cores": 1, "rootfs": "ZFS:x,size=8G", "mp0": "/nowhere" });
+        assert_eq!(sighting::<Lxc>(container(947, None), lxc_config(&bad_mount)), Sighting::Unsettled(Vmid::new(947), Unsettled::Unreadable));
+    }
+
+    #[test]
+    fn listed_locks_are_read_whatever_proxmox_calls_them() {
+        assert_eq!(Lxc::lock_named("create"), LockKind::Create);
+        assert_eq!(Qemu::lock_named("suspending"), LockKind::Suspending);
+        assert_eq!(Lxc::lock_named("something-new"), LockKind::Other);
+        let items: Vec<lxc::GetOutputItems> = decoded(&json!([{ "vmid": 947, "status": "stopped", "lock": "create" }]));
+        assert_eq!(listed_lxc(items.into_iter().next().unwrap()).unwrap().lock, Some(LockKind::Create));
     }
 
     #[test]
@@ -502,6 +687,7 @@ mod tests {
                 name: "pihole".to_string(),
                 status: GuestStatus::Stopped,
                 tags: None,
+                lock: None,
                 extra: (),
             }]
         );
@@ -555,7 +741,7 @@ mod tests {
             let config: Option<qemu::vmid::config::GetOutput> = fixture(&format!("qemu/{}/config.json", id.get()));
             let listing = QemuListing { memory_mb: 0, disk_gb: 0.0 };
             if let Some(config) = config {
-                assert!(Qemu::decode(id, listing, config).is_ok(), "config of {} is unusable", id.get());
+                assert!(Qemu::decode(listing, config).is_ok(), "config of {} is unusable", id.get());
             }
             let agent: Option<qemu::vmid::agent::network_get_interfaces::GetOutput> =
                 fixture(&format!("qemu/{}/agent/network-get-interfaces.json", id.get()));
@@ -575,7 +761,7 @@ mod tests {
         for id in managed_ids(&listed) {
             let config: Option<lxc::vmid::config::GetOutput> = fixture(&format!("lxc/{}/config.json", id.get()));
             if let Some(config) = config {
-                assert!(Lxc::decode(id, (), config).is_ok(), "config of {} is unusable", id.get());
+                assert!(Lxc::decode((), config).is_ok(), "config of {} is unusable", id.get());
             }
             let interfaces: Option<Vec<lxc::vmid::interfaces::GetOutputItems>> =
                 fixture(&format!("lxc/{}/interfaces.json", id.get()));
@@ -677,22 +863,22 @@ mod tests {
         decoded::<permissions::GetOutput>(&raw_fixture("permissions.json")).additional_properties
     }
 
-    fn observed_from_fixtures(granted: &HashMap<String, serde_json::Value>) -> Result<Observation> {
-        let audited = audited(granted)?;
+    fn observed_from_fixtures(granted: &HashMap<String, serde_json::Value>) -> std::result::Result<Observation, ObserveFault> {
+        let audited = audited(granted).map_err(ObserveFault::Denied)?;
         let qemu = sightings::<Qemu>(
             decoded::<Vec<qemu::GetOutputItems>>(&raw_fixture("qemu.json"))
                 .into_iter()
                 .map(|item| listed_qemu(item).unwrap())
                 .collect(),
             |id| Ok(decoded(&raw_fixture(&format!("qemu/{}/config.json", id.get())))),
-        )?;
+        );
         let lxc = sightings::<Lxc>(
             decoded::<Vec<lxc::GetOutputItems>>(&raw_fixture("lxc.json"))
                 .into_iter()
                 .map(|item| listed_lxc(item).unwrap())
                 .collect(),
             |id| Ok(decoded(&raw_fixture(&format!("lxc/{}/config.json", id.get())))),
-        )?;
+        );
         Ok(Observation::new(audited, qemu.into_iter().chain(lxc).collect()))
     }
 
@@ -724,7 +910,7 @@ mod tests {
         assert!(audited(&stripped).is_err());
         assert!(audited(&HashMap::new()).is_err());
         assert!(audited(&[(String::from("/vms"), json!({ "VM.Audit": 0 }))].into()).is_err());
-        assert!(observed_from_fixtures(&stripped).is_err());
+        assert!(matches!(observed_from_fixtures(&stripped), Err(ObserveFault::Denied(_))));
     }
 
     #[test]

@@ -84,6 +84,14 @@ fn needs_attention(stage: &Stage) -> bool {
     matches!(stage, Stage::Failed(_) | Stage::Blocked(_) | Stage::Conflict(_) | Stage::Invalid(_) | Stage::Skipped(_))
 }
 
+pub fn host(effects: &[proxnix_core::HostEffect]) -> String {
+    [String::from("== host (ensured before any create, never during --plan)")]
+        .into_iter()
+        .chain(effects.iter().map(|effect| format!("  {}", crate::host::host_effect_text(effect))))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn plan(commit: &proxnix_core::CommitHash, projections: &[Projection]) -> String {
     let header = format!("proxnix plan for commit {}\naddresses marked <address from dhcp> are only known once the guest boots\n", commit.as_ref());
     let sections = projections.iter().map(|projection| {
@@ -124,7 +132,7 @@ mod tests {
     use proxnix_core::{
         Artifact, Audited, Builtin, Built, BridgeName, Cores, Cutover, Desired, DiskGib, DurationMs, Grant, GuestName, GuestStatus,
         Hostname, ImageType, Images, KindFacts, KindSpec, MemoryMb, Observation, Pacing, Permissions, Port, Privilege, ProxySpec,
-        Purity, Push, RawTags, Resources, Sighting, SlotPair, Tick, Timeouts, WorkloadSpec, project,
+        Purity, Push, RawTags, Resources, Settled, Sighting, SlotPair, Tick, Timeouts, WorkloadSpec, project,
     };
 
     const OLD: &str = "78s0iadvjz6s48aqvx4rw78lwrzkjzlw";
@@ -152,14 +160,14 @@ mod tests {
         };
         let observed = Observation::new(
             Audited::try_from(Permissions { vm_audit: Grant::Granted }).unwrap(),
-            vec![Sighting {
+            vec![Sighting::Settled(Settled {
                 id: Vmid::new(844),
                 name: GuestName(String::from("forgejo")),
                 status: GuestStatus::Running,
                 tags: RawTags::from(format!("commit-{COMMIT};ip-192.168.1.214;nix-{OLD};proxnix;slot-blue")),
                 resources: spec.resources,
                 facts: KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] },
-            }],
+            })],
         );
         let images: Images = [Built {
             image: spec.image.clone(),

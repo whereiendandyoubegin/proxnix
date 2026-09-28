@@ -364,16 +364,13 @@ impl BaseImage<Sealed> {
         }
     }
 
-    pub fn clone_rootfs(&self, zfs: &ZfsImages, target: SlotId, size: DiskSize) -> Result<RootfsClone> {
-        let volume = RootfsVolume::for_slot(zfs.storage.clone(), target, size);
+    pub fn clone_rootfs(&self, zfs: &ZfsImages, volume: &RootfsVolume) -> Result<RootfsClone> {
         let dataset = zfs.pool.child(&volume.volume);
         if exists(dataset.as_str())? { Err(AppError::ZfsError(format!(
-            "{} already exists; destroy the leftover volume before provisioning {}",
-            dataset,
-            target.inner().get()
+            "{dataset} already exists; destroy the leftover volume before provisioning into it"
         ))) } else {
-            zfs_clone(&Snapshot::base(&self.dataset), &dataset, size)?;
-            Ok(RootfsClone { dataset, volume })
+            zfs_clone(&Snapshot::base(&self.dataset), &dataset, volume.size)?;
+            Ok(RootfsClone { dataset })
         }
     }
 }
@@ -381,14 +378,9 @@ impl BaseImage<Sealed> {
 #[derive(Debug)]
 pub struct RootfsClone {
     dataset: Dataset,
-    volume: RootfsVolume,
 }
 
 impl RootfsClone {
-    pub fn volume(&self) -> &RootfsVolume {
-        &self.volume
-    }
-
     pub fn discard(self) -> Result<()> {
         zfs_cmd(&["destroy", self.dataset.as_str()]).map(|_| ())
     }
@@ -518,6 +510,22 @@ fn exists(name: &str) -> Result<bool> {
         .output()?
         .status
         .success())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Presence {
+    Created,
+    Existed,
+}
+
+pub(crate) fn ensure_dataset(name: &str) -> Result<(PathBuf, Presence)> {
+    let presence = if exists(name)? {
+        Presence::Existed
+    } else {
+        zfs_cmd(&["create", "-o", "acltype=posixacl", "-o", "xattr=sa", "-o", "atime=off", name])?;
+        Presence::Created
+    };
+    Ok((PathBuf::from(zfs_cmd(&["get", "-H", "-o", "value", "mountpoint", name])?.trim()), presence))
 }
 
 fn zfs_cmd(args: &[&str]) -> Result<String> {

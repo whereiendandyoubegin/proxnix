@@ -1,18 +1,18 @@
 use proxnix_core::{
     Audited, BridgeName, Cohort, Cores, Cutover, DiskGib, DurationMs, Expendable, GuestEffect, GuestName, GuestStatus,
     Grant, Hostname, ImageType, KindFacts, KindSpec, MemoryMb, Observation, Permissions, Port, Privilege, Promotion,
-    ProxySpec, Purity, RawTags, Resources, Sighting, SlotPair, SlotState, Timeouts, Vmid, WorkloadSpec,
+    ProxySpec, Purity, RawTags, Resources, Settled, Sighting, SlotPair, SlotState, Timeouts, Vmid, WorkloadSpec,
 };
 
 fn sighting(id: Vmid, tags: &str) -> Sighting {
-    Sighting {
+    Sighting::Settled(Settled {
         id,
         name: GuestName(String::from("forgejo")),
         status: GuestStatus::Running,
         tags: RawTags::from(String::from(tags)),
         resources: Resources { memory: MemoryMb(2048), disk: DiskGib(16), cores: Cores(2) },
         facts: KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] },
-    }
+    })
 }
 
 fn main() {

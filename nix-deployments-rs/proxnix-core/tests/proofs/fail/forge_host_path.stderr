@@ -1,0 +1,28 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/proofs/fail/forge_host_path.rs:4:27
+  |
+4 |     let _ = HostPath(vec![PathPart(String::from("ZFS"))]);
+  |                           ^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/guest.rs
+  |
+  | pub struct PathPart(String);
+  |                     ^^^^^^ private field
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/proofs/fail/forge_host_path.rs:4:13
+  |
+4 |     let _ = HostPath(vec![PathPart(String::from("ZFS"))]);
+  |             ^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/guest.rs
+  |
+  | pub struct HostPath(Vec<PathPart>);
+  |                     ^^^^^^^^^^^^^ private field
+help: you might have meant to use the `within` associated function
+  |
+4 -     let _ = HostPath(vec![PathPart(String::from("ZFS"))]);
+4 +     let _ = HostPath::within(_, _);
+  |

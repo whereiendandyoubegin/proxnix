@@ -1,6 +1,8 @@
 mod sim;
 
-use proxnix_core::{Builtin, Check, Cutover, Desired, Failure, Images, MemoryMb, Slot, Stage, Tick, Vmid, WorkloadSpec};
+use proxnix_core::{
+    Blocker, Builtin, Check, Cutover, Desired, Failure, Images, LockKind, MemoryMb, Slot, Stage, Tick, Unsettled, Vmid, WorkloadSpec,
+};
 use sim::{
     COMMIT_B, Kind, NIX_A, NIX_B, World, built, images, kinds, last_stage, lxc, push, qemu, run, settled, spec,
 };
@@ -190,4 +192,92 @@ fn a_committed_guest_that_dies_before_the_route_moves_is_brought_back() {
     assert_eq!(next_tick.world.serving("forgejo").map(|(id, _)| id), Some(Vmid::new(944)));
     assert_eq!(next_tick.world.members("forgejo").len(), 1);
     settled(&next_tick.world, &one(&forgejo));
+}
+
+#[test]
+fn a_guest_proxmox_is_still_creating_blocks_only_its_own_slot() {
+    let forgejo = forgejo(Cutover::Overlap);
+    let website = website();
+    let desired = Desired::validate(vec![forgejo.clone(), website.clone()]);
+    let world = World::default()
+        .legacy(&website, Slot::Blue, NIX_A)
+        .half_made(Vmid::new(844), Unsettled::Locked(LockKind::Create));
+    let done = run::<Builtin>(world, &desired, &images(vec![built(&forgejo, NIX_B), built(&website, NIX_B)]), &push(COMMIT_B), None);
+    assert_eq!(done.world.serving("website").map(|(id, _)| id), Some(Vmid::new(923)));
+    settled(&done.world, &one(&website));
+    assert!(done.world.members("forgejo").is_empty());
+    assert_eq!(done.world.unsettled.get(&Vmid::new(844)), Some(&Unsettled::Locked(LockKind::Create)));
+    assert_eq!(
+        last_stage(&done, "forgejo"),
+        Stage::Blocked(Blocker::Unsettled(Vmid::new(844), Unsettled::Locked(LockKind::Create)))
+    );
+}
+
+#[test]
+fn a_half_written_guest_beside_a_serving_one_is_never_created_over_or_destroyed() {
+    let forgejo = forgejo(Cutover::Overlap);
+    let world = World::default().legacy(&forgejo, Slot::Blue, NIX_A).half_made(Vmid::new(944), Unsettled::Incomplete);
+    let pushed = run::<Builtin>(world, &one(&forgejo), &images(vec![built(&forgejo, NIX_B)]), &push(COMMIT_B), None);
+    assert!(!kinds(&pushed.effects).contains(&Kind::Create), "{:?}", kinds(&pushed.effects));
+    assert_eq!(last_stage(&pushed, "forgejo"), Stage::Blocked(Blocker::Unsettled(Vmid::new(944), Unsettled::Incomplete)));
+    assert!(pushed.effects.is_empty(), "{:?}", kinds(&pushed.effects));
+    let untouched: Vec<(Vmid, bool)> = pushed.world.members("forgejo").into_iter().map(|(id, guest)| (id, guest.running)).collect();
+    assert_eq!(untouched, vec![(Vmid::new(844), true)]);
+    assert_eq!(pushed.world.unsettled.get(&Vmid::new(944)), Some(&Unsettled::Incomplete));
+    let periodic = run::<Builtin>(pushed.world, &one(&forgejo), &Images::default(), &Tick::Periodic, None);
+    assert!(periodic.effects.is_empty(), "{:?}", kinds(&periodic.effects));
+    assert_eq!(last_stage(&periodic, "forgejo"), Stage::Blocked(Blocker::Unsettled(Vmid::new(944), Unsettled::Incomplete)));
+}
+
+#[test]
+fn an_unreadable_guest_is_never_torn_down_as_an_orphan() {
+    let world = World::default().half_made(Vmid::new(823), Unsettled::Unreadable);
+    let done = run::<Builtin>(world, &Desired::default(), &Images::default(), &push(COMMIT_B), None);
+    assert!(done.effects.is_empty(), "{:?}", kinds(&done.effects));
+    assert_eq!(done.world.unsettled.get(&Vmid::new(823)), Some(&Unsettled::Unreadable));
+}
+
+#[test]
+fn a_pair_with_an_unreadable_half_is_frozen_whole_so_nothing_is_created_or_rerouted() {
+    let forgejo = forgejo(Cutover::StopStart);
+    let world = World::default().legacy(&forgejo, Slot::Green, NIX_A);
+    let adopted = run::<Builtin>(world, &one(&forgejo), &Images::default(), &Tick::Periodic, None);
+    let blipped = World { guests: std::collections::BTreeMap::new(), ..adopted.world.clone() }
+        .half_made(Vmid::new(944), Unsettled::Unreadable);
+    let pushed = run::<Builtin>(blipped, &one(&forgejo), &images(vec![built(&forgejo, NIX_B)]), &push(COMMIT_B), None);
+    assert!(pushed.effects.is_empty(), "{:?}", kinds(&pushed.effects));
+    assert_eq!(last_stage(&pushed, "forgejo"), Stage::Blocked(Blocker::Unsettled(Vmid::new(944), Unsettled::Unreadable)));
+}
+
+fn forgejo_at(host: &str) -> WorkloadSpec {
+    let state = proxnix_core::Mount {
+        host: proxnix_core::HostPath::try_from(host).unwrap(),
+        guest: proxnix_core::GuestPath(String::from("/var/lib/forgejo")),
+        mode: proxnix_core::MountMode::ReadWrite,
+    };
+    WorkloadSpec {
+        kind: proxnix_core::KindSpec::Lxc { privilege: proxnix_core::Privilege::Unprivileged, mounts: vec![state] },
+        ..forgejo(Cutover::Overlap)
+    }
+}
+
+#[test]
+fn a_rebuild_waits_until_the_serving_guests_state_has_been_moved_to_where_the_spec_says() {
+    let old = forgejo_at("/var/lib/proxnix/forgejo");
+    let new = forgejo_at("/ZFS/proxnix/state/forgejo/forgejo");
+    let world = World::default().legacy(&old, Slot::Blue, NIX_A);
+    let early = run::<Builtin>(world.clone(), &one(&new), &images(vec![built(&new, NIX_B)]), &push(COMMIT_B), None);
+    assert!(early.effects.is_empty(), "{:?}", kinds(&early.effects));
+    assert_eq!(
+        last_stage(&early, "forgejo"),
+        Stage::Blocked(Blocker::StateMoved {
+            at: proxnix_core::GuestPath(String::from("/var/lib/forgejo")),
+            from: proxnix_core::HostPath::try_from("/var/lib/proxnix/forgejo").unwrap(),
+            to: proxnix_core::HostPath::try_from("/ZFS/proxnix/state/forgejo/forgejo").unwrap(),
+        })
+    );
+    let migrated = World::default().legacy(&new, Slot::Blue, NIX_A);
+    let rebuilt = run::<Builtin>(migrated, &one(&new), &images(vec![built(&new, NIX_B)]), &push(COMMIT_B), None);
+    assert!(kinds(&rebuilt.effects).contains(&Kind::Create));
+    settled(&rebuilt.world, &one(&new));
 }

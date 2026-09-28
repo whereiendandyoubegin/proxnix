@@ -13,7 +13,7 @@ use crate::ids::Slot;
 #[pure_only]
 use crate::memo::{Action, Failure, Progress};
 #[pure_only]
-use crate::observation::SlotState;
+use crate::observation::{Occupant, SlotState};
 #[pure_only]
 use crate::strategy::{Blocker, Context, Plan, SkipReason, Stage, refused};
 #[pure_only]
@@ -54,6 +54,7 @@ pub fn begin(ctx: &Context<'_>, push: &Push, artifact: &Artifact, beside: Option
             ),
             None => Plan::idle(Stage::Blocked(Blocker::SlotTaken(target))),
         },
+        (None, SlotState::Occupied(Occupant::Unsettled(id, why))) => Plan::idle(Stage::Blocked(Blocker::Unsettled(id, why))),
         (None, SlotState::Occupied(_)) => Plan::idle(Stage::Blocked(Blocker::SlotTaken(target))),
     }
 }

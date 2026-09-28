@@ -5,8 +5,8 @@ use proxnix_core::Vmid;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv4Addr;
-use std::time::Duration;
 use std::str::FromStr;
+use std::time::Duration;
 use std::{collections::HashMap, string::FromUtf8Error};
 
 use crate::context::ImageType;
@@ -119,7 +119,6 @@ pub enum CutoverChoice {
     StopStart,
 }
 
-
 // Defaults for VMConfig
 fn default_network_bridge() -> String {
     "vmbr0".to_string()
@@ -157,7 +156,9 @@ impl DiskBus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde_with::DeserializeFromStr, serde_with::SerializeDisplay)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde_with::DeserializeFromStr, serde_with::SerializeDisplay,
+)]
 pub struct DiskSlot {
     pub bus: DiskBus,
     pub index: u32,
@@ -189,6 +190,7 @@ fn default_backend_port() -> u16 {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerConfig {
     pub name: String,
     pub hostname: String,
@@ -211,7 +213,11 @@ pub struct ContainerConfig {
     #[serde(default)]
     pub privileged: bool,
     #[serde(default)]
-    pub bind_mounts: Vec<BindMount>,
+    pub state: Vec<String>,
+    #[serde(default)]
+    pub mounts: Vec<HostMount>,
+    #[serde(default)]
+    pub secrets: bool,
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
     pub impure: bool,
@@ -228,7 +234,6 @@ pub enum MountMode {
     ReadOnly,
 }
 
-
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct BindMount {
     pub host_path: String,
@@ -237,6 +242,18 @@ pub struct BindMount {
     pub mode: MountMode,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HostMount {
+    pub host: String,
+    pub at: String,
+    #[serde(default)]
+    pub mode: MountMode,
+}
+
+fn default_secrets_dir() -> String {
+    String::from("/var/lib/proxnix/sops")
+}
 
 fn default_container_network_bridge() -> String {
     "vmbr0".to_string()
@@ -254,6 +271,8 @@ pub struct AppConfig {
     pub zfs_images: Option<crate::zfs::ZfsImages>,
     pub timings_ms: Timings,
     pub unprivileged_idmap: IdRange,
+    #[serde(default = "default_secrets_dir")]
+    pub secrets_dir: String,
     pub guest_check: GuestCheck,
     pub proxmox: crate::pve::PveConfig,
 }
@@ -277,7 +296,9 @@ pub struct GuestCheck {
     pub command: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Timing {
     PeriodicReconcile,
@@ -321,7 +342,10 @@ impl TryFrom<BTreeMap<Timing, u64>> for Timings {
     type Error = String;
 
     fn try_from(millis: BTreeMap<Timing, u64>) -> std::result::Result<Self, String> {
-        match Timing::ALL.iter().find(|timing| !millis.contains_key(timing)) {
+        match Timing::ALL
+            .iter()
+            .find(|timing| !millis.contains_key(timing))
+        {
             Some(missing) => Err(format!("timings_ms has no value for {missing:?}")),
             None => Ok(Timings(millis)),
         }

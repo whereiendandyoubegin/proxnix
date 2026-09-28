@@ -2,7 +2,9 @@ const legacy_rules = '
 id: legacy-command
 language: rust
 rule:
-  pattern: Command::new($TOOL)
+  any:
+    - pattern: Command::new($TOOL)
+    - pattern: std::process::Command::new($TOOL)
 constraints:
   TOOL:
     regex: ^"(qm|pct|lxc-info)"$
@@ -74,6 +76,26 @@ rule:
       has:
         field: type
         regex: ^Vmid$
+
+---
+id: old-deploy-path
+language: rust
+rule:
+  any:
+    - kind: identifier
+      regex: ^(reconcile|ensure_running|run_pipeline|run_local|ensure_vms_running|build_image_types|inventory)$
+      inside:
+        stopBy: end
+        kind: call_expression
+    - kind: type_identifier
+      regex: ^(DeployContext|ReconcileContext|WorkloadGroup|Deployments|Dangerous|Deployed|DeployedOf)$
+---
+id: cli-guest-write
+language: rust
+rule:
+  any:
+    - pattern: Cli.run($$$)
+    - pattern: Cli.run_all($$$)
 '
 
 const test_rule = '
@@ -92,7 +114,9 @@ const current_rules = '
 id: exec
 language: rust
 rule:
-  pattern: Command::new($TOOL)
+  any:
+    - pattern: Command::new($TOOL)
+    - pattern: std::process::Command::new($TOOL)
 ---
 id: exec-statement
 language: rust
@@ -112,7 +136,19 @@ rule:
 id: api-read
 language: rust
 rule:
-  pattern: $PVE.call($REQ)
+  any:
+    - pattern: $PVE.call($REQ)
+    - pattern: $PVE.task($REQ)
+---
+id: api-binding
+language: rust
+rule:
+  pattern: let $B = $API.node().$K();
+---
+id: function
+language: rust
+rule:
+  kind: function_item
 ---
 id: op
 language: rust
@@ -187,6 +223,32 @@ rule:
     - pattern: Self::$V($$$)
 '
 
+const purity_rule = '
+id: unmarked
+language: rust
+rule:
+  any:
+    - kind: function_item
+    - kind: struct_item
+    - kind: enum_item
+    - kind: impl_item
+    - kind: trait_item
+    - kind: use_declaration
+    - kind: const_item
+    - kind: static_item
+    - kind: type_item
+  inside:
+    kind: source_file
+  not:
+    any:
+      - pattern: use proxnix_pure::pure_only;
+      - follows:
+          stopBy:
+            not:
+              kind: attribute_item
+          pattern: "#[pure_only]"
+'
+
 def default-root [] {
   "~/cloned/proxnix/nix-deployments-rs/nix-deployments-rs" | path expand
 }
@@ -216,6 +278,7 @@ export def "main legacy" [dir?: path, --include-tests] {
   let root = $dir | default (default-root) | path expand
   let tests = scan $test_rule $root
   scan $legacy_rules $root
+  | where {|m| not ($m.ruleId == "cli-guest-write" and ($m.file | str ends-with "proxnix/src/materialise.rs")) }
   | each {|m| {
       rule: $m.ruleId
       file: ($m.file | path relative-to $root)
@@ -307,11 +370,23 @@ export def "main current" [dir?: path, --include-tests] {
     kinds-of (meta $m TOOL) $m $impls $tools
     | each {|k| do $row $m "read" ([$k.tool] | append $words | str join " ") }
   } | flatten
+  let functions = $matches | where ruleId == "function"
+  let bindings = $matches | where ruleId == "api-binding"
   let api_reads = $matches | where ruleId == "api-read" | where $keep | each {|m|
-    let calls = meta $m REQ | parse --regex '\.(?<name>[a-z_]+)\(' | get name | where $it != "node"
-    let path = $calls | drop 1 | each {|c| if $c == "vmid" { "{vmid}" } else { $c | str replace --all "_" "-" } } | str join "/"
-    do $row $m "api" $"($calls | last | str uppercase) /nodes/{node}/($path)"
-  }
+    let request = meta $m REQ
+    let head = $request | parse --regex '^(?<b>[a-z_]+)\.' | get --optional 0.b
+    let enclosing = $functions | where {|f| within $m $f } | sort-by {|f| (span $f).end - (span $f).start } | get --optional 0
+    let bound = if $enclosing == null { null } else {
+      $bindings | where {|b| (within $b $enclosing) and (meta $b B) == $head } | get --optional 0
+    }
+    let prefix = if $bound == null { [] } else { [(meta $bound K)] }
+    let root = if ($request =~ 'AccessClient|\.access\(\)') { "/access" } else { "/nodes/{node}" }
+    let calls = $prefix | append ($request | parse --regex '\.(?<name>[a-z_]+)\(' | get name | where $it not-in [node clone as_ref access])
+    let path = $calls | drop 1 | each {|c| match $c { "vmid" => "{vmid}", "upid" => "{upid}", _ => ($c | str replace --all "_" "-") } } | str join "/"
+    let method = $calls | last | default "" | str uppercase
+    let via = if $method == "GET" { "api" } else { "api-write" }
+    if ($calls | length) < 2 { [] } else { [(do $row $m $via $"($method) ($root)/($path)")] }
+  } | flatten
   let ops = $matches | where ruleId == "op" | where $keep | each {|m|
     let op = meta $m OP
     let variants = expand-constructor $op $ctors $calls
@@ -325,21 +400,44 @@ export def "main current" [dir?: path, --include-tests] {
   $execs | append $reads | append $api_reads | append $ops | sort-by file line key
 }
 
+const legacy_samples = {
+  legacy-command: "fn list() { std::process::Command::new(\"qm\").arg(\"list\").output(); }"
+  legacy-cli-fn-call: "fn start() { qm_start(823); }"
+  legacy-cli-fn-def: "fn pct_stop() {}"
+  legacy-wrapper-call: "fn retire<T: Deployments>() { T::stop(&823); }"
+  legacy-module: "mod qm;"
+  legacy-type: "struct Loaded { vms: DeployedVM }"
+  untyped-guest-id: "fn destroy(vm_id: u32) {}"
+  old-deploy-path: "fn tick() { let ctx: ReconcileContext = todo!(); ensure_running(&ctx); }"
+  cli-guest-write: "fn stop() { Cli.run(&GuestOp::<Lxc>::stop(id)); }"
+}
+
+def sample-hits [] {
+  let dir = mktemp --directory
+  let hits = $legacy_samples
+    | transpose rule code
+    | each {|sample|
+        let file = $dir | path join $"($sample.rule).rs"
+        $sample.code | save -f $file
+        {
+          rule: $sample.rule
+          sample_hits: (scan $legacy_rules $file | where ruleId == $sample.rule | length)
+        }
+      }
+  rm --recursive $dir
+  $hits
+}
+
 export def "main prove" [] {
-  let repo = ^git -C (default-root) rev-parse --show-toplevel | str trim
-  let snapshot = mktemp --directory
-  ^git -C $repo archive HEAD nix-deployments-rs/proxnix/src nix-deployments-rs/proxnix-core/src
-  | ^tar -x -C $snapshot
-  let before = main legacy ($snapshot | path join nix-deployments-rs)
-  rm --recursive $snapshot
   let after = main legacy
   let skipped = main legacy --include-tests | where in_tests
+  let samples = sample-hits
 
   let ids = $legacy_rules | parse --regex '(?m)^id: (?<id>\S+)$' | get id
   let summary = $ids | each {|id| {
     rule: $id
-    head: ($before | where rule == $id | length)
-    working_tree: ($after | where rule == $id | length)
+    sample_hits: ($samples | where rule == $id | get --optional 0.sample_hits | default 0)
+    this_branch: ($after | where rule == $id | length)
   } }
   print ($summary | table)
 
@@ -349,15 +447,64 @@ export def "main prove" [] {
     sites: ($g.sites | each {|s| $"($s.file | path basename):($s.line)" } | uniq | str join " ")
   } } | sort-by key | table)
 
-  let vacuous = $summary | where head == 0
+  let vacuous = $summary | where sample_hits == 0
   if ($vacuous | is-not-empty) {
-    error make { msg: $"rules that match nothing at HEAD prove nothing: ($vacuous | get rule | str join ', ')" }
+    error make { msg: $"rules that do not match their own legacy sample prove nothing: ($vacuous | get rule | str join ', ')" }
   }
   if ($after | is-not-empty) {
     print ($after | table)
     error make { msg: $"($after | length) legacy call sites remain" }
   }
-  print $"no legacy call sites remain outside tests \(HEAD had ($before | length); ($skipped | length) test-only matches skipped, see `main legacy --include-tests`\)"
+  print $"every legacy rule matches its sample and nothing on this branch outside tests \(($skipped | length) test-only matches skipped, see `main legacy --include-tests`\)"
+}
+
+const transport_rules = '
+id: cli-write
+language: rust
+rule:
+  any:
+    - pattern: Cli.run($$$)
+    - pattern: Cli.run_all($$$)
+---
+id: api-write
+language: rust
+rule:
+  any:
+    - pattern: $API.apply($OP)
+    - pattern: $API.apply_all($OPS)
+    - pattern: settle_all($API, $OPS)
+---
+id: process
+language: rust
+rule:
+  any:
+    - pattern: Command::new($TOOL)
+    - pattern: std::process::Command::new($TOOL)
+'
+
+export def "main transport" [dir?: path] {
+  let root = $dir | default (default-root) | path expand
+  let keep = outside-tests $root
+  scan $transport_rules ($root | path join proxnix/src)
+  | where {|m| do $keep $m }
+  | each {|m| {
+      transport: $m.ruleId
+      site: $"($m.file | path basename):($m.range.start.line + 1)"
+      tool: ($m | get --optional metaVariables.single.TOOL.text)
+      text: ($m.lines | str trim | str substring 0..<90)
+    } }
+  | sort-by transport site
+}
+
+export def "main purity" [dir?: path] {
+  let root = $dir | default (default-root | path join proxnix-core src) | path expand
+  let unmarked = scan $purity_rule $root
+    | each {|m| { file: ($m.file | path relative-to $root), line: ($m.range.start.line + 1), item: ($m.lines | lines | first | str trim) } }
+  if ($unmarked | is-not-empty) {
+    print ($unmarked | table)
+    error make { msg: $"($unmarked | length) proxnix-core items are not marked #[pure_only]" }
+  }
+  print "every proxnix-core item is marked #[pure_only]"
 }
 
 export def main [dir?: path] {

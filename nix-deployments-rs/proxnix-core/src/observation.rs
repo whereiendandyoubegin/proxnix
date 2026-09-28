@@ -48,8 +48,35 @@ impl TryFrom<Permissions> for Audited {
 }
 
 #[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockKind {
+    Backup,
+    Clone,
+    Create,
+    Destroyed,
+    Disk,
+    Fstrim,
+    Migrate,
+    Mounted,
+    Rollback,
+    Snapshot,
+    SnapshotDelete,
+    Suspended,
+    Suspending,
+    Other,
+}
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsettled {
+    Locked(LockKind),
+    Incomplete,
+    Unreadable,
+}
+
+#[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sighting {
+pub struct Settled {
     pub id: Vmid,
     pub name: GuestName,
     pub status: GuestStatus,
@@ -60,8 +87,26 @@ pub struct Sighting {
 
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sighting {
+    Settled(Settled),
+    Unsettled(Vmid, Unsettled),
+}
+
+#[pure_only]
+impl Sighting {
+    #[must_use]
+    pub fn id(&self) -> Vmid {
+        match self {
+            Sighting::Settled(settled) => settled.id,
+            Sighting::Unsettled(id, _) => *id,
+        }
+    }
+}
+
+#[pure_only]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Guest {
-    sighting: Sighting,
+    sighting: Settled,
     ownership: Ownership,
 }
 
@@ -102,18 +147,18 @@ impl Guest {
         &self.ownership
     }
 
-    pub(crate) fn projected(sighting: Sighting, ownership: Ownership) -> Guest {
+    pub(crate) fn projected(sighting: Settled, ownership: Ownership) -> Guest {
         Guest { sighting, ownership }
     }
 
     pub(crate) fn revised(&self, status: GuestStatus, resources: Resources, ownership: Ownership) -> Guest {
-        Guest { sighting: Sighting { status, resources, ..self.sighting.clone() }, ownership }
+        Guest { sighting: Settled { status, resources, ..self.sighting.clone() }, ownership }
     }
 }
 
 #[pure_only]
-impl From<Sighting> for Guest {
-    fn from(sighting: Sighting) -> Guest {
+impl From<Settled> for Guest {
+    fn from(sighting: Settled) -> Guest {
         Guest {
             ownership: Ownership::from(&sighting.tags),
             sighting,
@@ -166,6 +211,7 @@ pub enum Occupant {
     Managed(Managed),
     Unmanaged(Vmid),
     Malformed(Vmid, TagFault),
+    Unsettled(Vmid, Unsettled),
 }
 
 #[pure_only]
@@ -186,6 +232,7 @@ pub enum Anomaly {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     guests: BTreeMap<Vmid, Guest>,
+    unsettled: BTreeMap<Vmid, Unsettled>,
     anomalies: Vec<Anomaly>,
 }
 
@@ -202,28 +249,47 @@ fn occupant(guest: &Guest) -> Occupant {
 impl Observation {
     #[must_use]
     pub fn new(_audited: Audited, sightings: Vec<Sighting>) -> Observation {
-        let guests: Vec<Guest> = sightings.into_iter().map(Guest::from).collect();
-        let duplicates = guests
+        let duplicates: Vec<Anomaly> = sightings
             .iter()
             .enumerate()
-            .filter(|(index, guest)| guests[..*index].iter().any(|earlier| earlier.id() == guest.id()))
-            .map(|(_, guest)| Anomaly::DuplicateVmid(guest.id()));
+            .filter(|(index, seen)| sightings[..*index].iter().any(|earlier| earlier.id() == seen.id()))
+            .map(|(_, seen)| Anomaly::DuplicateVmid(seen.id()))
+            .collect();
+        let (settled, unsettled): (Vec<Sighting>, Vec<Sighting>) =
+            sightings.into_iter().partition(|seen| matches!(seen, Sighting::Settled(_)));
+        let guests: Vec<Guest> = settled
+            .into_iter()
+            .filter_map(|seen| match seen {
+                Sighting::Settled(settled) => Some(Guest::from(settled)),
+                Sighting::Unsettled(..) => None,
+            })
+            .collect();
+        let unsettled: BTreeMap<Vmid, Unsettled> = unsettled
+            .into_iter()
+            .filter_map(|seen| match seen {
+                Sighting::Settled(_) => None,
+                Sighting::Unsettled(id, why) => Some((id, why)),
+            })
+            .collect();
         let malformed = guests.iter().filter_map(|guest| match guest.ownership() {
             Ownership::Malformed(fault) => Some(Anomaly::Malformed(guest.id(), *fault)),
             _ => None,
         });
-        let anomalies = duplicates.chain(malformed).collect();
+        let anomalies = duplicates.into_iter().chain(malformed).collect();
         Observation {
             guests: guests.into_iter().map(|guest| (guest.id(), guest)).collect(),
+            unsettled,
             anomalies,
         }
     }
 
     #[must_use]
     pub fn slot(&self, id: Vmid) -> SlotState {
-        self.guests
-            .get(&id)
-            .map_or(SlotState::Vacant(Vacant { id }), |guest| SlotState::Occupied(occupant(guest)))
+        match (self.guests.get(&id), self.unsettled.get(&id)) {
+            (Some(guest), _) => SlotState::Occupied(occupant(guest)),
+            (None, Some(why)) => SlotState::Occupied(Occupant::Unsettled(id, *why)),
+            (None, None) => SlotState::Vacant(Vacant { id }),
+        }
     }
 
     #[must_use]
@@ -260,6 +326,7 @@ impl Observation {
                 .map(|(existing, kept)| (*existing, kept.clone()))
                 .chain(guest.map(|guest| (id, guest)))
                 .collect(),
+            unsettled: self.unsettled.iter().filter(|(held, _)| **held != id).map(|(held, why)| (*held, *why)).collect(),
             anomalies: self.anomalies.clone(),
         }
     }
@@ -276,14 +343,14 @@ mod tests {
     }
 
     fn sighting(id: u32, name: &str, tags: &str) -> Sighting {
-        Sighting {
+        Sighting::Settled(Settled {
             id: Vmid::new(id),
             name: GuestName(String::from(name)),
             status: GuestStatus::Running,
             tags: RawTags::from(String::from(tags)),
             resources: Resources { memory: MemoryMb(1024), disk: DiskGib(8), cores: Cores(2) },
             facts: KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] },
-        }
+        })
     }
 
     const FORGEJO: &str = "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.214;nix-78s0iadvjz6s48aqvx4rw78lwrzkjzlw;proxnix;slot-blue";
@@ -356,5 +423,34 @@ mod tests {
             .map(Managed::id)
             .collect();
         assert_eq!(ids, vec![Vmid::new(844), Vmid::new(944)]);
+    }
+
+    #[test]
+    fn an_unsettled_guest_occupies_its_slot_and_is_never_managed() {
+        let observed = Observation::new(
+            audited(),
+            vec![
+                sighting(844, "forgejo", FORGEJO),
+                Sighting::Unsettled(Vmid::new(944), Unsettled::Locked(LockKind::Create)),
+                Sighting::Unsettled(Vmid::new(947), Unsettled::Incomplete),
+            ],
+        );
+        assert_eq!(
+            observed.slot(Vmid::new(944)),
+            SlotState::Occupied(Occupant::Unsettled(Vmid::new(944), Unsettled::Locked(LockKind::Create)))
+        );
+        assert_eq!(observed.slot(Vmid::new(947)), SlotState::Occupied(Occupant::Unsettled(Vmid::new(947), Unsettled::Incomplete)));
+        assert_eq!(observed.managed().iter().map(Managed::id).collect::<Vec<_>>(), vec![Vmid::new(844)]);
+        assert!(observed.anomalies().is_empty());
+    }
+
+    #[test]
+    fn a_vmid_seen_settled_and_unsettled_is_reported_and_stays_occupied() {
+        let observed = Observation::new(
+            audited(),
+            vec![sighting(844, "forgejo", FORGEJO), Sighting::Unsettled(Vmid::new(844), Unsettled::Unreadable)],
+        );
+        assert_eq!(observed.anomalies(), &[Anomaly::DuplicateVmid(Vmid::new(844))]);
+        assert!(matches!(observed.slot(Vmid::new(844)), SlotState::Occupied(_)));
     }
 }

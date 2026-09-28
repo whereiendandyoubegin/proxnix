@@ -15,9 +15,15 @@ use std::num::NonZeroU64;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
+pub struct Placed {
+    pub config: ContainerConfig,
+    pub storage: std::result::Result<proxnix_core::Storage, proxnix_core::StorageFault>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Declared {
     Vm(VMConfig),
-    Container(ContainerConfig),
+    Container(Box<Placed>),
 }
 
 pub struct Routed {
@@ -511,7 +517,7 @@ mod tests {
         fn create(&self, declared: &Declared, _: &StorePath, tags: &Tags, target: SlotId) -> Result<()> {
             let name = match declared {
                 Declared::Vm(config) => config.name.clone(),
-                Declared::Container(config) => config.name.clone(),
+                Declared::Container(placed) => placed.config.name.clone(),
             };
             self.calls.borrow_mut().push((GuestName(name), target, tags.render()));
             if self.fail { Err(AppError::CmdError(String::from("pct create exited 255"))) } else { Ok(()) }
@@ -539,13 +545,15 @@ mod tests {
     }
 
     fn members() -> (Member, Member) {
-        let sighting = |id: u32, tags: String| Sighting {
+        let sighting = |id: u32, tags: String| {
+            Sighting::Settled(proxnix_core::Settled {
             id: Vmid::new(id),
             name: GuestName(String::from("forgejo")),
             status: GuestStatus::Running,
             tags: RawTags::from(tags),
             resources: Resources { memory: MemoryMb(2048), disk: DiskGib(20), cores: Cores(2) },
             facts: KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] },
+            })
         };
         let observed = Observation::new(
             Audited::try_from(Permissions { vm_audit: Grant::Granted }).unwrap(),
@@ -767,7 +775,10 @@ mod tests {
             "storage_location": "ZFS", "disk_gb": 20, "protected": false, "impure": false
         }))
         .unwrap();
-        let declared = BTreeMap::from([(GuestName(String::from("forgejo")), Declared::Container(config))]);
+        let declared = BTreeMap::from([(
+            GuestName(String::from("forgejo")),
+            Declared::Container(Box::new(Placed { config, storage: Err(proxnix_core::StorageFault::NoLayout) })),
+        )]);
         let fake = Proxmox::replying([(Method::Get, "/nodes/pve01/lxc", Ok(listed))].into_iter().chain(then).collect());
         let provision = Provisioner { fail: true, ..Provisioner::default() };
         (run(vec![create], &Sozu::default(), &fake, provision, &declared), fake)

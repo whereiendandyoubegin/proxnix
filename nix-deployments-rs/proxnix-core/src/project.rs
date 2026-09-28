@@ -11,7 +11,7 @@ use crate::ids::Vmid;
 #[pure_only]
 use crate::memo::Memo;
 #[pure_only]
-use crate::observation::{Guest, Observation, Sighting};
+use crate::observation::{Guest, Observation, Settled};
 #[pure_only]
 use crate::spec::{GuestName, KindSpec};
 #[pure_only]
@@ -93,7 +93,7 @@ fn assume_guest(observed: &Observation, effect: &GuestEffect) -> Observation {
         GuestEffect::Create { target, spec, fresh, .. } => observed.replaced(
             target.id(),
             Some(Guest::projected(
-                Sighting {
+                Settled {
                     id: target.id(),
                     name: spec.name.clone(),
                     status: GuestStatus::Stopped,

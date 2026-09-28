@@ -1,5 +1,7 @@
 #[pure_only]
-use crate::guest::{Cores, DiskGib, DurationMs, GuestKind, MemoryMb, Mount, Port, Privilege, Resources, Sockets};
+use crate::guest::{
+    Cores, DiskGib, DurationMs, GuestKind, MemoryMb, Mount, Port, Privilege, Resources, Sockets,
+};
 #[pure_only]
 use crate::ids::SlotPair;
 use proxnix_pure::pure_only;
@@ -57,8 +59,13 @@ pub struct Timeouts {
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KindSpec {
-    Qemu { sockets: Sockets },
-    Lxc { privilege: Privilege, mounts: Vec<Mount> },
+    Qemu {
+        sockets: Sockets,
+    },
+    Lxc {
+        privilege: Privilege,
+        mounts: Vec<Mount>,
+    },
 }
 
 #[pure_only]
