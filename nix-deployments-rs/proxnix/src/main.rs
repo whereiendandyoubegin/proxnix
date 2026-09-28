@@ -18,6 +18,7 @@ struct AppState {
 mod api;
 mod child;
 mod context;
+mod hydra;
 mod engine;
 mod git;
 mod host;

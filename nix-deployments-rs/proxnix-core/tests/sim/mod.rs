@@ -45,6 +45,7 @@ pub struct SimRoute {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Faults {
     pub fail: BTreeSet<usize>,
+    pub flaky: BTreeSet<usize>,
     pub unhealthy: BTreeSet<Vmid>,
     pub silent: BTreeSet<Vmid>,
     pub die_after: Option<usize>,
@@ -351,6 +352,9 @@ impl World {
         let counted = World { applied: index + 1, ..self };
         if counted.faults.fail.contains(&index) {
             return (counted, Outcome::Failed(EffectError::Refused(Detail(String::from("injected")))));
+        }
+        if counted.faults.flaky.contains(&index) {
+            return (counted, Outcome::Failed(EffectError::Unreachable(Detail(String::from("command socket reset")))));
         }
         let (world, outcome) = match effect {
             Effect::Guest(guest) => counted.apply_guest(guest),

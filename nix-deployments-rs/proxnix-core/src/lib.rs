@@ -15,6 +15,7 @@ mod pair;
 mod project;
 mod spec;
 mod step;
+mod store;
 mod strategy;
 mod tags;
 mod task;
@@ -61,6 +62,11 @@ pub use project::{Projection, Scope, assume, placeholder_address, project};
 pub use spec::{BridgeName, Cutover, GuestName, Hostname, ImageType, KindSpec, ProxySpec, Purity, Timeouts, WorkloadSpec};
 #[pure_only]
 pub use step::{Builtin, Input, Planned, Report, Step, WorkloadReport, step};
+#[pure_only]
+pub use store::{
+    BuildState, HydraBuild, Key, Ledger, Policy, Retain, RootHolder, Source, StoreEffect, StoreEvent, SyncFault, SyncInput, SyncStep, Toplevel,
+    roots, sync_step,
+};
 #[pure_only]
 pub use strategy::{Blocker, Context, Intent, Plan, Registry, SkipReason, Stage, Strategy, drive, refused};
 #[pure_only]

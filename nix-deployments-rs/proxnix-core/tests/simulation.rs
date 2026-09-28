@@ -281,3 +281,29 @@ fn a_rebuild_waits_until_the_serving_guests_state_has_been_moved_to_where_the_sp
     assert!(kinds(&rebuilt.effects).contains(&Kind::Create));
     settled(&rebuilt.world, &one(&new));
 }
+
+#[test]
+fn a_transient_api_failure_is_retried_instead_of_ending_the_deploy() {
+    let forgejo = forgejo(Cutover::StopStart);
+    let world = World::default().legacy(&forgejo, Slot::Blue, NIX_A);
+    let clean = run::<Builtin>(world.clone(), &one(&forgejo), &images(vec![built(&forgejo, NIX_B)]), &push(COMMIT_B), None);
+    let stop = clean.effects.iter().position(|effect| sim::kind(effect) == Kind::Stop).unwrap();
+    let blip = World { faults: sim::Faults { flaky: [stop].into(), ..sim::Faults::default() }, ..world };
+    let done = run::<Builtin>(blip, &one(&forgejo), &images(vec![built(&forgejo, NIX_B)]), &push(COMMIT_B), None);
+    assert_eq!(done.effects.iter().filter(|effect| sim::kind(effect) == Kind::Stop).count(), 2);
+    assert_eq!(done.world.serving("forgejo").map(|(id, _)| id), Some(Vmid::new(944)));
+    settled(&done.world, &one(&forgejo));
+}
+
+#[test]
+fn an_api_that_stays_unreachable_is_given_up_on_after_three_attempts() {
+    let forgejo = forgejo(Cutover::StopStart);
+    let world = World::default().legacy(&forgejo, Slot::Blue, NIX_A);
+    let clean = run::<Builtin>(world.clone(), &one(&forgejo), &images(vec![built(&forgejo, NIX_B)]), &push(COMMIT_B), None);
+    let stop = clean.effects.iter().position(|effect| sim::kind(effect) == Kind::Stop).unwrap();
+    let down = World { faults: sim::Faults { flaky: (stop..stop + 3).collect(), ..sim::Faults::default() }, ..world };
+    let done = run::<Builtin>(down, &one(&forgejo), &images(vec![built(&forgejo, NIX_B)]), &push(COMMIT_B), None);
+    assert_eq!(done.effects.iter().filter(|effect| sim::kind(effect) == Kind::Stop).count(), 3);
+    assert!(!done.effects.iter().any(|effect| matches!(effect, proxnix_core::Effect::Guest(proxnix_core::GuestEffect::Start(member)) if member.id() == Vmid::new(944))));
+    assert!(done.world.guests.get(&Vmid::new(844)).is_some_and(|guest| guest.running));
+}

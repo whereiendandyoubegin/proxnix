@@ -97,6 +97,7 @@ pub struct Memo {
     routed: BTreeSet<RouteKey>,
     route_failures: BTreeMap<RouteKey, EffectError>,
     failures: BTreeMap<(Vmid, Action), EffectError>,
+    transient: BTreeMap<(Vmid, Action), Attempt>,
     given_up: BTreeMap<(GuestName, NixHash), Failure>,
     cleared: BTreeSet<GuestName>,
     updated: BTreeSet<Instance>,
@@ -135,6 +136,9 @@ fn verdict(check: Check, outcome: &Outcome) -> Option<Trial> {
         _ => None,
     }
 }
+
+#[pure_only]
+const TRANSIENT_ATTEMPTS: Attempt = Attempt(3);
 
 #[pure_only]
 fn failure_of(outcome: Outcome) -> Option<EffectError> {
@@ -181,6 +185,15 @@ impl Memo {
             },
             (GuestEffect::Update { guest, .. }, Outcome::Done | Outcome::AlreadyApplied) => {
                 Memo { updated: add(self.updated, guest.instance()), ..self }
+            }
+            (_, Outcome::Failed(error @ EffectError::Unreachable(_))) => {
+                let key = (effect.id(), Action::of(effect));
+                let attempts = self.transient.get(&key).copied().unwrap_or(Attempt(0)).next();
+                if attempts < TRANSIENT_ATTEMPTS {
+                    Memo { transient: put(self.transient, key, attempts), ..self }
+                } else {
+                    Memo { failures: put(self.failures, key, error), ..self }
+                }
             }
             (_, Outcome::Failed(error)) => Memo { failures: put(self.failures, (effect.id(), Action::of(effect)), error), ..self },
             _ => self,
