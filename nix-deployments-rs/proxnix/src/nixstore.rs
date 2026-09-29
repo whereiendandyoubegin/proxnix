@@ -72,7 +72,7 @@ impl NixStore {
     }
 
     fn seed_args(&self, toplevel: &Toplevel) -> Vec<String> {
-        vec![String::from("copy"), String::from("--to"), self.uri(), store_text(toplevel.path())]
+        vec![String::from("copy"), String::from("--no-check-sigs"), String::from("--to"), self.uri(), store_text(toplevel.path())]
     }
 
     pub(crate) fn seed(&self, toplevel: &Toplevel) -> Result<()> {
@@ -254,7 +254,7 @@ mod tests {
     fn seeding_copies_a_closure_out_of_the_host_store_into_this_one() {
         assert_eq!(
             store(PathBuf::from("/ZFS/proxnix/state/hydra/nix"), None).seed_args(&toplevel(TOPLEVEL)).join(" "),
-            format!("copy --to local?root=/ZFS/proxnix/state/hydra/nix {TOPLEVEL}")
+            format!("copy --no-check-sigs --to local?root=/ZFS/proxnix/state/hydra/nix {TOPLEVEL}")
         );
     }
 

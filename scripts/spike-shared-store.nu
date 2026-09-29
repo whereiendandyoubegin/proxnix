@@ -81,7 +81,7 @@ def main [] {
   let result = try {
     print "==> seeding the scratch store from the host store"
     mkdir $"($SPIKE)/store"
-    timeit { ^nix copy --to $"local?root=($SPIKE)/store" $toplevel } | print
+    timeit { ^nix copy --no-check-sigs --to $"local?root=($SPIKE)/store" $toplevel } | print
 
     print "==> a stub rootfs"
     ^pvesm alloc ZFS $ID $"subvol-($ID)-disk-0" 2G
