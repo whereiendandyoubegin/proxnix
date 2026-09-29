@@ -84,7 +84,7 @@ def main [] {
     timeit { ^nix copy --no-check-sigs --to $"local?root=($SPIKE)/store" $toplevel } | print
 
     print "==> a stub rootfs"
-    ^pvesm alloc ZFS $ID $"subvol-($ID)-disk-0" 2G
+    ^pvesm alloc ZFS $ID $"subvol-($ID)-disk-0" 2G --format subvol
     stub $"/ZFS/subvol-($ID)-disk-0" $toplevel
     mkdir $"($SPIKE)/logs"
     ^chown $"($IDMAP):($IDMAP)" $"($SPIKE)/logs"

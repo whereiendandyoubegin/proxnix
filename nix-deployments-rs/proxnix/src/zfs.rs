@@ -284,6 +284,8 @@ impl RootfsVolume {
             self.owner.get().to_string(),
             self.volume.to_string(),
             self.size.to_string(),
+            String::from("--format"),
+            String::from("subvol"),
         ]
     }
 
@@ -593,7 +595,7 @@ mod tests {
     #[test]
     fn an_empty_rootfs_is_allocated_through_proxmox_under_the_slot_it_belongs_to() {
         let volume = RootfsVolume::for_slot(StorageId::try_from(String::from("ZFS")).unwrap(), SlotId::Blue(proxnix_core::Vmid::new(830)), DiskSize::gib(10));
-        assert_eq!(volume.alloc_args().join(" "), "alloc ZFS 830 subvol-830-disk-0 10G");
+        assert_eq!(volume.alloc_args().join(" "), "alloc ZFS 830 subvol-830-disk-0 10G --format subvol");
         assert_eq!(volume.volume_id(), "ZFS:subvol-830-disk-0");
         assert_eq!(volume.to_string(), "ZFS:subvol-830-disk-0,size=10G");
     }
