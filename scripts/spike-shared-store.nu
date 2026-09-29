@@ -51,11 +51,16 @@ def checks [toplevel: string]: nothing -> table {
   [
     {check: "system state", result: (booted)}
     {check: "failed units", result: (inside $"($BIN)/systemctl" --failed --no-legend --plain | get stdout | str trim)}
-    {check: "sshd active", result: (inside $"($BIN)/systemctl" is-active sshd | get stdout | str trim)}
+    {check: "sshd socket active", result: (inside $"($BIN)/systemctl" is-active sshd.socket | get stdout | str trim)}
     {check: "store owner uid (65534 = nobody)", result: ($owner.stdout | str trim)}
     {check: "sudo as dan via setuid wrapper", result: (if $sudo.exit_code == 0 { "works" } else { $"exit ($sudo.exit_code): ($sudo.stderr | str trim)" })}
     {check: "journal on the logs mount", result: (if ($journal.stdout | str trim | is-empty) { "empty" } else { $journal.stdout | str trim })}
     {check: "sops secrets decrypted", result: (if $secrets.exit_code == 0 { $secrets.stdout | lines | length | $"($in) entries" } else { $secrets.stderr | str trim })}
+    {check: "wrapper directory", result: (inside $"($BIN)/ls" -la /run/wrappers | get stdout | str trim)}
+    {check: "wrapper unit", result: (inside $"($BIN)/systemctl" status suid-sgid-wrappers.service --no-pager -n 0 | get stdout | str trim)}
+    {check: "store mount unit", result: (inside $"($BIN)/systemctl" status nix-store.mount --no-pager -n 0 | get stdout | str trim)}
+    {check: "wrapper and store journal", result: (inside $"($BIN)/journalctl" -b -u suid-sgid-wrappers.service -u nix-store.mount --no-pager -n 30 | get stdout | str trim)}
+    {check: "how /nix/store is mounted", result: (inside $"($BIN)/findmnt" /nix/store -o TARGET,SOURCE,FSTYPE,OPTIONS | get stdout | str trim)}
   ]
 }
 
