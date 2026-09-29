@@ -25,6 +25,7 @@ use tracing::{info, warn};
 pub enum BuildTarget {
     Qcow2,
     Tarball,
+    Toplevel,
 }
 
 impl BuildTarget {
@@ -32,6 +33,7 @@ impl BuildTarget {
         match self {
             BuildTarget::Qcow2 => "config.system.build.qcow2",
             BuildTarget::Tarball => "config.system.build.tarball",
+            BuildTarget::Toplevel => "config.system.build.toplevel",
         }
     }
 }
@@ -61,6 +63,14 @@ fn privilege(privileged: bool) -> Privilege {
     if privileged { Privilege::Privileged } else { Privilege::Unprivileged }
 }
 
+fn store_mode(choice: crate::types::StoreChoice) -> proxnix_core::StoreMode {
+    match choice {
+        crate::types::StoreChoice::Image => proxnix_core::StoreMode::Image,
+        crate::types::StoreChoice::Shared => proxnix_core::StoreMode::Shared,
+        crate::types::StoreChoice::Private => proxnix_core::StoreMode::Private,
+    }
+}
+
 fn storage_spec(config: &ContainerConfig) -> std::result::Result<StorageSpec, StorageFault> {
     Ok(StorageSpec {
         state: config.state.iter().map(|at| GuestPath(at.clone())).collect(),
@@ -76,6 +86,7 @@ fn storage_spec(config: &ContainerConfig) -> std::result::Result<StorageSpec, St
             .collect::<std::result::Result<_, _>>()?,
         secrets: config.secrets,
         privilege: privilege(config.privileged),
+        store: store_mode(config.store),
     })
 }
 
@@ -111,7 +122,10 @@ impl Declared {
     pub fn target(&self) -> BuildTarget {
         match self {
             Declared::Vm(_) => BuildTarget::Qcow2,
-            Declared::Container(_) => BuildTarget::Tarball,
+            Declared::Container(placed) => match placed.config.store {
+                crate::types::StoreChoice::Image => BuildTarget::Tarball,
+                crate::types::StoreChoice::Shared | crate::types::StoreChoice::Private => BuildTarget::Toplevel,
+            },
         }
     }
 
@@ -156,6 +170,7 @@ fn vm_spec(config: &VMConfig) -> std::result::Result<WorkloadSpec, ConfigFault> 
 fn container_spec(placed: &Placed) -> std::result::Result<WorkloadSpec, ConfigFault> {
     let config = &placed.config;
     let storage = placed.storage.as_ref().map_err(|fault| ConfigFault::Storage(fault.clone()))?;
+    proxnix_core::store_cutover(store_mode(config.store), cutover(config.protected, config.cutover)).map_err(ConfigFault::Storage)?;
     Ok(WorkloadSpec {
         name: GuestName(config.name.clone()),
         slots: slots(config.blue_id, config.green_id)?,
@@ -548,6 +563,7 @@ fn run(
     tick: &Tick,
 ) -> Result<Vec<(GuestName, Result<Report>)>> {
     let api = pve.api(settings.timings_ms.get(Timing::TaskPoll), settings.timings_ms.get(Timing::TaskTimeout));
+    let store = layout(settings).map(|layout| layout.store());
     let host = Host {
         api: &api,
         settings,
@@ -555,6 +571,8 @@ fn run(
             template_cache_path: crate::context::TemplateCachePath::try_from(settings.template_cache_path.as_str())?,
             zfs: settings.zfs_images.as_ref(),
             idmap: settings.unprivileged_idmap,
+            store: store.as_ref(),
+            seed_timeout: settings.timings_ms.get(Timing::NixBuild),
         },
         declared,
     };
@@ -796,6 +814,21 @@ mod tests {
                 Mount { host: host("/var/lib/proxnix/sops"), guest: at("/var/lib/sops-key"), mode: MountMode::ReadOnly },
             ]
         );
+    }
+
+    #[test]
+    fn a_store_container_builds_its_toplevel_and_a_private_one_must_stop_start() {
+        let layout = nixology_layout();
+        let shared = placed(parsed(r#", "store": "shared""#).unwrap(), Some(&layout));
+        assert_eq!(Declared::Container(Box::new(shared.clone())).target(), BuildTarget::Toplevel);
+        assert!(container_spec(&shared).is_ok());
+        assert_eq!(
+            container_spec(&placed(parsed(r#", "store": "private""#).unwrap(), Some(&layout))).unwrap_err(),
+            ConfigFault::Storage(StorageFault::PrivateStoreNeedsStopStart)
+        );
+        assert!(container_spec(&placed(parsed(r#", "store": "private", "cutover": "stop_start""#).unwrap(), Some(&layout))).is_ok());
+        assert_eq!(Declared::Container(Box::new(placed(parsed("").unwrap(), Some(&layout)))).target(), BuildTarget::Tarball);
+        assert!(parsed(r#", "store": "sharded""#).is_err());
     }
 
     #[test]

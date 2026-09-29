@@ -44,7 +44,9 @@ pub use guest::{
     MountMode, PathFault, PathPart, Port, Privilege, Resources, Sockets,
 };
 #[pure_only]
-pub use layout::{BadSegment, Dataset, HostEffect, Layout, Owner, Segment, StateLabel, Storage, StorageFault, StorageSpec};
+pub use layout::{
+    BadSegment, Dataset, HostEffect, Layout, Owner, Segment, StateLabel, Storage, StorageFault, StorageSpec, StoreMode, store_cutover,
+};
 #[pure_only]
 pub use ids::{SameIdInBothSlots, Slot, SlotId, SlotPair, UnknownSlot, Vmid};
 #[pure_only]

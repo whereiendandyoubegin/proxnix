@@ -307,3 +307,24 @@ fn an_api_that_stays_unreachable_is_given_up_on_after_three_attempts() {
     assert!(!done.effects.iter().any(|effect| matches!(effect, proxnix_core::Effect::Guest(proxnix_core::GuestEffect::Start(member)) if member.id() == Vmid::new(944))));
     assert!(done.world.guests.get(&Vmid::new(844)).is_some_and(|guest| guest.running));
 }
+
+#[test]
+fn a_periodic_tick_leaves_a_lone_uncommitted_guest_running() {
+    let nixflix = spec("nixflix", 847, 947, lxc(), Cutover::StopStart, false);
+    let world = World::default().legacy(&nixflix, Slot::Green, NIX_B);
+    let pending = World {
+        guests: world
+            .guests
+            .into_iter()
+            .map(|(id, guest)| (id, sim::SimGuest { tags: guest.tags.map(|tags| sim::SimTags { generation: None, pending: true, ..tags }), ..guest }))
+            .collect(),
+        ..world
+    };
+    let periodic = run::<Builtin>(pending, &one(&nixflix), &Images::default(), &Tick::Periodic, None);
+    assert!(
+        !periodic.effects.iter().any(|effect| matches!(sim::kind(effect), Kind::Reclaim | Kind::Retire | Kind::Undo | Kind::Stop)),
+        "{:?}",
+        kinds(&periodic.effects)
+    );
+    assert!(periodic.world.guests.get(&Vmid::new(947)).is_some_and(|guest| guest.running));
+}

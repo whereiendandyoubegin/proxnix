@@ -48,6 +48,10 @@ impl NixStore {
         NixStore { root, cache, flake, timeout }
     }
 
+    pub fn seeding(root: PathBuf, timeout: Duration) -> NixStore {
+        NixStore { root, cache: String::new(), flake: Flake { repo: PathBuf::new(), dir: None }, timeout }
+    }
+
     fn uri(&self) -> String {
         format!("local?root={}", self.root.display())
     }
@@ -65,6 +69,15 @@ impl NixStore {
             self.uri(),
             store_text(toplevel.path()),
         ]
+    }
+
+    fn seed_args(&self, toplevel: &Toplevel) -> Vec<String> {
+        vec![String::from("copy"), String::from("--to"), self.uri(), store_text(toplevel.path())]
+    }
+
+    pub(crate) fn seed(&self, toplevel: &Toplevel) -> Result<()> {
+        info!("seeding {} from the host store into {}", store_text(toplevel.path()), self.root.display());
+        self.tool("nix", "seed", &self.seed_args(toplevel)).map(|_| ()).map_err(AppError::from)
     }
 
     fn build_args(&self, key: &Key) -> Vec<String> {
@@ -235,6 +248,14 @@ mod tests {
         );
         assert!(store(PathBuf::from("/s"), Some("infra")).build_args(&key("build-lxc")).last().unwrap().contains(&format!("?rev={REV}&dir=infra#")));
         assert_eq!(store(PathBuf::from("/s"), None).collect_args().join(" "), "--store local?root=/s --gc");
+    }
+
+    #[test]
+    fn seeding_copies_a_closure_out_of_the_host_store_into_this_one() {
+        assert_eq!(
+            store(PathBuf::from("/ZFS/proxnix/state/hydra/nix"), None).seed_args(&toplevel(TOPLEVEL)).join(" "),
+            format!("copy --to local?root=/ZFS/proxnix/state/hydra/nix {TOPLEVEL}")
+        );
     }
 
     #[test]

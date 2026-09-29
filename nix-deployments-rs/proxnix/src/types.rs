@@ -218,6 +218,8 @@ pub struct ContainerConfig {
     pub mounts: Vec<HostMount>,
     #[serde(default)]
     pub secrets: bool,
+    #[serde(default)]
+    pub store: StoreChoice,
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
     pub impure: bool,
@@ -249,6 +251,15 @@ pub struct HostMount {
     pub at: String,
     #[serde(default)]
     pub mode: MountMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreChoice {
+    #[default]
+    Image,
+    Shared,
+    Private,
 }
 
 fn default_secrets_dir() -> String {

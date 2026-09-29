@@ -1,12 +1,14 @@
 use crate::api::{self, Cli, Execute, GuestOp, Lxc, Qemu};
 use crate::context::{ImageStore, StorePath, Tags};
-use crate::host::{LxcConf, PveFs, copy_to_template_storage, ensure_all, mount_spec, write_conf};
+use crate::host::{LxcConf, PveFs, copy_to_template_storage, ensure, ensure_all, host_text, mount_spec, stub_rootfs, write_conf};
+use crate::nixstore::{NixStore, store_text};
 use crate::interpret::Placed;
-use crate::types::{AppError, ContainerConfig, DiskBus, IdRange, Result, VMConfig};
+use crate::types::{AppError, ContainerConfig, DiskBus, IdRange, Result, StoreChoice, VMConfig};
 use crate::zfs::{BaseImage, DiskSize, ImageKey, Ownership, RootfsVolume, Sealed, Tarball, ZfsImages};
 use proxmox_api::nodes::node::lxc::{self, PostParams as LxcCreate};
 use proxmox_api::nodes::node::qemu;
-use proxnix_core::{Mount, SlotId, Storage};
+use proxnix_core::{HostEffect, Mount, Owner, RootHolder, SlotId, Storage, Toplevel};
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use tracing::warn;
@@ -132,6 +134,56 @@ impl Materialise for VMConfig {
     }
 }
 
+fn store_root(config: &ContainerConfig, storage: &Storage, shared: &proxnix_core::Dataset) -> Result<PathBuf> {
+    match config.store {
+        StoreChoice::Private => storage
+            .mounts
+            .iter()
+            .find(|mount| mount.guest.0 == "/nix")
+            .and_then(|mount| PathBuf::from(host_text(&mount.host)).parent().map(Path::to_path_buf))
+            .ok_or_else(|| AppError::CmdError(format!("{} has a private store but no /nix mount", config.name))),
+        StoreChoice::Shared | StoreChoice::Image => Ok(PathBuf::from(host_text(&shared.mountpoint()))),
+    }
+}
+
+fn create_on_store(
+    config: &ContainerConfig,
+    storage: &Storage,
+    artifact: &StorePath,
+    tags: &Tags,
+    image_store: ImageStore<'_>,
+    target: SlotId,
+) -> Result<()> {
+    let refuse = |why: &str| AppError::CmdError(format!("{} boots from the store, but {why}", config.name));
+    let zfs = image_store.zfs.filter(|zfs| zfs.storage.is(&config.storage_location)).ok_or_else(|| refuse("its rootfs is not on the zfs storage"))?;
+    let shared = image_store.store.ok_or_else(|| refuse("there is no zfs pool to hold the store"))?;
+    let toplevel = artifact
+        .as_str()
+        .parse::<proxnix_core::StorePath>()
+        .map(Toplevel::from)
+        .map_err(|fault| refuse(&format!("{} is not a store path ({fault:?})", artifact.as_str())))?;
+    let volume = RootfsVolume::for_slot(zfs.storage.clone(), target, DiskSize::gib(config.disk_gb));
+    let conf = LxcConf::of(config, &storage.mounts, tags, &volume, target)?;
+    let root = store_root(config, storage, shared)?;
+    ensure(&HostEffect::EnsureDataset { dataset: shared.clone(), owner: Owner::HostRoot }, image_store.idmap)?;
+    ensure_all(&storage.prepare, image_store.idmap)?;
+    let store = NixStore::seeding(root, image_store.seed_timeout);
+    store.seed(&toplevel)?;
+    store.root(&RootHolder::Guest(target.inner()), &toplevel)?;
+    let rootfs = volume.allocate()?;
+    let owner = (!config.privileged).then_some(image_store.idmap.host_base);
+    let written = stub_rootfs(rootfs.path(), Path::new(&store_text(toplevel.path())), owner).and_then(|()| write_conf(&PveFs::live(), target, &conf));
+    match written {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(cleanup) = rootfs.release() {
+                warn!("could not free the rootfs of {} after {error}: {cleanup}", target.inner().get());
+            }
+            Err(error)
+        }
+    }
+}
+
 impl Materialise for Placed {
     fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, image_store: ImageStore<'_>, target: SlotId) -> Result<()> {
         let config = &self.config;
@@ -139,6 +191,9 @@ impl Materialise for Placed {
             .storage
             .as_ref()
             .map_err(|fault| AppError::CmdError(format!("{} has no usable storage: {fault:?}", config.name)))?;
+        if config.store != StoreChoice::Image {
+            return create_on_store(config, storage, artifact, tags, image_store, target);
+        }
         let tarball = Tarball::find(artifact.as_str())?;
         if let Some(zfs) = image_store.zfs.filter(|zfs| zfs.storage.is(&config.storage_location)) {
             let key = ImageKey::new(tags.nix_hash.clone(), Ownership::of(config.privileged));
@@ -205,6 +260,7 @@ mod tests {
             state: vec![],
             mounts: vec![],
             secrets: false,
+            store: crate::types::StoreChoice::Image,
             network_bridge: "vmbr0".to_string(),
             impure: false,
             cutover: None,
@@ -262,6 +318,31 @@ mod tests {
              --net0 name=eth0,bridge=vmbr0 --ostype unmanaged --protection 1 --rootfs ZFS:8 \
              --tags proxnix;nix-k8whj0lg7k95jn6h57k99kvikc0zrpp3;commit-abc123;slot-blue --unprivileged 1"
         );
+    }
+
+    #[test]
+    fn a_shared_container_seeds_the_shared_store_and_a_private_one_its_own_nix() {
+        let settings = crate::state::parse_appconfig(crate::state::tests_support::NIXOLOGY_APPCONFIG).unwrap();
+        let layout = crate::engine::layout(&settings).unwrap();
+        let spec = |store: StoreChoice| {
+            let config = ContainerConfig { name: String::from("hydra"), store, cutover: Some(crate::types::CutoverChoice::StopStart), ..container("hydra") };
+            let wanted = proxnix_core::StorageSpec {
+                state: vec![],
+                mounts: vec![],
+                secrets: false,
+                privilege: proxnix_core::Privilege::Unprivileged,
+                store: match store {
+                    StoreChoice::Image => proxnix_core::StoreMode::Image,
+                    StoreChoice::Shared => proxnix_core::StoreMode::Shared,
+                    StoreChoice::Private => proxnix_core::StoreMode::Private,
+                },
+            };
+            (layout.storage(&proxnix_core::GuestName(String::from("hydra")), &wanted).unwrap(), config)
+        };
+        let (shared, shared_config) = spec(StoreChoice::Shared);
+        assert_eq!(store_root(&shared_config, &shared, &layout.store()).unwrap(), PathBuf::from("/ZFS/proxnix/store"));
+        let (private, private_config) = spec(StoreChoice::Private);
+        assert_eq!(store_root(&private_config, &private, &layout.store()).unwrap(), PathBuf::from("/ZFS/proxnix/state/hydra/nix"));
     }
 
     fn vm_with(key: &str, value: &str) -> serde_json::Result<VMConfig> {

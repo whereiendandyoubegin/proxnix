@@ -230,6 +230,8 @@ pub struct ImageStore<'a> {
     pub template_cache_path: TemplateCachePath<'a>,
     pub zfs: Option<&'a ZfsImages>,
     pub idmap: crate::types::IdRange,
+    pub store: Option<&'a proxnix_core::Dataset>,
+    pub seed_timeout: std::time::Duration,
 }
 
 /// Path to the cloned nix repository, borrowed from the pipeline.

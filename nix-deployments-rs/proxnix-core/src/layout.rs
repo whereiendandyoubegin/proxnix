@@ -1,7 +1,7 @@
 #[pure_only]
 use crate::guest::{GuestPath, HostPath, Mount, MountMode, PathFault, Privilege};
 #[pure_only]
-use crate::spec::GuestName;
+use crate::spec::{Cutover, GuestName};
 use proxnix_pure::pure_only;
 
 #[pure_only]
@@ -40,6 +40,7 @@ enum Fixed {
     Store,
     State,
     Logs,
+    Nix,
 }
 
 #[pure_only]
@@ -50,6 +51,7 @@ impl From<Fixed> for Segment {
             Fixed::Store => "store",
             Fixed::State => "state",
             Fixed::Logs => "logs",
+            Fixed::Nix => "nix",
         }))
     }
 }
@@ -146,6 +148,7 @@ pub enum StorageFault {
     UnlabelledState(GuestPath),
     SameLabel(StateLabel),
     MountedTwice(GuestPath),
+    PrivateStoreNeedsStopStart,
 }
 
 #[pure_only]
@@ -155,6 +158,24 @@ pub struct StorageSpec {
     pub mounts: Vec<Mount>,
     pub secrets: bool,
     pub privilege: Privilege,
+    pub store: StoreMode,
+}
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StoreMode {
+    #[default]
+    Image,
+    Shared,
+    Private,
+}
+
+#[pure_only]
+pub fn store_cutover(store: StoreMode, cutover: Cutover) -> Result<(), StorageFault> {
+    match (store, cutover) {
+        (StoreMode::Private, Cutover::Overlap) => Err(StorageFault::PrivateStoreNeedsStopStart),
+        _ => Ok(()),
+    }
 }
 
 #[pure_only]
@@ -174,6 +195,16 @@ pub struct Layout {
 #[pure_only]
 fn journal() -> GuestPath {
     GuestPath(String::from("/var/log/journal"))
+}
+
+#[pure_only]
+fn nix_store() -> GuestPath {
+    GuestPath(String::from("/nix/store"))
+}
+
+#[pure_only]
+fn nix() -> GuestPath {
+    GuestPath(String::from("/nix"))
 }
 
 #[pure_only]
@@ -239,6 +270,17 @@ impl Layout {
         let owner = Owner::writer(wanted.privilege);
         let home = self.state().child(workload.clone());
         let logs = Mount { host: HostPath::within(&self.logs(), &[workload]), guest: journal(), mode: MountMode::ReadWrite };
+        let private = home.child(Segment::from(Fixed::Nix));
+        let store = match wanted.store {
+            StoreMode::Image => None,
+            StoreMode::Shared => Some(Mount {
+                host: HostPath::within(&self.store(), &[Segment::from(Fixed::Nix), Segment::from(Fixed::Store)]),
+                guest: nix_store(),
+                mode: MountMode::ReadOnly,
+            }),
+            StoreMode::Private => Some(Mount { host: HostPath::within(&private, &[Segment::from(Fixed::Nix)]), guest: nix(), mode: MountMode::ReadWrite }),
+        };
+        let owns_home = !labelled.is_empty() || wanted.store == StoreMode::Private;
         let mounts = distinct(
             labelled
                 .iter()
@@ -246,13 +288,15 @@ impl Layout {
                 .chain(wanted.mounts.iter().cloned())
                 .chain([logs.clone()])
                 .chain(wanted.secrets.then(|| Mount { host: self.secrets.clone(), guest: sops_key(), mode: MountMode::ReadOnly }))
+                .chain(store)
                 .collect(),
         )?;
         let prepare = [self.root.clone(), self.state()]
             .into_iter()
-            .chain((!labelled.is_empty()).then(|| home.clone()))
+            .chain(owns_home.then(|| home.clone()))
             .map(|dataset| HostEffect::EnsureDataset { dataset, owner: Owner::HostRoot })
             .chain(labelled.iter().map(|(_, label)| HostEffect::EnsureDataset { dataset: home.child(label.0.clone()), owner }))
+            .chain((wanted.store == StoreMode::Private).then(|| HostEffect::EnsureDataset { dataset: private.clone(), owner }))
             .chain([
                 HostEffect::EnsureDataset { dataset: self.logs(), owner: Owner::HostRoot },
                 HostEffect::EnsureDirectory { path: logs.host, owner },
@@ -294,7 +338,13 @@ mod tests {
     }
 
     fn wanted(state: &[&str], secrets: bool) -> StorageSpec {
-        StorageSpec { state: state.iter().map(|text| at(text)).collect(), mounts: vec![], secrets, privilege: Privilege::Unprivileged }
+        StorageSpec {
+            state: state.iter().map(|text| at(text)).collect(),
+            mounts: vec![],
+            secrets,
+            privilege: Privilege::Unprivileged,
+            store: StoreMode::Image,
+        }
     }
 
     fn hosts(storage: &Storage) -> Vec<(String, String)> {
@@ -411,6 +461,46 @@ mod tests {
             .unwrap();
         assert!(storage.mounts.contains(&media));
         assert!(storage.prepare.contains(&HostEffect::EnsureHostPath { path: media.host, owner: Owner::GuestRoot }));
+    }
+
+    #[test]
+    fn an_image_container_gets_no_store_mount_at_all() {
+        let storage = layout().storage(&workload("forgejo"), &wanted(&["/var/lib/forgejo"], true)).unwrap();
+        assert!(storage.mounts.iter().all(|mount| mount.guest != nix_store() && mount.guest != nix()));
+    }
+
+    #[test]
+    fn a_shared_store_container_mounts_the_synced_store_read_only_and_owns_nothing_new() {
+        let image = layout().storage(&workload("test-container"), &wanted(&[], true)).unwrap();
+        let shared = layout().storage(&workload("test-container"), &StorageSpec { store: StoreMode::Shared, ..wanted(&[], true) }).unwrap();
+        assert!(shared.mounts.contains(&Mount { host: path("/ZFS/proxnix/store/nix/store"), guest: nix_store(), mode: MountMode::ReadOnly }));
+        assert_eq!(shared.prepare, image.prepare, "the store dataset belongs to the sync, not to any workload");
+    }
+
+    #[test]
+    fn a_private_store_container_gets_its_own_writable_nix_dataset() {
+        let storage = layout().storage(&workload("hydra"), &StorageSpec { store: StoreMode::Private, ..wanted(&["/var/lib/hydra"], true) }).unwrap();
+        assert!(storage.mounts.contains(&Mount { host: path("/ZFS/proxnix/state/hydra/nix/nix"), guest: nix(), mode: MountMode::ReadWrite }));
+        let nix_dataset = layout().state().child(Segment::try_from("hydra").unwrap()).child(Segment::from(Fixed::Nix));
+        assert!(storage.prepare.contains(&HostEffect::EnsureDataset { dataset: nix_dataset, owner: Owner::GuestRoot }));
+        assert!(!storage.mounts.iter().any(|mount| mount.guest == nix_store()));
+    }
+
+    #[test]
+    fn a_private_store_cannot_overlap_because_two_nix_daemons_cannot_share_one_database() {
+        assert_eq!(store_cutover(StoreMode::Private, Cutover::Overlap), Err(StorageFault::PrivateStoreNeedsStopStart));
+        assert_eq!(store_cutover(StoreMode::Private, Cutover::StopStart), Ok(()));
+        assert_eq!(store_cutover(StoreMode::Private, Cutover::Protected), Ok(()));
+        assert_eq!(store_cutover(StoreMode::Shared, Cutover::Overlap), Ok(()));
+        assert_eq!(store_cutover(StoreMode::Image, Cutover::Overlap), Ok(()));
+    }
+
+    #[test]
+    fn a_private_store_mounted_over_a_state_path_is_refused() {
+        assert_eq!(
+            layout().storage(&workload("x"), &StorageSpec { store: StoreMode::Private, ..wanted(&["/nix"], false) }),
+            Err(StorageFault::MountedTwice(nix()))
+        );
     }
 
     #[test]

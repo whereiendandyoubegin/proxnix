@@ -147,6 +147,23 @@ pub(crate) fn ensure(effect: &HostEffect, idmap: IdRange) -> Result<()> {
     }
 }
 
+const STUB_DIRS: [&str; 7] = ["sbin", "etc", "proc", "sys", "dev", "nix/store", "var/log/journal"];
+
+fn own_tree(path: &Path, uid: u32) -> Result<()> {
+    std::os::unix::fs::lchown(path, Some(uid), Some(uid))?;
+    match std::fs::symlink_metadata(path)?.is_dir() {
+        false => Ok(()),
+        true => std::fs::read_dir(path)?.try_for_each(|entry| own_tree(&entry?.path(), uid)),
+    }
+}
+
+pub(crate) fn stub_rootfs(rootfs: &Path, toplevel: &Path, owner: Option<u32>) -> Result<()> {
+    STUB_DIRS.iter().try_for_each(|dir| std::fs::create_dir_all(rootfs.join(dir)))?;
+    std::os::unix::fs::symlink(toplevel.join("init"), rootfs.join("sbin/init"))?;
+    std::fs::copy(toplevel.join("etc/os-release"), rootfs.join("etc/os-release"))?;
+    owner.map_or(Ok(()), |uid| own_tree(rootfs, uid))
+}
+
 pub(crate) fn ensure_all(effects: &[HostEffect], idmap: IdRange) -> Result<()> {
     effects.iter().try_for_each(|effect| ensure(effect, idmap))
 }
@@ -394,6 +411,7 @@ unprivileged: 1
             state: vec![],
             mounts: vec![],
             secrets: false,
+            store: crate::types::StoreChoice::Image,
             network_bridge: "vmbr0".to_string(),
             impure: false,
             cutover: None,
@@ -502,6 +520,23 @@ unprivileged: 1
         let idmap = IdRange { host_base: 100_000, count: 65_536 };
         assert!(ensure(&HostEffect::EnsureDirectory { path: path.clone(), owner: Owner::HostRoot }, idmap).is_ok());
         assert!(ensure(&HostEffect::EnsureHostPath { path, owner: Owner::GuestRoot }, idmap).is_ok());
+    }
+
+    #[test]
+    fn a_stub_rootfs_holds_only_what_the_tarball_held_besides_the_store() {
+        let root = std::env::temp_dir().join(format!("proxnix-stub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let toplevel = root.join("toplevel");
+        std::fs::create_dir_all(toplevel.join("etc")).unwrap();
+        std::fs::write(toplevel.join("etc/os-release"), "ID=nixos\n").unwrap();
+        let rootfs = root.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        stub_rootfs(&rootfs, &toplevel, None).unwrap();
+        assert_eq!(std::fs::read_link(rootfs.join("sbin/init")).unwrap(), toplevel.join("init"));
+        assert_eq!(std::fs::read_to_string(rootfs.join("etc/os-release")).unwrap(), "ID=nixos\n");
+        assert!(STUB_DIRS.iter().all(|dir| rootfs.join(dir).is_dir()));
+        assert!(std::fs::symlink_metadata(rootfs.join("sbin/init")).unwrap().file_type().is_symlink(), "init points into the store, it is never copied");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

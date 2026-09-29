@@ -260,6 +260,7 @@ pub struct RootfsVolume {
     storage: StorageId,
     volume: VolumeName,
     size: DiskSize,
+    owner: proxnix_core::Vmid,
 }
 
 impl RootfsVolume {
@@ -268,7 +269,50 @@ impl RootfsVolume {
             storage,
             volume: VolumeName::rootfs(target),
             size,
+            owner: target.inner(),
         }
+    }
+
+    fn volume_id(&self) -> String {
+        format!("{}:{}", self.storage, self.volume)
+    }
+
+    fn alloc_args(&self) -> Vec<String> {
+        vec![
+            String::from("alloc"),
+            self.storage.to_string(),
+            self.owner.get().to_string(),
+            self.volume.to_string(),
+            self.size.to_string(),
+        ]
+    }
+
+    pub fn allocate(&self) -> Result<AllocatedRootfs> {
+        run(Command::new("pvesm").args(self.alloc_args()), "pvesm alloc")?;
+        let released = |error: AppError| {
+            if let Err(cleanup) = run(Command::new("pvesm").args(["free", self.volume_id().as_str()]), "pvesm free") {
+                warn!("could not free {} after {error}: {cleanup}", self.volume_id());
+            }
+            error
+        };
+        let path = run(Command::new("pvesm").args(["path", self.volume_id().as_str()]), "pvesm path").map_err(released)?;
+        Ok(AllocatedRootfs { volume: self.clone(), path: PathBuf::from(path.trim()) })
+    }
+}
+
+#[derive(Debug)]
+pub struct AllocatedRootfs {
+    volume: RootfsVolume,
+    path: PathBuf,
+}
+
+impl AllocatedRootfs {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn release(self) -> Result<()> {
+        run(Command::new("pvesm").args(["free", self.volume.volume_id().as_str()]), "pvesm free").map(|_| ())
     }
 }
 
@@ -545,6 +589,14 @@ fn run(cmd: &mut Command, what: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_rootfs_is_allocated_through_proxmox_under_the_slot_it_belongs_to() {
+        let volume = RootfsVolume::for_slot(StorageId::try_from(String::from("ZFS")).unwrap(), SlotId::Blue(proxnix_core::Vmid::new(830)), DiskSize::gib(10));
+        assert_eq!(volume.alloc_args().join(" "), "alloc ZFS 830 subvol-830-disk-0 10G");
+        assert_eq!(volume.volume_id(), "ZFS:subvol-830-disk-0");
+        assert_eq!(volume.to_string(), "ZFS:subvol-830-disk-0,size=10G");
+    }
     use proxnix_core::Vmid;
 
     const HASH: &str = "0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7";
