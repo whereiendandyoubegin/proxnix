@@ -61,6 +61,15 @@ pub enum Failure {
     Refused { action: Action, error: EffectError },
     Route(EffectError),
     NoAddress,
+    Crashed { starts: Attempt },
+}
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartGate {
+    Due,
+    Waiting(Moment),
+    Exhausted(Attempt),
 }
 
 #[pure_only]
@@ -101,6 +110,7 @@ pub struct Memo {
     given_up: BTreeMap<(GuestName, NixHash), Failure>,
     cleared: BTreeSet<GuestName>,
     updated: BTreeSet<Instance>,
+    starts: BTreeMap<Instance, (Attempt, Moment)>,
 }
 
 #[pure_only]
@@ -141,6 +151,9 @@ fn verdict(check: Check, outcome: &Outcome) -> Option<Trial> {
 const TRANSIENT_ATTEMPTS: Attempt = Attempt(3);
 
 #[pure_only]
+const START_ATTEMPTS: Attempt = Attempt(3);
+
+#[pure_only]
 fn failure_of(outcome: Outcome) -> Option<EffectError> {
     match outcome {
         Outcome::Failed(error) => Some(error),
@@ -158,13 +171,13 @@ impl Memo {
     fn absorb_one(self, event: Event, now: Moment, pacing: &Pacing) -> Memo {
         match self.issued.get(&event.effect).cloned() {
             None => self,
-            Some((name, Effect::Guest(effect))) => self.guest_outcome(name, &effect, event.outcome),
+            Some((name, Effect::Guest(effect))) => self.guest_outcome(name, &effect, event.outcome, now, pacing),
             Some((_, Effect::Probe(probe))) => self.probe_outcome(&probe, event.outcome, now, pacing),
             Some((name, Effect::Route(route))) => self.route_outcome(name, route, event.outcome),
         }
     }
 
-    fn guest_outcome(self, name: GuestName, effect: &GuestEffect, outcome: Outcome) -> Memo {
+    fn guest_outcome(self, name: GuestName, effect: &GuestEffect, outcome: Outcome, now: Moment, pacing: &Pacing) -> Memo {
         match (effect, outcome) {
             (GuestEffect::Create { artifact, .. }, Outcome::Failed(error)) => {
                 let nix = artifact.nix().clone();
@@ -183,6 +196,11 @@ impl Memo {
                 (Some(provisioned), Some(instance)) => Memo { provisioned: put(self.provisioned, instance, provisioned), ..self },
                 _ => self,
             },
+            (GuestEffect::Start(member), Outcome::Done | Outcome::AlreadyApplied) => {
+                let instance = member.instance();
+                let attempts = self.starts.get(&instance).map_or(Attempt(0), |(attempts, _)| *attempts).next();
+                Memo { starts: put(self.starts, instance, (attempts, now.after(pacing.guest))), ..self }
+            }
             (GuestEffect::Update { guest, .. }, Outcome::Done | Outcome::AlreadyApplied) => {
                 Memo { updated: add(self.updated, guest.instance()), ..self }
             }
@@ -283,6 +301,15 @@ impl Memo {
             Some(Trial::Trying { deadline, attempts, last, .. }) if now >= *deadline => Progress::Expired(*attempts, last.clone()),
             Some(Trial::Trying { retry_at, .. }) if now >= *retry_at => Progress::Due,
             Some(Trial::Trying { retry_at, deadline, .. }) => Progress::Waiting((*retry_at).min(*deadline)),
+        }
+    }
+
+    pub(crate) fn start_gate(&self, instance: &Instance, now: Moment) -> StartGate {
+        match self.starts.get(instance) {
+            None => StartGate::Due,
+            Some((attempts, _)) if *attempts >= START_ATTEMPTS => StartGate::Exhausted(*attempts),
+            Some((_, retry_at)) if now >= *retry_at => StartGate::Due,
+            Some((_, retry_at)) => StartGate::Waiting(*retry_at),
         }
     }
 

@@ -52,6 +52,7 @@ pub struct Faults {
     pub lying: BTreeSet<usize>,
     pub address_after: BTreeMap<Vmid, usize>,
     pub failing_checks: BTreeSet<Vmid>,
+    pub crashing: BTreeSet<Vmid>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -271,7 +272,10 @@ impl World {
                 let guest = SimGuest { name: spec.name.0.clone(), tags: Some(tags), running: false, resources: spec.resources, facts: facts(&spec.kind) };
                 (self.with_guest(target.id(), guest), Outcome::Done)
             }
-            GuestEffect::Start(member) => (self.update(member.id(), |guest| SimGuest { running: true, ..guest }), Outcome::Done),
+            GuestEffect::Start(member) => {
+                let stays_up = !self.faults.crashing.contains(&member.id());
+                (self.update(member.id(), |guest| SimGuest { running: stays_up, ..guest }), Outcome::Done)
+            }
             GuestEffect::Stop(member) => (self.update(member.id(), |guest| SimGuest { running: false, ..guest }), Outcome::Done),
             GuestEffect::Record { guest, address } => (self.retag(guest.id(), |tags| SimTags { ip: Some(*address), ..tags }), Outcome::Done),
             GuestEffect::Role { guest, role } => {

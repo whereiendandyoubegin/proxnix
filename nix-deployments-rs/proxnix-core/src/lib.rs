@@ -67,7 +67,7 @@ pub use step::{Builtin, Input, Planned, Report, Step, WorkloadReport, step};
 #[pure_only]
 pub use store::{
     BuildState, HydraBuild, Key, Ledger, Policy, Retain, RootHolder, Source, StoreEffect, StoreEvent, SyncFault, SyncInput, SyncStep, Toplevel,
-    roots, sync_step,
+    root_effects, roots, sync_step,
 };
 #[pure_only]
 pub use strategy::{Blocker, Context, Intent, Plan, Registry, SkipReason, Stage, Strategy, drive, refused};

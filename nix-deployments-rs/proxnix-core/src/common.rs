@@ -11,7 +11,7 @@ use crate::guest::GuestKind;
 #[pure_only]
 use crate::ids::Slot;
 #[pure_only]
-use crate::memo::{Action, Failure, Progress};
+use crate::memo::{Action, Failure, Progress, StartGate};
 #[pure_only]
 use crate::observation::{Occupant, SlotState};
 #[pure_only]
@@ -60,6 +60,22 @@ pub fn begin(ctx: &Context<'_>, push: &Push, artifact: &Artifact, beside: Option
 }
 
 #[pure_only]
+fn starting(ctx: &Context<'_>, member: &Member) -> Result<Plan, Failure> {
+    match (refused(ctx, member, &[Action::Start]), ctx.start_gate(member)) {
+        (Some(failure), _) => Err(failure),
+        (None, StartGate::Exhausted(starts)) => Err(Failure::Crashed { starts }),
+        (None, StartGate::Waiting(at)) => Ok(Plan::wake(Stage::Starting, at)),
+        (None, StartGate::Due) => Ok(Plan::act(Stage::Starting, Effect::Guest(GuestEffect::Start(member.clone())))),
+    }
+}
+
+#[pure_only]
+#[must_use]
+pub fn start(ctx: &Context<'_>, member: &Member) -> Plan {
+    starting(ctx, member).unwrap_or_else(|failure| Plan::idle(Stage::Failed(failure)))
+}
+
+#[pure_only]
 enum Unsettled {
     Pending(Plan),
     Failed(Failure),
@@ -80,7 +96,7 @@ fn trial(ctx: &Context<'_>, member: &Member, probe: ProbeEffect, within: crate::
 fn assess(ctx: &Context<'_>, member: &Member) -> Result<Ipv4Addr, Unsettled> {
     refused(ctx, member, &[Action::Start, Action::Record]).map_or(Ok(()), |failure| Err(Unsettled::Failed(failure)))?;
     if !member.running() {
-        return Err(Unsettled::Pending(Plan::act(Stage::Starting, Effect::Guest(GuestEffect::Start(member.clone())))));
+        return Err(starting(ctx, member).map_or_else(Unsettled::Failed, Unsettled::Pending));
     }
     let timeouts = ctx.spec.timeouts;
     let address = trial(ctx, member, ProbeEffect::ReadAddress(member.clone()), timeouts.dhcp)?
@@ -199,10 +215,7 @@ fn pushed(ctx: &Context<'_>, push: &Push, serving: &Member, rebuilds: Rebuilds) 
 #[must_use]
 pub fn serve(ctx: &Context<'_>, serving: &Member, rebuilds: Rebuilds) -> Plan {
     if !serving.running() {
-        return match refused(ctx, serving, &[Action::Start]) {
-            Some(failure) => Plan::idle(Stage::Failed(failure)),
-            None => Plan::act(Stage::Starting, Effect::Guest(GuestEffect::Start(serving.clone()))),
-        };
+        return start(ctx, serving);
     }
     let routed = match ctx.push {
         Some(_) if !ctx.in_flight(serving) => None,

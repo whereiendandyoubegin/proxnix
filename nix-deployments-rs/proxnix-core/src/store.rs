@@ -272,6 +272,18 @@ fn rooting(wanted: &BTreeMap<RootHolder, Toplevel>, rooted: &BTreeMap<RootHolder
 
 #[pure_only]
 #[must_use]
+pub fn root_effects(
+    ledger: &Ledger,
+    deployed: &[(Vmid, NixHash)],
+    present: &BTreeSet<Toplevel>,
+    rooted: &BTreeMap<RootHolder, Toplevel>,
+    retain: Retain,
+) -> Vec<StoreEffect> {
+    rooting(&roots(ledger, deployed, present, retain), rooted)
+}
+
+#[pure_only]
+#[must_use]
 pub fn sync_step(input: SyncInput<'_>) -> SyncStep {
     let SyncInput { ledger, wanted, hydra, present, deployed, rooted, events, now, policy } = input;
     let (ledger, heard_effects) = events.iter().fold((ledger, Vec::new()), |(ledger, effects), event| match heard(&ledger, event, now) {
@@ -291,8 +303,8 @@ pub fn sync_step(input: SyncInput<'_>) -> SyncStep {
             _ => None,
         })
         .min();
-    let root_effects = rooting(&roots(&ledger, deployed, present, policy.retain), rooted);
-    SyncStep { effects: heard_effects.into_iter().chain(advanced_effects).chain(root_effects).collect(), ledger, wake }
+    let rooted_effects = root_effects(&ledger, deployed, present, rooted, policy.retain);
+    SyncStep { effects: heard_effects.into_iter().chain(advanced_effects).chain(rooted_effects).collect(), ledger, wake }
 }
 
 #[cfg(test)]

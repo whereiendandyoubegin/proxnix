@@ -186,8 +186,7 @@ async fn run_once(mode: Mode, repo: Option<std::path::PathBuf>, appconfig: AppCo
 
 fn sync_pass(syncer: &sync::Syncer, settings: &AppConfig, pve: &Pve, repo: &str) -> types::Result<()> {
     let prepared = engine::prepare(settings, repo)?;
-    let observed = state::observe(pve)?;
-    syncer.pass(std::path::PathBuf::from(repo), &prepared.declared, &prepared.commit, &observed)
+    syncer.pass(std::path::PathBuf::from(repo), &prepared.declared, &prepared.commit, &|| state::observe(pve).map_err(types::AppError::from))
 }
 
 fn store_syncer(appconfig: &AppConfig) -> Option<Arc<sync::Syncer>> {

@@ -23,3 +23,14 @@ pub fn wait(child: &mut Child, timeout: Duration) -> Result<Exit> {
         })
         .unwrap_or(Ok(Exit::TimedOut))
 }
+
+pub fn kill_group(child: &mut Child) {
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: killpg only signals the process group this child was spawned to lead.
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
+    }
+    child.kill().ok();
+    child.wait().ok();
+}

@@ -168,6 +168,7 @@ fn create_on_store(
     ensure(&HostEffect::EnsureDataset { dataset: shared.clone(), owner: Owner::HostRoot }, image_store.idmap)?;
     ensure_all(&storage.prepare, image_store.idmap)?;
     let store = NixStore::seeding(root, image_store.seed_timeout);
+    let _roots = store.hold_roots()?;
     store.seed(&toplevel)?;
     store.root(&RootHolder::Guest(target.inner()), &toplevel)?;
     let rootfs = volume.allocate()?;

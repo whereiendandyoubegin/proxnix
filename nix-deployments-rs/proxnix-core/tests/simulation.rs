@@ -328,3 +328,43 @@ fn a_periodic_tick_leaves_a_lone_uncommitted_guest_running() {
     );
     assert!(periodic.world.guests.get(&Vmid::new(947)).is_some_and(|guest| guest.running));
 }
+
+#[test]
+fn a_serving_guest_that_will_not_stay_up_is_started_a_bounded_number_of_times_then_reported() {
+    let forgejo = forgejo(Cutover::Overlap);
+    let adopted = run::<Builtin>(World::default().legacy(&forgejo, Slot::Blue, NIX_A), &one(&forgejo), &Images::default(), &Tick::Periodic, None);
+    let crashing = World {
+        faults: sim::Faults { crashing: [Vmid::new(844)].into(), ..sim::Faults::default() },
+        guests: adopted
+            .world
+            .guests
+            .clone()
+            .into_iter()
+            .map(|(id, guest)| (id, sim::SimGuest { running: false, ..guest }))
+            .collect(),
+        ..adopted.world
+    };
+    let done = run::<Builtin>(crashing, &one(&forgejo), &Images::default(), &Tick::Periodic, None);
+    assert_eq!(kinds(&done.effects), vec![Kind::Start, Kind::Start, Kind::Start]);
+    assert!(matches!(last_stage(&done, "forgejo"), Stage::Failed(Failure::Crashed { .. })), "{:?}", last_stage(&done, "forgejo"));
+    assert_eq!(done.world.members("forgejo").len(), 1, "a crashing serving guest is reported, never destroyed");
+}
+
+#[test]
+fn a_fresh_guest_that_will_not_stay_up_is_abandoned_and_the_old_one_keeps_serving() {
+    for forgejo in [forgejo(Cutover::Overlap), spec("website", 823, 923, qemu(), Cutover::Overlap, true)] {
+        let name = forgejo.name.0.clone();
+        let fresh = forgejo.slots.id(Slot::Green).inner();
+        let world = World { faults: sim::Faults { crashing: [fresh].into(), ..sim::Faults::default() }, ..World::default() }
+            .legacy(&forgejo, Slot::Blue, NIX_A);
+        let done = run::<Builtin>(world, &one(&forgejo), &images(vec![built(&forgejo, NIX_B)]), &push(COMMIT_B), None);
+        let starts = kinds(&done.effects).iter().filter(|kind| **kind == Kind::Start).count();
+        assert_eq!(starts, 3, "{name}: {:?}", kinds(&done.effects));
+        assert!(!done.world.guests.contains_key(&fresh), "{name}: the crashing fresh guest must be undone");
+        assert!(matches!(last_stage(&done, &name), Stage::Failed(Failure::Crashed { .. })), "{name}: {:?}", last_stage(&done, &name));
+        let (serving, _) = done.world.serving(&name).unwrap();
+        assert_eq!(serving, forgejo.slots.id(Slot::Blue).inner());
+        let next_tick = run::<Builtin>(done.world, &one(&forgejo), &Images::default(), &Tick::Periodic, None);
+        settled(&next_tick.world, &one(&forgejo));
+    }
+}

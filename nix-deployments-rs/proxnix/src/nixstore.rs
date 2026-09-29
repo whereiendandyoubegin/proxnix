@@ -129,6 +129,16 @@ impl NixStore {
         std::fs::rename(&staged, &link).map_err(AppError::from)
     }
 
+    pub(crate) fn hold_roots(&self) -> Result<std::fs::File> {
+        let path = self.root.join("nix/var/nix/proxnix-roots.lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        file.lock()?;
+        Ok(file)
+    }
+
     pub(crate) fn unroot(&self, holder: &RootHolder) -> Result<()> {
         match std::fs::remove_file(self.roots().join(holder_name(holder))) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(AppError::from(error)),

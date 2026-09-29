@@ -11,7 +11,7 @@ use crate::guest::{DurationMs, GuestPath, HostPath};
 #[pure_only]
 use crate::ids::Vmid;
 #[pure_only]
-use crate::memo::{Action, Failure, Memo, Progress};
+use crate::memo::{Action, Failure, Memo, Progress, StartGate};
 #[pure_only]
 use crate::observation::{Observation, Unsettled};
 #[pure_only]
@@ -52,6 +52,10 @@ impl<'a> Context<'a> {
     #[must_use]
     pub fn progress(&self, member: &Member, check: Check) -> Progress {
         self.memo.progress(&member.instance(), check, self.now)
+    }
+
+    pub(crate) fn start_gate(&self, member: &Member) -> StartGate {
+        self.memo.start_gate(&member.instance(), self.now)
     }
 
     #[must_use]

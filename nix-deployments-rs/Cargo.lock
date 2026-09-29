@@ -1643,6 +1643,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "git2",
+ "libc",
  "proxmox-api",
  "proxnix-core",
  "rayon",

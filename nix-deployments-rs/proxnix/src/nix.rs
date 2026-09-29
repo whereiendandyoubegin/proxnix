@@ -1,6 +1,7 @@
 use crate::child::{self, Exit};
 use crate::types::{AppError, Result};
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -67,6 +68,7 @@ pub fn eval_config(repo_path: &str, timeout: Duration) -> Result<String> {
         .arg("--json")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {e}")))?;
 
@@ -91,28 +93,20 @@ pub fn eval_config(repo_path: &str, timeout: Duration) -> Result<String> {
         })
     });
 
-    let outcome = child::wait(&mut child, timeout)?;
+    let status = match child::wait(&mut child, timeout)? {
+        Exit::Finished(status) => status,
+        Exit::TimedOut => {
+            warn!("nix eval exceeded {}s, killing it", timeout.as_secs());
+            child::kill_group(&mut child);
+            return Err(AppError::NixError(format!("eval of .#proxnix timed out after {}s", timeout.as_secs())));
+        }
+    };
     let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
     let stderr = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
-
-    match outcome {
-        Exit::TimedOut => {
-            warn!(
-                "nix eval exceeded {}s, killing it",
-                timeout.as_secs()
-            );
-            child.kill().ok();
-            child.wait().ok();
-            Err(AppError::NixError(format!(
-                "eval of .#proxnix timed out after {}s",
-                timeout.as_secs()
-            )))
-        }
-        Exit::Finished(status) => if status.success() { Ok(stdout) } else { Err(AppError::NixError(format!(
-            "eval of .#proxnix failed (exit: {:?}): {}",
-            status.code(),
-            stderr
-        ))) },
+    if status.success() {
+        Ok(stdout)
+    } else {
+        Err(AppError::NixError(format!("eval of .#proxnix failed (exit: {:?}): {}", status.code(), stderr)))
     }
 }
 
@@ -151,6 +145,7 @@ pub(crate) fn run(program: &str, dir: &Path, label: &str, args: &[&str], timeout
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| NixFault::Spawn(e.to_string()))?;
     let stdout_pump = child.stdout.take().map(|out| {
@@ -172,19 +167,17 @@ pub(crate) fn run(program: &str, dir: &Path, label: &str, args: &[&str], timeout
             lines[lines.len().saturating_sub(STDERR_TAIL)..].to_vec()
         })
     });
-    let outcome = child::wait(&mut child, timeout).map_err(|e| NixFault::Spawn(e.to_string()))?;
-    if let Exit::TimedOut = outcome {
-        warn!("nix {} exceeded {}s, killing it", label, timeout.as_secs());
-        child.kill().ok();
-        child.wait().ok();
-    }
+    let status = match child::wait(&mut child, timeout).map_err(|e| NixFault::Spawn(e.to_string()))? {
+        Exit::Finished(status) => status,
+        Exit::TimedOut => {
+            warn!("nix {} exceeded {}s, killing it", label, timeout.as_secs());
+            child::kill_group(&mut child);
+            return Err(NixFault::TimedOut(timeout));
+        }
+    };
     let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
     let stderr: Vec<String> = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
-    match outcome {
-        Exit::TimedOut => Err(NixFault::TimedOut(timeout)),
-        Exit::Finished(status) if !status.success() => Err(NixFault::Exited { code: status.code(), stderr: stderr.join("\n") }),
-        Exit::Finished(_) => Ok(stdout),
-    }
+    if status.success() { Ok(stdout) } else { Err(NixFault::Exited { code: status.code(), stderr: stderr.join("\n") }) }
 }
 
 fn first_line(stdout: &str) -> std::result::Result<String, NixFault> {
@@ -213,4 +206,22 @@ pub fn out_path(config_name: &str, build_attr: &str, repo_path: &str, impure: bo
     let flags: &[&str] = if impure { &["--impure"] } else { &[] };
     let eval: Vec<&str> = ["eval", "--raw", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
     first_line(&nix(&dir, config_name, &eval, timeout)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_hung_command_is_abandoned_at_its_timeout_even_when_a_child_holds_its_output() {
+        let script = std::env::temp_dir().join(format!("proxnix-hung-{}", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\necho working >&2\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let result = run(script.to_str().unwrap(), Path::new("/"), "hung", &[], Duration::from_secs(1));
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(result, Err(NixFault::TimedOut(Duration::from_secs(1))));
+        assert!(started.elapsed() < Duration::from_secs(10), "waited {:?} on a killed command", started.elapsed());
+    }
 }

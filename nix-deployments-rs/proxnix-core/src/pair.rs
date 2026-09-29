@@ -1,7 +1,7 @@
 #[pure_only]
 use crate::cohort::Member;
 #[pure_only]
-use crate::common::{Health, Rebuilds, abort, commit, dispose, health, point, serve, undeployed};
+use crate::common::{Health, Rebuilds, abort, commit, dispose, health, point, serve, start, undeployed};
 #[pure_only]
 use crate::effect::{Effect, Endpoint, GuestEffect};
 #[pure_only]
@@ -76,10 +76,7 @@ fn deploying(ctx: &Context<'_>, serving: Option<&Member>, fresh: &Member, fencin
 #[pure_only]
 fn supersede(ctx: &Context<'_>, serving: &Member, loser: &Member) -> Plan {
     if !serving.running() {
-        return match refused(ctx, serving, &[Action::Start]) {
-            Some(failure) => Plan::idle(Stage::Failed(failure)),
-            None => Plan::act(Stage::Starting, Effect::Guest(GuestEffect::Start(serving.clone()))),
-        };
+        return start(ctx, serving);
     }
     point(ctx, serving, Some(loser), Endpoint::Primary).unwrap_or_else(|| dispose(ctx, loser, Action::Retire))
 }
