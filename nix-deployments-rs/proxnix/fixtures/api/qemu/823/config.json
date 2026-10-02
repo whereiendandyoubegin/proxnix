@@ -1,0 +1,16 @@
+{
+  "memory": "2048",
+  "scsihw": "virtio-scsi-pci",
+  "cores": 2,
+  "net0": "virtio=BC:24:11:22:7D:C9,bridge=vmbr0",
+  "digest": "525439ac37161b3ae04ecfb807fbbcdd21285add",
+  "vmgenid": "74cdd8c1-ed22-4ded-bbbd-f90e0067fe17",
+  "tags": "commit-9d6c5a707946c3ccde19b6f5cd2f9bd365caadeb;ip-192.168.1.224;nix-i3d00236fdkfw1v9cmasajkjhzl8zi5j;proxnix;slot-blue",
+  "boot": "order=scsi0",
+  "serial0": "socket",
+  "agent": "1",
+  "scsi0": "local-lvm:vm-823-disk-0,size=10G",
+  "meta": "creation-qemu=9.2.0,ctime=1790515296",
+  "smbios1": "uuid=5618d26e-ffc7-4507-848a-f71d189c1934",
+  "name": "test-website"
+}

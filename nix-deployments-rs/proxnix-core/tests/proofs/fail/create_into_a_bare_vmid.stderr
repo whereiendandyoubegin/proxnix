@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/proofs/fail/create_into_a_bare_vmid.rs:4:43
+  |
+4 |     let _ = GuestEffect::Create { target: Vmid::new(844), artifact: todo!(), spec: todo!(), fresh: todo!() };
+  |                                           ^^^^^^^^^^^^^^ expected `Vacant`, found `Vmid`
+
+warning: unreachable expression
+ --> tests/proofs/fail/create_into_a_bare_vmid.rs:4:84
+  |
+4 |     let _ = GuestEffect::Create { target: Vmid::new(844), artifact: todo!(), spec: todo!(), fresh: todo!() };
+  |                                                                     -------        ^^^^^^^ unreachable expression
+  |                                                                     |
+  |                                                                     any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

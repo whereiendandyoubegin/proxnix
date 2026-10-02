@@ -1,0 +1,20 @@
+{
+  "ostype": "l26",
+  "vmgenid": "603a3db2-b24b-496c-bcd6-ce7846930777",
+  "meta": "creation-qemu=9.2.0,ctime=1746364291",
+  "agent": "enabled=1",
+  "smbios1": "uuid=a6f84978-22ad-4eb8-b912-a5cebe4ac5cb",
+  "name": "k3s-warm",
+  "scsihw": "virtio-scsi-single",
+  "memory": "1200",
+  "net0": "virtio=BC:24:11:4D:0C:5F,bridge=vmbr0,firewall=1",
+  "template": 1,
+  "digest": "6a2d3692a1de06759ef970be3089d5094014c419",
+  "cpu": "x86-64-v2-AES",
+  "scsi0": "ZFS:base-103-disk-0,iothread=1,size=60G",
+  "boot": "order=scsi0;ide2;net0",
+  "numa": 0,
+  "cores": 4,
+  "sockets": 1,
+  "ide2": "local:iso/ubuntu-25.04-live-server-amd64.iso,media=cdrom,size=1974366K"
+}

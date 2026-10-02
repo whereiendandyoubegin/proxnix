@@ -8,13 +8,7 @@ use proxnix_core::SlotId;
 use tracing::{info, warn};
 
 use crate::context::NixHash;
-use crate::types::{AppError, Result};
-
-const BASE_SNAPSHOT: &str = "base";
-const PRIVILEGED_SUFFIX: &str = "-privileged";
-const NIX_HASH_LEN: usize = 32;
-const UNPRIVILEGED_UID_MAP: IdMap = IdMap { kind: IdKind::User, host_base: 100000, count: 65536 };
-const UNPRIVILEGED_GID_MAP: IdMap = IdMap { kind: IdKind::Group, host_base: 100000, count: 65536 };
+use crate::types::{AppError, IdRange, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -43,10 +37,7 @@ impl TryFrom<String> for Dataset {
             && !s.contains("//")
             && !s.contains('@')
             && !s.contains(char::is_whitespace);
-        match valid {
-            true => Ok(Dataset(s)),
-            false => Err(AppError::InvalidZfsName(s)),
-        }
+        if valid { Ok(Dataset(s)) } else { Err(AppError::InvalidZfsName(s)) }
     }
 }
 
@@ -82,10 +73,7 @@ impl StorageId {
 impl TryFrom<String> for StorageId {
     type Error = AppError;
     fn try_from(s: String) -> Result<Self> {
-        match s.is_empty() || s.contains(':') || s.contains(char::is_whitespace) {
-            true => Err(AppError::InvalidZfsName(s)),
-            false => Ok(StorageId(s)),
-        }
+        if s.is_empty() || s.contains(':') || s.contains(char::is_whitespace) { Err(AppError::InvalidZfsName(s)) } else { Ok(StorageId(s)) }
     }
 }
 
@@ -108,20 +96,34 @@ pub struct ZfsImages {
     pub images: Dataset,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotTag {
+    Base,
+}
+
+impl fmt::Display for SnapshotTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SnapshotTag::Base => "base",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     dataset: Dataset,
+    tag: SnapshotTag,
 }
 
 impl Snapshot {
     fn base(dataset: &Dataset) -> Snapshot {
-        Snapshot { dataset: dataset.clone() }
+        Snapshot { dataset: dataset.clone(), tag: SnapshotTag::Base }
     }
 }
 
 impl fmt::Display for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}", self.dataset, BASE_SNAPSHOT)
+        write!(f, "{}@{}", self.dataset, self.tag)
     }
 }
 
@@ -140,8 +142,7 @@ impl TryFrom<&str> for Mountpoint {
         match s.trim() {
             path if path.starts_with('/') => Ok(Mountpoint(PathBuf::from(path))),
             other => Err(AppError::ZfsError(format!(
-                "dataset has no usable mountpoint ({}); give the images dataset a real mountpoint",
-                other
+                "dataset has no usable mountpoint ({other}); give the images dataset a real mountpoint"
             ))),
         }
     }
@@ -155,16 +156,13 @@ pub enum Ownership {
 
 impl Ownership {
     pub fn of(privileged: bool) -> Ownership {
-        match privileged {
-            true => Ownership::Privileged,
-            false => Ownership::Unprivileged,
-        }
+        if privileged { Ownership::Privileged } else { Ownership::Unprivileged }
     }
 
     fn suffix(self) -> &'static str {
         match self {
             Ownership::Unprivileged => "",
-            Ownership::Privileged => PRIVILEGED_SUFFIX,
+            Ownership::Privileged => "-privileged",
         }
     }
 }
@@ -180,6 +178,12 @@ struct IdMap {
     kind: IdKind,
     host_base: u32,
     count: u32,
+}
+
+impl IdMap {
+    fn of(kind: IdKind, range: IdRange) -> IdMap {
+        IdMap { kind, host_base: range.host_base, count: range.count }
+    }
 }
 
 impl fmt::Display for IdMap {
@@ -207,14 +211,11 @@ impl ImageKey {
 impl TryFrom<&str> for ImageKey {
     type Error = AppError;
     fn try_from(s: &str) -> Result<Self> {
-        let (hash, ownership) = match s.strip_suffix(PRIVILEGED_SUFFIX) {
+        let (hash, ownership) = match s.strip_suffix(Ownership::Privileged.suffix()) {
             Some(hash) => (hash, Ownership::Privileged),
             None => (s, Ownership::Unprivileged),
         };
-        match hash.len() == NIX_HASH_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) {
-            true => Ok(ImageKey { hash: NixHash::try_from(hash)?, ownership }),
-            false => Err(AppError::InvalidZfsName(s.to_string())),
-        }
+        if hash.len() == NixHash::STORE_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) { Ok(ImageKey { hash: NixHash::try_from(hash)?, ownership }) } else { Err(AppError::InvalidZfsName(s.to_string())) }
     }
 }
 
@@ -244,7 +245,7 @@ pub struct VolumeName(String);
 
 impl VolumeName {
     fn rootfs(target: SlotId) -> VolumeName {
-        VolumeName(format!("subvol-{}-disk-0", target.inner()))
+        VolumeName(format!("subvol-{}-disk-0", target.inner().get()))
     }
 }
 
@@ -259,6 +260,7 @@ pub struct RootfsVolume {
     storage: StorageId,
     volume: VolumeName,
     size: DiskSize,
+    owner: proxnix_core::Vmid,
 }
 
 impl RootfsVolume {
@@ -267,7 +269,52 @@ impl RootfsVolume {
             storage,
             volume: VolumeName::rootfs(target),
             size,
+            owner: target.inner(),
         }
+    }
+
+    fn volume_id(&self) -> String {
+        format!("{}:{}", self.storage, self.volume)
+    }
+
+    fn alloc_args(&self) -> Vec<String> {
+        vec![
+            String::from("alloc"),
+            self.storage.to_string(),
+            self.owner.get().to_string(),
+            self.volume.to_string(),
+            self.size.to_string(),
+            String::from("--format"),
+            String::from("subvol"),
+        ]
+    }
+
+    pub fn allocate(&self) -> Result<AllocatedRootfs> {
+        run(Command::new("pvesm").args(self.alloc_args()), "pvesm alloc")?;
+        let released = |error: AppError| {
+            if let Err(cleanup) = run(Command::new("pvesm").args(["free", self.volume_id().as_str()]), "pvesm free") {
+                warn!("could not free {} after {error}: {cleanup}", self.volume_id());
+            }
+            error
+        };
+        let path = run(Command::new("pvesm").args(["path", self.volume_id().as_str()]), "pvesm path").map_err(released)?;
+        Ok(AllocatedRootfs { volume: self.clone(), path: PathBuf::from(path.trim()) })
+    }
+}
+
+#[derive(Debug)]
+pub struct AllocatedRootfs {
+    volume: RootfsVolume,
+    path: PathBuf,
+}
+
+impl AllocatedRootfs {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn release(self) -> Result<()> {
+        run(Command::new("pvesm").args(["free", self.volume.volume_id().as_str()]), "pvesm free").map(|_| ())
     }
 }
 
@@ -333,9 +380,9 @@ impl BaseImage<Absent> {
 }
 
 impl BaseImage<Empty> {
-    fn unpack(self, tarball: &Tarball) -> Result<BaseImage<Unpacked>> {
+    fn unpack(self, tarball: &Tarball, idmap: IdRange) -> Result<BaseImage<Unpacked>> {
         info!("unpacking {} into {}", tarball.path().display(), self.dataset);
-        let unpacked = mountpoint(&self.dataset).and_then(|into| extract(tarball, &into, self.ownership));
+        let unpacked = mountpoint(&self.dataset).and_then(|into| extract(tarball, &into, self.ownership, idmap));
         match unpacked {
             Ok(()) => Ok(self.into_state()),
             Err(e) => {
@@ -356,26 +403,20 @@ impl BaseImage<Unpacked> {
 }
 
 impl BaseImage<Sealed> {
-    pub fn ensure(zfs: &ZfsImages, key: &ImageKey, tarball: &Tarball) -> Result<BaseImage<Sealed>> {
+    pub fn ensure(zfs: &ZfsImages, key: &ImageKey, tarball: &Tarball, idmap: IdRange) -> Result<BaseImage<Sealed>> {
         match BaseImage::locate(zfs, key)? {
             Located::Sealed(image) => Ok(image),
-            Located::Absent(image) => image.create()?.unpack(tarball)?.seal(),
+            Located::Absent(image) => image.create()?.unpack(tarball, idmap)?.seal(),
         }
     }
 
-    pub fn clone_rootfs(&self, zfs: &ZfsImages, target: SlotId, size: DiskSize) -> Result<RootfsClone> {
-        let volume = RootfsVolume::for_slot(zfs.storage.clone(), target, size);
+    pub fn clone_rootfs(&self, zfs: &ZfsImages, volume: &RootfsVolume) -> Result<RootfsClone> {
         let dataset = zfs.pool.child(&volume.volume);
-        match exists(dataset.as_str())? {
-            true => Err(AppError::ZfsError(format!(
-                "{} already exists; destroy the leftover volume before provisioning {}",
-                dataset,
-                target.inner()
-            ))),
-            false => {
-                zfs_clone(&Snapshot::base(&self.dataset), &dataset, size)?;
-                Ok(RootfsClone { dataset, volume })
-            }
+        if exists(dataset.as_str())? { Err(AppError::ZfsError(format!(
+            "{dataset} already exists; destroy the leftover volume before provisioning into it"
+        ))) } else {
+            zfs_clone(&Snapshot::base(&self.dataset), &dataset, volume.size)?;
+            Ok(RootfsClone { dataset })
         }
     }
 }
@@ -383,14 +424,9 @@ impl BaseImage<Sealed> {
 #[derive(Debug)]
 pub struct RootfsClone {
     dataset: Dataset,
-    volume: RootfsVolume,
 }
 
 impl RootfsClone {
-    pub fn volume(&self) -> &RootfsVolume {
-        &self.volume
-    }
-
     pub fn discard(self) -> Result<()> {
         zfs_cmd(&["destroy", self.dataset.as_str()]).map(|_| ())
     }
@@ -404,7 +440,7 @@ impl Tarball {
         let dir = Path::new(result_path).join("tarball");
         std::fs::read_dir(&dir)
             .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", dir.display(), e)))?
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.path())
             .find(|p| p.extension().is_some_and(|ext| ext == "xz"))
             .map(Tarball)
@@ -420,20 +456,17 @@ impl Tarball {
 pub struct ReapedImages(pub usize);
 
 pub fn reap_images(zfs: &ZfsImages, keep: &HashSet<NixHash>) -> Result<ReapedImages> {
-    match exists(zfs.images.as_str())? {
-        false => Ok(ReapedImages::default()),
-        true => Ok(image_datasets(zfs)?
-            .into_iter()
-            .filter(|(key, _)| !keep.contains(&key.hash))
-            .fold(ReapedImages::default(), |acc, (_, dataset)| match reap_image(&dataset) {
-                Ok(true) => ReapedImages(acc.0 + 1),
-                Ok(false) => acc,
-                Err(e) => {
-                    warn!("could not reap base image {}: {}", dataset, e);
-                    acc
-                }
-            })),
-    }
+    if exists(zfs.images.as_str())? { Ok(image_datasets(zfs)?
+    .into_iter()
+    .filter(|(key, _)| !keep.contains(&key.hash))
+    .fold(ReapedImages::default(), |acc, (_, dataset)| match reap_image(&dataset) {
+        Ok(true) => ReapedImages(acc.0 + 1),
+        Ok(false) => acc,
+        Err(e) => {
+            warn!("could not reap base image {}: {}", dataset, e);
+            acc
+        }
+    })) } else { Ok(ReapedImages::default()) }
 }
 
 fn image_datasets(zfs: &ZfsImages) -> Result<Vec<(ImageKey, Dataset)>> {
@@ -447,12 +480,9 @@ fn image_datasets(zfs: &ZfsImages) -> Result<Vec<(ImageKey, Dataset)>> {
 
 fn reap_image(dataset: &Dataset) -> Result<bool> {
     let clones = zfs_cmd(&["get", "-H", "-o", "value", "clones", &Snapshot::base(dataset).to_string()])?;
-    match has_clones(&clones) {
-        true => Ok(false),
-        false => {
-            info!("reaping base image {}", dataset);
-            destroy_recursive(dataset).map(|_| true)
-        }
+    if has_clones(&clones) { Ok(false) } else {
+        info!("reaping base image {}", dataset);
+        destroy_recursive(dataset).map(|()| true)
     }
 }
 
@@ -464,7 +494,8 @@ fn mountpoint(dataset: &Dataset) -> Result<Mountpoint> {
     Mountpoint::try_from(zfs_cmd(&["get", "-H", "-o", "value", "mountpoint", dataset.as_str()])?.as_str())
 }
 
-fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership) -> Result<()> {
+fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership, idmap: IdRange) -> Result<()> {
+    let (uid_map, gid_map) = (IdMap::of(IdKind::User, idmap), IdMap::of(IdKind::Group, idmap));
     let tar = [
         "tar",
         "-x",
@@ -483,14 +514,14 @@ fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership) -> Result
         Ownership::Unprivileged => {
             std::os::unix::fs::chown(
                 into.path(),
-                Some(UNPRIVILEGED_UID_MAP.host_base),
-                Some(UNPRIVILEGED_GID_MAP.host_base),
+                Some(uid_map.host_base),
+                Some(gid_map.host_base),
             )?;
             let mut cmd = Command::new("lxc-usernsexec");
             cmd.arg("-m")
-                .arg(UNPRIVILEGED_UID_MAP.to_string())
+                .arg(uid_map.to_string())
                 .arg("-m")
-                .arg(UNPRIVILEGED_GID_MAP.to_string())
+                .arg(gid_map.to_string())
                 .arg("--")
                 .args(tar);
             cmd
@@ -504,7 +535,7 @@ fn zfs_clone(origin: &Snapshot, dataset: &Dataset, size: DiskSize) -> Result<()>
     zfs_cmd(&[
         "clone",
         "-o",
-        &format!("refquota={}", size),
+        &format!("refquota={size}"),
         "-o",
         "acltype=posixacl",
         "-o",
@@ -527,26 +558,48 @@ fn exists(name: &str) -> Result<bool> {
         .success())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Presence {
+    Created,
+    Existed,
+}
+
+pub(crate) fn ensure_dataset(name: &str) -> Result<(PathBuf, Presence)> {
+    let presence = if exists(name)? {
+        Presence::Existed
+    } else {
+        zfs_cmd(&["create", "-o", "acltype=posixacl", "-o", "xattr=sa", "-o", "atime=off", name])?;
+        Presence::Created
+    };
+    Ok((PathBuf::from(zfs_cmd(&["get", "-H", "-o", "value", "mountpoint", name])?.trim()), presence))
+}
+
 fn zfs_cmd(args: &[&str]) -> Result<String> {
     run(Command::new("zfs").args(args), &format!("zfs {}", args.first().copied().unwrap_or("")))
 }
 
 fn run(cmd: &mut Command, what: &str) -> Result<String> {
     let output = cmd.output()?;
-    match output.status.success() {
-        true => Ok(String::from_utf8(output.stdout)?),
-        false => Err(AppError::ZfsError(format!(
-            "{} failed (exit: {:?}): {}",
-            what,
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))),
-    }
+    if output.status.success() { Ok(String::from_utf8(output.stdout)?) } else { Err(AppError::ZfsError(format!(
+        "{} failed (exit: {:?}): {}",
+        what,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_rootfs_is_allocated_through_proxmox_under_the_slot_it_belongs_to() {
+        let volume = RootfsVolume::for_slot(StorageId::try_from(String::from("ZFS")).unwrap(), SlotId::Blue(proxnix_core::Vmid::new(830)), DiskSize::gib(10));
+        assert_eq!(volume.alloc_args().join(" "), "alloc ZFS 830 subvol-830-disk-0 10G --format subvol");
+        assert_eq!(volume.volume_id(), "ZFS:subvol-830-disk-0");
+        assert_eq!(volume.to_string(), "ZFS:subvol-830-disk-0,size=10G");
+    }
+    use proxnix_core::Vmid;
 
     const HASH: &str = "0lmgpzmhq0d1yrpnl7fxpgnkqkgnxdq7";
 
@@ -610,7 +663,7 @@ mod tests {
 
     #[test]
     fn a_rootfs_volume_renders_as_a_proxmox_volume() {
-        let volume = RootfsVolume::for_slot(images().storage, SlotId::Blue(842), DiskSize::gib(10));
+        let volume = RootfsVolume::for_slot(images().storage, SlotId::Blue(Vmid::new(842)), DiskSize::gib(10));
         assert_eq!(volume.to_string(), "ZFS:subvol-842-disk-0,size=10G");
     }
 
@@ -627,8 +680,9 @@ mod tests {
 
     #[test]
     fn id_maps_render_for_lxc_usernsexec() {
-        assert_eq!(UNPRIVILEGED_UID_MAP.to_string(), "u:0:100000:65536");
-        assert_eq!(UNPRIVILEGED_GID_MAP.to_string(), "g:0:100000:65536");
+        let range = IdRange { host_base: 100_000, count: 65_536 };
+        assert_eq!(IdMap::of(IdKind::User, range).to_string(), "u:0:100000:65536");
+        assert_eq!(IdMap::of(IdKind::Group, range).to_string(), "g:0:100000:65536");
     }
 
     #[test]

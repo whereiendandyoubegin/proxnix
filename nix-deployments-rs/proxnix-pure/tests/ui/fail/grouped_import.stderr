@@ -1,0 +1,13 @@
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/grouped_import.rs:4:34
+  |
+4 | use std::{collections::BTreeMap, fs};
+  |                                  ^^
+
+warning: unused imports: `collections::BTreeMap` and `fs`
+ --> tests/ui/fail/grouped_import.rs:4:11
+  |
+4 | use std::{collections::BTreeMap, fs};
+  |           ^^^^^^^^^^^^^^^^^^^^^  ^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

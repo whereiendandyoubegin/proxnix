@@ -1,0 +1,11 @@
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/command_alias.rs:5:14
+  |
+5 |     use std::process::Command as Run;
+  |              ^^^^^^^
+
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/command_alias.rs:5:23
+  |
+5 |     use std::process::Command as Run;
+  |                       ^^^^^^^

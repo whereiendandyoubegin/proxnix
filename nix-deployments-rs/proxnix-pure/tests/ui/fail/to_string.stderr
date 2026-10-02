@@ -1,0 +1,5 @@
+error: pure_only: rendering to text is not allowed in pure code
+ --> tests/ui/fail/to_string.rs:5:7
+  |
+5 |     n.to_string().len()
+  |       ^^^^^^^^^

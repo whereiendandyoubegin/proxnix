@@ -8,7 +8,6 @@ use tracing::{error, info, warn};
 
 use crate::types::{AppError, Result};
 
-const PROBE_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceBinding {
@@ -40,10 +39,7 @@ impl TryFrom<&str> for MacAddress {
             && octets
                 .iter()
                 .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit()));
-        match well_formed {
-            true => Ok(MacAddress(candidate.to_ascii_lowercase())),
-            false => Err(AppError::MacParseError(candidate.to_string())),
-        }
+        if well_formed { Ok(MacAddress(candidate.to_ascii_lowercase())) } else { Err(AppError::MacParseError(candidate.to_string())) }
     }
 }
 
@@ -62,7 +58,7 @@ pub enum Responder {
 impl fmt::Display for Responder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Responder::Mac(mac) => write!(f, "{}", mac),
+            Responder::Mac(mac) => write!(f, "{mac}"),
             Responder::Unidentified => write!(f, "an unidentified host"),
         }
     }
@@ -76,8 +72,8 @@ pub enum Occupancy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prober {
-    Arp,
-    Neighbour,
+    Arp { wait: Duration },
+    Neighbour { wait: Duration },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +90,7 @@ impl TryFrom<ExitStatus> for ArpProbe {
             Some(0) => Ok(ArpProbe::NoReply),
             Some(1) => Ok(ArpProbe::Replied),
             Some(code) => Err(AppError::CmdError(format!(
-                "arping could not probe the address (exit: {})",
-                code
+                "arping could not probe the address (exit: {code})"
             ))),
             None => Err(AppError::CmdError(
                 "arping was killed by a signal before it could probe the address".to_string(),
@@ -187,7 +182,7 @@ pub fn parse_neighbour(stdout: &str) -> Occupancy {
     match stdout.lines().find(|l| l.contains(" lladdr ")) {
         None => Occupancy::Free,
         Some(line) => match line.split_whitespace().last() {
-            Some("FAILED") | Some("INCOMPLETE") => Occupancy::Free,
+            Some("FAILED" | "INCOMPLETE") => Occupancy::Free,
             _ => Occupancy::Occupied { by: lladdr(line) },
         },
     }
@@ -210,10 +205,7 @@ pub fn check_uniqueness(bindings: &[ServiceBinding]) -> Uniqueness {
         .into_iter()
         .collect();
 
-    match duplicates.is_empty() {
-        true => Uniqueness::Unique,
-        false => Uniqueness::Clashing { duplicates },
-    }
+    if duplicates.is_empty() { Uniqueness::Unique } else { Uniqueness::Clashing { duplicates } }
 }
 
 pub fn by_bridge(bindings: &[ServiceBinding]) -> Vec<BridgeBindings> {
@@ -244,36 +236,33 @@ fn bridge_addresses(bridge: &str) -> Result<Vec<BridgeAddress>> {
         .arg("dev")
         .arg(bridge)
         .output()?;
-    match output.status.success() {
-        false => Err(AppError::CmdError(format!(
-            "ip addr show dev {} failed (exit: {:?}): {}",
-            bridge,
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ))),
-        true => Ok(parse_bridge_addresses(&String::from_utf8(output.stdout)?)),
-    }
+    if output.status.success() { Ok(parse_bridge_addresses(&String::from_utf8(output.stdout)?)) } else { Err(AppError::CmdError(format!(
+        "ip addr show dev {} failed (exit: {:?}): {}",
+        bridge,
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    ))) }
 }
 
-pub fn choose_prober() -> Prober {
+pub fn choose_prober(wait: Duration) -> Prober {
     match Command::new("arping").arg("-V").output() {
-        Ok(output) if output.status.success() => Prober::Arp,
+        Ok(output) if output.status.success() => Prober::Arp { wait },
         _ => {
             warn!(
                 "arping is not available, falling back to the neighbour table to detect address conflicts; install iputils-arping for a reliable probe"
             );
-            Prober::Neighbour
+            Prober::Neighbour { wait }
         }
     }
 }
 
-fn arp_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
+fn arp_probe(bridge: &str, address: Ipv4Addr, wait: Duration) -> Result<Occupancy> {
     let output = Command::new("arping")
         .arg("-D")
         .arg("-c")
         .arg("1")
         .arg("-w")
-        .arg(PROBE_WAIT.as_secs().to_string())
+        .arg(wait.as_secs().to_string())
         .arg("-I")
         .arg(bridge)
         .arg(address.to_string())
@@ -284,12 +273,12 @@ fn arp_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
     ))
 }
 
-fn neighbour_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
+fn neighbour_probe(bridge: &str, address: Ipv4Addr, wait: Duration) -> Result<Occupancy> {
     Command::new("ping")
         .arg("-c")
         .arg("1")
         .arg("-W")
-        .arg(PROBE_WAIT.as_secs().to_string())
+        .arg(wait.as_secs().to_string())
         .arg("-I")
         .arg(bridge)
         .arg(address.to_string())
@@ -307,8 +296,8 @@ fn neighbour_probe(bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
 
 fn probe(prober: Prober, bridge: &str, address: Ipv4Addr) -> Result<Occupancy> {
     match prober {
-        Prober::Arp => arp_probe(bridge, address),
-        Prober::Neighbour => neighbour_probe(bridge, address),
+        Prober::Arp { wait } => arp_probe(bridge, address, wait),
+        Prober::Neighbour { wait } => neighbour_probe(bridge, address, wait),
     }
 }
 
@@ -316,26 +305,20 @@ fn add_address(bridge: &str, address: Ipv4Addr, prefix_len: u8) -> Result<()> {
     let output = Command::new("ip")
         .arg("addr")
         .arg("add")
-        .arg(format!("{}/{}", address, prefix_len))
+        .arg(format!("{address}/{prefix_len}"))
         .arg("dev")
         .arg(bridge)
         .output()?;
-    match output.status.success() {
-        true => Ok(()),
-        false => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            match stderr.contains("File exists") {
-                true => Ok(()),
-                false => Err(AppError::CmdError(format!(
-                    "ip addr add {}/{} dev {} failed (exit: {:?}): {}",
-                    address,
-                    prefix_len,
-                    bridge,
-                    output.status.code(),
-                    stderr
-                ))),
-            }
-        }
+    if output.status.success() { Ok(()) } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("File exists") { Ok(()) } else { Err(AppError::CmdError(format!(
+            "ip addr add {}/{} dev {} failed (exit: {:?}): {}",
+            address,
+            prefix_len,
+            bridge,
+            output.status.code(),
+            stderr
+        ))) }
     }
 }
 

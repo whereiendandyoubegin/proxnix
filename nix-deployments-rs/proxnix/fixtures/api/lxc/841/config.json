@@ -1,0 +1,16 @@
+{
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:A8:A9:0B,type=veth",
+  "arch": "amd64",
+  "unprivileged": 1,
+  "memory": 32768,
+  "mp1": "/var/lib/proxnix/logs/flake-updater,mp=/var/log/journal",
+  "cores": 8,
+  "protection": 0,
+  "mp0": "/var/lib/proxnix/updater,mp=/var/lib/updater",
+  "features": "nesting=1",
+  "hostname": "flake-updater",
+  "ostype": "unmanaged",
+  "digest": "104723c182c53192bde6f7fb9b96969000f68238",
+  "rootfs": "ZFS:subvol-841-disk-0,size=100G",
+  "tags": "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.164;nix-bhfkryrszljibdzbfzd75in5ynzxxyzj;proxnix;slot-blue"
+}

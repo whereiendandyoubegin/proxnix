@@ -1,0 +1,62 @@
+[
+  {
+    "starttime": 1790529657,
+    "status": "OK",
+    "pid": 961310,
+    "user": "root@pam",
+    "upid": "UPID:pve01:000EAB1E:5CAA17E1:6AB95079:vzdestroy:946:root@pam:",
+    "id": "946",
+    "type": "vzdestroy",
+    "node": "pve01",
+    "endtime": 1790529683,
+    "pstart": 1554651105
+  },
+  {
+    "node": "pve01",
+    "endtime": 1790529656,
+    "pstart": 1554650720,
+    "pid": 961115,
+    "starttime": 1790529654,
+    "status": "OK",
+    "user": "root@pam",
+    "id": "946",
+    "type": "vzstop",
+    "upid": "UPID:pve01:000EAA5B:5CAA1660:6AB95076:vzstop:946:root@pam:"
+  },
+  {
+    "id": "830",
+    "type": "vzdestroy",
+    "upid": "UPID:pve01:000EA7DB:5CAA0DF7:6AB95060:vzdestroy:830:root@pam:",
+    "user": "root@pam",
+    "pid": 960475,
+    "starttime": 1790529632,
+    "status": "OK",
+    "pstart": 1554648567,
+    "endtime": 1790529636,
+    "node": "pve01"
+  },
+  {
+    "node": "pve01",
+    "endtime": 1790529631,
+    "pstart": 1554648201,
+    "starttime": 1790529628,
+    "status": "OK",
+    "pid": 960363,
+    "user": "root@pam",
+    "upid": "UPID:pve01:000EA76B:5CAA0C89:6AB9505C:vzstop:830:root@pam:",
+    "id": "830",
+    "type": "vzstop"
+  },
+  {
+    "endtime": 1790529622,
+    "pstart": 1554647422,
+    "node": "pve01",
+    "upid": "UPID:pve01:000EA4D3:5CAA097E:6AB95055:vzdestroy:945:root@pam:",
+    "id": "945",
+    "type": "vzdestroy",
+    "status": "OK",
+    "starttime": 1790529621,
+    "pid": 959699,
+    "user": "root@pam"
+  }
+]

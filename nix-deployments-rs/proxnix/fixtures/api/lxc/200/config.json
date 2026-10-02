@@ -1,0 +1,12 @@
+{
+  "arch": "amd64",
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:35:72:DE,type=veth",
+  "swap": 512,
+  "unprivileged": 1,
+  "memory": 512,
+  "cores": 1,
+  "hostname": "CT200",
+  "ostype": "unmanaged",
+  "digest": "53c0ca389d47f64c47f01fcda84d5215373fea55",
+  "rootfs": "local-lvm:vm-200-disk-0,size=8G"
+}

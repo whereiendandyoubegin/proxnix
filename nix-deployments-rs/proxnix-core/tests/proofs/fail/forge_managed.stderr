@@ -1,0 +1,17 @@
+warning: unreachable expression
+ --> tests/proofs/fail/forge_managed.rs:4:45
+  |
+4 |     let _ = Managed { guest: todo!(), tags: todo!() };
+  |                              -------        ^^^^^^^ unreachable expression
+  |                              |
+  |                              any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `guest` and `tags` of struct `proxnix_core::Managed` are private
+ --> tests/proofs/fail/forge_managed.rs:4:23
+  |
+4 |     let _ = Managed { guest: todo!(), tags: todo!() };
+  |                       ^^^^^           ^^^^ private field
+  |                       |
+  |                       private field

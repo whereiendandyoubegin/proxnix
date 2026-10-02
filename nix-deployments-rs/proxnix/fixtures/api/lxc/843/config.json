@@ -1,0 +1,17 @@
+{
+  "hostname": "monitoring",
+  "mp0": "/var/lib/proxnix/monitoring,mp=/var/lib/monitoring",
+  "features": "nesting=1",
+  "rootfs": "ZFS:subvol-843-disk-0,size=10G",
+  "digest": "a001008b0f86d3823659a2d7e1dbe71a32332616",
+  "ostype": "unmanaged",
+  "tags": "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.248;nix-b63l735c5hrv9ygckqlzck0jd7bqbn8l;proxnix;slot-blue",
+  "arch": "amd64",
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:16:6C:40,type=veth",
+  "memory": 2048,
+  "mp2": "/var/lib/proxnix/logs/monitoring,mp=/var/log/journal",
+  "unprivileged": 1,
+  "protection": 0,
+  "cores": 2,
+  "mp1": "/var/lib/proxnix/sops,mp=/var/lib/sops-key,ro=1"
+}

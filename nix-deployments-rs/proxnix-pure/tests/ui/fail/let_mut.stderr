@@ -1,0 +1,5 @@
+error: pure_only: `mut` is not allowed; return a new value instead
+ --> tests/ui/fail/let_mut.rs:5:9
+  |
+5 |     let mut sum = 0;
+  |         ^^^

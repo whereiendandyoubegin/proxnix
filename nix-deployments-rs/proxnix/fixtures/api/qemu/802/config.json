@@ -1,0 +1,15 @@
+{
+  "name": "k3s-wrk-01",
+  "smbios1": "uuid=55430c8c-924a-4689-8400-193dbdb01713",
+  "boot": "order=scsi0",
+  "serial0": "socket",
+  "agent": "1",
+  "scsi0": "local-lvm:vm-802-disk-0,size=4000M",
+  "meta": "creation-qemu=9.2.0,ctime=1772047292",
+  "digest": "51107eb91c1941a61fb6ec83bcefb923bf4dd871",
+  "vmgenid": "6a8a49ce-0395-42ae-8d97-0472de3bd6d3",
+  "net0": "virtio=BC:24:11:38:74:72,bridge=vmbr0",
+  "cores": 2,
+  "memory": "2048",
+  "scsihw": "virtio-scsi-pci"
+}

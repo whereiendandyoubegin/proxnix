@@ -1,0 +1,70 @@
+[
+  {
+    "hwaddr": "00:00:00:00:00:00",
+    "name": "lo",
+    "ip-addresses": [
+      {
+        "prefix": "8",
+        "ip-address": "127.0.0.1",
+        "ip-address-type": "inet"
+      },
+      {
+        "prefix": "128",
+        "ip-address": "::1",
+        "ip-address-type": "inet6"
+      }
+    ],
+    "inet": "127.0.0.1/8",
+    "hardware-address": "00:00:00:00:00:00",
+    "inet6": "::1/128"
+  },
+  {
+    "hwaddr": "bc:24:11:a2:fe:b8",
+    "name": "eth0",
+    "ip-addresses": [
+      {
+        "prefix": "24",
+        "ip-address-type": "inet",
+        "ip-address": "192.168.1.122"
+      },
+      {
+        "ip-address": "fdc0:f1b8:abdd::626",
+        "ip-address-type": "inet6",
+        "prefix": "128"
+      },
+      {
+        "prefix": "128",
+        "ip-address-type": "inet6",
+        "ip-address": "2a0e:cb01:90::626"
+      },
+      {
+        "ip-address-type": "inet6",
+        "ip-address": "fdc0:f1b8:abdd:0:82de:1f3d:d415:3aa",
+        "prefix": "64"
+      },
+      {
+        "prefix": "64",
+        "ip-address": "fdc0:f1b8:abdd:0:be24:11ff:fea2:feb8",
+        "ip-address-type": "inet6"
+      },
+      {
+        "prefix": "64",
+        "ip-address": "2a0e:cb01:90:0:8ce1:51b6:aece:4ce3",
+        "ip-address-type": "inet6"
+      },
+      {
+        "prefix": "64",
+        "ip-address": "2a0e:cb01:90:0:be24:11ff:fea2:feb8",
+        "ip-address-type": "inet6"
+      },
+      {
+        "prefix": "64",
+        "ip-address-type": "inet6",
+        "ip-address": "fe80::be24:11ff:fea2:feb8"
+      }
+    ],
+    "inet": "192.168.1.122/24",
+    "hardware-address": "bc:24:11:a2:fe:b8",
+    "inet6": "fe80::be24:11ff:fea2:feb8/64"
+  }
+]

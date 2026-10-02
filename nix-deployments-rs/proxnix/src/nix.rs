@@ -1,42 +1,21 @@
+use crate::child::{self, Exit};
 use crate::types::{AppError, Result};
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 use tracing::{info, warn};
-
-pub const BASE_REPO_PATH: &str = "/tmp/proxnix/repos";
-const NIX_BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
-const NIX_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const NIX_EVAL_TIMEOUT: Duration = Duration::from_secs(300);
-
-enum BuildOutcome {
-    Finished(ExitStatus),
-    TimedOut,
-}
-
-fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<BuildOutcome> {
-    let started = Instant::now();
-    loop {
-        match child.try_wait()? {
-            Some(status) => return Ok(BuildOutcome::Finished(status)),
-            None => match started.elapsed() >= timeout {
-                true => return Ok(BuildOutcome::TimedOut),
-                false => std::thread::sleep(NIX_POLL_INTERVAL),
-            },
-        }
-    }
-}
 
 fn walk_for_file(dir: &Path, filename: &str, results: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().map(|n| n != ".git").unwrap_or(true) {
+            if path.file_name().is_none_or(|n| n != ".git") {
                 walk_for_file(&path, filename, results)?;
             }
-        } else if path.file_name().map(|n| n == filename).unwrap_or(false) {
+        } else if path.file_name().is_some_and(|n| n == filename) {
             results.push(path);
         }
     }
@@ -48,25 +27,23 @@ pub fn find_in_repo(repo_path: &str, filename: &str) -> Result<String> {
     walk_for_file(Path::new(repo_path), filename, &mut results)?;
     match results.len() {
         0 => Err(AppError::CmdError(format!(
-            "'{}' not found in repo",
-            filename
+            "'{filename}' not found in repo"
         ))),
         1 => Ok(results.remove(0).to_string_lossy().to_string()),
         n => Err(AppError::CmdError(format!(
-            "Found {} copies of '{}' in repo, expected exactly 1",
-            n, filename
+            "Found {n} copies of '{filename}' in repo, expected exactly 1"
         ))),
     }
 }
 
 pub fn eval_appconfig(nixology_path: &str) -> Result<String> {
-    let installable = format!("{}#proxnixcfg", nixology_path);
+    let installable = format!("{nixology_path}#proxnixcfg");
     let nix_eval = Command::new("nix")
         .arg("eval")
         .arg(&installable)
         .arg("--json")
         .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {e}")))?;
     if !nix_eval.status.success() {
         let stderr = String::from_utf8_lossy(&nix_eval.stderr);
         return Err(AppError::CmdError(format!(
@@ -78,7 +55,7 @@ pub fn eval_appconfig(nixology_path: &str) -> Result<String> {
     Ok(String::from_utf8(nix_eval.stdout)?)
 }
 
-pub fn eval_config(repo_path: &str) -> Result<String> {
+pub fn eval_config(repo_path: &str, timeout: Duration) -> Result<String> {
     let flake_path = find_in_repo(repo_path, "flake.nix")?;
     let nix_dir = Path::new(&flake_path)
         .parent()
@@ -91,8 +68,9 @@ pub fn eval_config(repo_path: &str) -> Result<String> {
         .arg("--json")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
+        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {e}")))?;
 
     let drain = |stream: Option<std::process::ChildStdout>| {
         stream.map(|s| {
@@ -108,170 +86,142 @@ pub fn eval_config(repo_path: &str) -> Result<String> {
         std::thread::spawn(move || {
             BufReader::new(s)
                 .lines()
-                .map_while(|l| l.ok())
+                .map_while(std::result::Result::ok)
                 .filter(|l| !l.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("; ")
         })
     });
 
-    let outcome = wait_with_timeout(&mut child, NIX_EVAL_TIMEOUT)?;
+    let status = match child::wait(&mut child, timeout)? {
+        Exit::Finished(status) => status,
+        Exit::TimedOut => {
+            warn!("nix eval exceeded {}s, killing it", timeout.as_secs());
+            child::kill_group(&mut child);
+            return Err(AppError::NixError(format!("eval of .#proxnix timed out after {}s", timeout.as_secs())));
+        }
+    };
     let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
     let stderr = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
-
-    match outcome {
-        BuildOutcome::TimedOut => {
-            warn!(
-                "nix eval exceeded {}s, killing it",
-                NIX_EVAL_TIMEOUT.as_secs()
-            );
-            child.kill().ok();
-            child.wait().ok();
-            Err(AppError::NixError(format!(
-                "eval of .#proxnix timed out after {}s",
-                NIX_EVAL_TIMEOUT.as_secs()
-            )))
-        }
-        BuildOutcome::Finished(status) => match status.success() {
-            false => Err(AppError::NixError(format!(
-                "eval of .#proxnix failed (exit: {:?}): {}",
-                status.code(),
-                stderr
-            ))),
-            true => Ok(stdout),
-        },
+    if status.success() {
+        Ok(stdout)
+    } else {
+        Err(AppError::NixError(format!("eval of .#proxnix failed (exit: {:?}): {}", status.code(), stderr)))
     }
 }
 
-
-
-pub fn list_nix_configs(repo_path: &str) -> Result<Vec<String>> {
-    let flake_path = find_in_repo(repo_path, "flake.nix")?;
-    let nix_dir = Path::new(&flake_path)
-        .parent()
-        .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
-
-    let nix_eval = Command::new("nix")
-        .current_dir(nix_dir)
-        .arg("eval")
-        .arg(".#nixosConfigurations")
-        .arg("--apply")
-        .arg("builtins.attrNames")
-        .arg("--json")
-        .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix eval: {}", e)))?;
-    if !nix_eval.status.success() {
-        let stderr = String::from_utf8_lossy(&nix_eval.stderr);
-        return Err(AppError::CmdError(format!(
-            "Nix eval failed (exit: {:?}): {}",
-            nix_eval.status.code(),
-            stderr
-        )));
-    }
-    let stdout_bytes = nix_eval.stdout;
-    let output_string = String::from_utf8(stdout_bytes)?;
-    let parsed: Vec<String> = serde_json::from_str(&output_string)?;
-
-    Ok(parsed)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NixFault {
+    NoFlake(String),
+    Spawn(String),
+    TimedOut(Duration),
+    Exited { code: Option<i32>, stderr: String },
+    NoOutput,
 }
 
-pub fn nix_build(config_name: &str, build_attr: &str, repo_path: &str) -> Result<String> {
-    let flake_path = find_in_repo(repo_path, "flake.nix")?;
-    let nix_dir = Path::new(&flake_path)
-        .parent()
-        .ok_or_else(|| AppError::CmdError("flake.nix has no parent directory".to_string()))?;
+impl From<NixFault> for AppError {
+    fn from(fault: NixFault) -> Self {
+        AppError::NixError(format!("{fault:?}"))
+    }
+}
 
-    info!(
-        "Running nix build for config '{}' ({}) in {}",
-        config_name,
-        build_attr,
-        nix_dir.display()
-    );
-    let installable = format!(".#nixosConfigurations.{}.{}", config_name, build_attr);
-    let mut child = Command::new("nix")
-        .current_dir(nix_dir)
-        .arg("build")
-        .arg(&installable)
-        .arg("--no-link")
-        .stdout(Stdio::null())
+const STDERR_TAIL: usize = 20;
+
+fn flake_dir(repo_path: &str) -> std::result::Result<PathBuf, NixFault> {
+    let flake_path = find_in_repo(repo_path, "flake.nix").map_err(|e| NixFault::NoFlake(e.to_string()))?;
+    Path::new(&flake_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| NixFault::NoFlake(String::from("flake.nix has no parent directory")))
+}
+
+fn nix(dir: &Path, label: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, NixFault> {
+    run("nix", dir, label, args, timeout)
+}
+
+pub(crate) fn run(program: &str, dir: &Path, label: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, NixFault> {
+    let mut child = Command::new(program)
+        .current_dir(dir)
+        .args(args)
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix build: {}", e)))?;
-
-    let pump = child.stderr.take().map(|stderr| {
-        let label = config_name.to_string();
+        .map_err(|e| NixFault::Spawn(e.to_string()))?;
+    let stdout_pump = child.stdout.take().map(|out| {
         std::thread::spawn(move || {
-            BufReader::new(stderr).lines().for_each(|line| match line {
-                Ok(text) if !text.trim().is_empty() => info!("[nix {}] {}", label, text.trim()),
-                _ => {}
-            })
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut BufReader::new(out), &mut text).ok();
+            text
         })
     });
-
-    let outcome = wait_with_timeout(&mut child, NIX_BUILD_TIMEOUT)?;
-    if let Some(handle) = pump {
-        handle.join().ok();
-    }
-
-    match outcome {
-        BuildOutcome::TimedOut => {
-            warn!(
-                "nix build for '{}' exceeded {}s, killing it",
-                config_name,
-                NIX_BUILD_TIMEOUT.as_secs()
-            );
-            child.kill().ok();
-            child.wait().ok();
-            return Err(AppError::NixError(format!(
-                "build for '{}' timed out after {}s",
-                config_name,
-                NIX_BUILD_TIMEOUT.as_secs()
-            )));
+    let stderr_pump = child.stderr.take().map(|err| {
+        let label = label.to_string();
+        std::thread::spawn(move || {
+            let lines: Vec<String> = BufReader::new(err)
+                .lines()
+                .map_while(std::result::Result::ok)
+                .filter(|line| !line.trim().is_empty())
+                .inspect(|line| info!("[nix {}] {}", label, line.trim()))
+                .collect();
+            lines[lines.len().saturating_sub(STDERR_TAIL)..].to_vec()
+        })
+    });
+    let status = match child::wait(&mut child, timeout).map_err(|e| NixFault::Spawn(e.to_string()))? {
+        Exit::Finished(status) => status,
+        Exit::TimedOut => {
+            warn!("nix {} exceeded {}s, killing it", label, timeout.as_secs());
+            child::kill_group(&mut child);
+            return Err(NixFault::TimedOut(timeout));
         }
-        BuildOutcome::Finished(status) if !status.success() => {
-            return Err(AppError::NixError(format!(
-                "build for '{}' failed (exit: {:?})",
-                config_name,
-                status.code()
-            )));
-        }
-        BuildOutcome::Finished(_) => {}
-    }
+    };
+    let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr: Vec<String> = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
+    if status.success() { Ok(stdout) } else { Err(NixFault::Exited { code: status.code(), stderr: stderr.join("\n") }) }
+}
 
-    let path_output = Command::new("nix")
-        .current_dir(nix_dir)
-        .arg("path-info")
-        .arg(&installable)
-        .output()
-        .map_err(|e| AppError::CmdError(format!("Failed to run nix path-info: {}", e)))?;
-    if !path_output.status.success() {
-        let stderr = String::from_utf8_lossy(&path_output.stderr);
-        return Err(AppError::CmdError(format!(
-            "nix path-info failed for '{}' (exit: {:?}): {}",
-            config_name,
-            path_output.status.code(),
-            stderr
-        )));
-    }
-    let stdout = String::from_utf8(path_output.stdout)?;
-    let store_path = stdout.lines().find(|l| !l.trim().is_empty())
-        .ok_or_else(|| AppError::CmdError(format!("nix path-info produced no output for '{}'", config_name)))?
-        .trim()
-        .to_string();
+fn first_line(stdout: &str) -> std::result::Result<String, NixFault> {
+    stdout.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_string).ok_or(NixFault::NoOutput)
+}
+
+fn installable(config_name: &str, build_attr: &str) -> String {
+    format!(".#nixosConfigurations.{config_name}.{build_attr}")
+}
+
+pub fn realise(config_name: &str, build_attr: &str, repo_path: &str, impure: bool, timeout: Duration) -> std::result::Result<String, NixFault> {
+    let dir = flake_dir(repo_path)?;
+    let target = installable(config_name, build_attr);
+    let flags: &[&str] = if impure { &["--impure"] } else { &[] };
+    let build: Vec<&str> = ["build", target.as_str(), "--no-link"].into_iter().chain(flags.iter().copied()).collect();
+    nix(&dir, config_name, &build, timeout)?;
+    let path_info: Vec<&str> = ["path-info", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
+    let store_path = first_line(&nix(&dir, config_name, &path_info, timeout)?)?;
     info!("Nix build succeeded for '{}': {}", config_name, store_path);
-
     Ok(store_path)
 }
 
-// TODO I need to finish up some utils to initialise this dir on setup. I will probably do a utils module.
-// I probably wil want to init the user there as well rather than in this module
-pub fn configure_dirs(configs: Vec<String>, repo_path: &str) -> Result<()> {
-    let repo_base = std::path::Path::new(repo_path);
-    std::fs::create_dir_all(repo_base)?;
+pub fn out_path(config_name: &str, build_attr: &str, repo_path: &str, impure: bool, timeout: Duration) -> std::result::Result<String, NixFault> {
+    let dir = flake_dir(repo_path)?;
+    let target = format!("{}.outPath", installable(config_name, build_attr));
+    let flags: &[&str] = if impure { &["--impure"] } else { &[] };
+    let eval: Vec<&str> = ["eval", "--raw", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
+    first_line(&nix(&dir, config_name, &eval, timeout)?)
+}
 
-    for config in configs {
-        std::fs::create_dir_all(repo_base.join(config))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_hung_command_is_abandoned_at_its_timeout_even_when_a_child_holds_its_output() {
+        let script = std::env::temp_dir().join(format!("proxnix-hung-{}", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\necho working >&2\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let result = run(script.to_str().unwrap(), Path::new("/"), "hung", &[], Duration::from_secs(1));
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(result, Err(NixFault::TimedOut(Duration::from_secs(1))));
+        assert!(started.elapsed() < Duration::from_secs(10), "waited {:?} on a killed command", started.elapsed());
     }
-
-    Ok(())
 }

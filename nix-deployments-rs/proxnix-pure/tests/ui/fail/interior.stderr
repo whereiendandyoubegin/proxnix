@@ -1,0 +1,5 @@
+error: pure_only: interior mutability is not allowed
+ --> tests/ui/fail/interior.rs:5:16
+  |
+5 |     std::cell::RefCell::new(1).into_inner()
+  |                ^^^^^^^

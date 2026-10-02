@@ -1,0 +1,15 @@
+{
+  "name": "k3s-init",
+  "smbios1": "uuid=35b31f0b-43e8-493c-aa36-3a7658cd2228",
+  "boot": "order=scsi0",
+  "serial0": "socket",
+  "agent": "1",
+  "meta": "creation-qemu=9.2.0,ctime=1772047331",
+  "scsi0": "local-lvm:vm-800-disk-0,size=4000M",
+  "digest": "8143fc519d5b0f2976d3b711eeb2f3f9413847b0",
+  "vmgenid": "6cb20e51-f261-4ba8-8df9-f6a5cdde5143",
+  "net0": "virtio=BC:24:11:73:55:DA,bridge=vmbr0",
+  "cores": 2,
+  "memory": "2048",
+  "scsihw": "virtio-scsi-pci"
+}

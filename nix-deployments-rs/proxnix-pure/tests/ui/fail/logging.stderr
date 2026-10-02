@@ -1,0 +1,17 @@
+error: pure_only: logging and printing are effects; return a report instead
+ --> tests/ui/fail/logging.rs:5:5
+  |
+5 |     tracing::info!("hello");
+  |     ^^^^^^^
+
+error: pure_only: logging and printing are effects; return a report instead
+ --> tests/ui/fail/logging.rs:5:14
+  |
+5 |     tracing::info!("hello");
+  |              ^^^^
+
+error[E0433]: cannot find module or crate `tracing` in this scope
+ --> tests/ui/fail/logging.rs:5:5
+  |
+5 |     tracing::info!("hello");
+  |     ^^^^^^^ use of unresolved module or unlinked crate `tracing`

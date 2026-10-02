@@ -1,0 +1,5 @@
+error[E0451]: field `id` of struct `proxnix_core::Vacant` is private
+ --> tests/proofs/fail/forge_vacant.rs:4:22
+  |
+4 |     let _ = Vacant { id: Vmid::new(844) };
+  |                      ^^ private field

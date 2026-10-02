@@ -1,0 +1,5 @@
+error: pure_only: `unsafe` is not allowed
+ --> tests/ui/fail/unsafe_block.rs:5:5
+  |
+5 |     unsafe { *std::ptr::null::<u8>() }
+  |     ^^^^^^

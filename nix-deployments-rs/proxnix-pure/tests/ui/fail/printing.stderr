@@ -1,0 +1,5 @@
+error: pure_only: logging and printing are effects; return a report instead
+ --> tests/ui/fail/printing.rs:5:5
+  |
+5 |     println!("hello");
+  |     ^^^^^^^

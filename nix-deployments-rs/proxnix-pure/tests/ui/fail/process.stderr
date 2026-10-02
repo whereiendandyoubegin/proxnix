@@ -1,0 +1,17 @@
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/process.rs:4:20
+  |
+4 | fn spawn() -> std::process::Output {
+  |                    ^^^^^^^
+
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/process.rs:5:10
+  |
+5 |     std::process::Command::new("ls").output().unwrap()
+  |          ^^^^^^^
+
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/process.rs:5:19
+  |
+5 |     std::process::Command::new("ls").output().unwrap()
+  |                   ^^^^^^^

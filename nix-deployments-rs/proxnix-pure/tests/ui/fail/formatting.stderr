@@ -1,0 +1,5 @@
+error: pure_only: rendering to text is not allowed in pure code
+ --> tests/ui/fail/formatting.rs:5:5
+  |
+5 |     format!("{n}").len()
+  |     ^^^^^^

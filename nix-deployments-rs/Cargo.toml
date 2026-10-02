@@ -1,3 +1,3 @@
 [workspace]
-members = ["proxnix-core", "proxnix"]
+members = ["proxnix-pure", "proxnix-core", "proxnix"]
 resolver = "2"

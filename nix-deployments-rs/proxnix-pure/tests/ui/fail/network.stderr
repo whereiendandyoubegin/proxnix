@@ -1,0 +1,5 @@
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/network.rs:5:15
+  |
+5 |     std::net::TcpStream::connect("127.0.0.1:80").is_ok()
+  |               ^^^^^^^^^

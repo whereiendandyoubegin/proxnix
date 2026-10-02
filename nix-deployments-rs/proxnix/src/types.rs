@@ -1,8 +1,15 @@
-use proxnix_core::{Slot, SlotId, Workload};
+use proxmox_api::nodes::node::qemu::Scsihw;
+use proxmox_api::types::bounded_integer::BoundedIntegerError;
+use proxmox_api::types::bounded_string::BoundedStringError;
+use proxnix_core::Vmid;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::net::Ipv4Addr;
+use std::str::FromStr;
+use std::time::Duration;
 use std::{collections::HashMap, string::FromUtf8Error};
 
-use crate::context::{ImageType, NixHash};
-use crate::pipeline::WorkloadGroup;
+use crate::context::ImageType;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
@@ -43,8 +50,8 @@ pub enum AppError {
     AddrParseErr(#[from] std::net::AddrParseError),
     #[error("Port out of range: {0}")]
     PortRangeError(#[from] std::num::TryFromIntError),
-    #[error("Timed out waiting for an IP address on instance {0}")]
-    IpTimeoutError(u32),
+    #[error("Timed out waiting for an IP address on instance {}", .0.get())]
+    IpTimeoutError(Vmid),
     #[error("Health check failed for {0}")]
     HealthCheckError(std::net::SocketAddr),
     #[error("{0} is not a MAC address")]
@@ -57,6 +64,18 @@ pub enum AppError {
     },
     #[error("Service address {0} is declared by more than one workload")]
     DuplicateServiceAddress(std::net::Ipv4Addr),
+    #[error("unable to deserialize: {0}")]
+    DeserializationError(#[from] serde::de::value::Error),
+    #[error("Proxmox rejected an integer value: {0}")]
+    ProxmoxInteger(#[from] BoundedIntegerError),
+    #[error("Proxmox rejected a string value: {0}")]
+    ProxmoxString(#[from] BoundedStringError),
+    #[error("{0} is not a disk slot")]
+    InvalidDiskSlot(String),
+    #[error("Proxmox API request failed: {0}")]
+    ProxmoxApi(#[from] proxmox_api::ReqwestError),
+    #[error("Proxmox task failed: {0:?}")]
+    Api(crate::remote::ApiFault),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
@@ -64,8 +83,8 @@ pub type Result<T> = std::result::Result<T, AppError>;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct VMConfig {
     pub name: String,
-    pub blue_id: u32,
-    pub green_id: u32,
+    pub blue_id: Vmid,
+    pub green_id: Vmid,
     pub hostname: String,
     #[serde(default)]
     pub service_address: Option<std::net::Ipv4Addr>,
@@ -85,28 +104,19 @@ pub struct VMConfig {
     #[serde(default = "default_network_bridge")]
     pub network_bridge: String,
     #[serde(default = "default_scsi_hw")]
-    pub scsi_hw: String,
+    pub scsi_hw: Scsihw,
     #[serde(default = "default_disk_slot")]
-    pub disk_slot: String,
+    pub disk_slot: DiskSlot,
     pub impure: bool,
+    #[serde(default)]
+    pub cutover: Option<CutoverChoice>,
 }
 
-impl Workload for VMConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn memory_mb(&self) -> u32 {
-        self.memory_mb
-    }
-    fn cores(&self) -> u16 {
-        self.cores
-    }
-    fn id_for_slot(&self, s: Slot) -> SlotId {
-        match s {
-            Slot::Blue => SlotId::Blue(self.blue_id),
-            Slot::Green => SlotId::Green(self.green_id),
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutoverChoice {
+    Overlap,
+    StopStart,
 }
 
 // Defaults for VMConfig
@@ -114,12 +124,65 @@ fn default_network_bridge() -> String {
     "vmbr0".to_string()
 }
 
-fn default_scsi_hw() -> String {
-    "virtio-scsi-pci".to_string()
+fn default_scsi_hw() -> Scsihw {
+    Scsihw::VirtioScsiPci
 }
 
-fn default_disk_slot() -> String {
-    "scsi0".to_string()
+fn default_disk_slot() -> DiskSlot {
+    DiskSlot {
+        bus: DiskBus::Scsi,
+        index: 0,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskBus {
+    Scsi,
+    Virtio,
+    Sata,
+    Ide,
+}
+
+impl DiskBus {
+    const ALL: [DiskBus; 4] = [DiskBus::Scsi, DiskBus::Virtio, DiskBus::Sata, DiskBus::Ide];
+
+    fn prefix(self) -> &'static str {
+        match self {
+            DiskBus::Scsi => "scsi",
+            DiskBus::Virtio => "virtio",
+            DiskBus::Sata => "sata",
+            DiskBus::Ide => "ide",
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde_with::DeserializeFromStr, serde_with::SerializeDisplay,
+)]
+pub struct DiskSlot {
+    pub bus: DiskBus,
+    pub index: u32,
+}
+
+impl FromStr for DiskSlot {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        DiskBus::ALL
+            .into_iter()
+            .find_map(|bus| {
+                s.strip_prefix(bus.prefix())
+                    .and_then(|n| n.parse().ok())
+                    .map(|index| DiskSlot { bus, index })
+            })
+            .ok_or_else(|| AppError::InvalidDiskSlot(s.to_string()))
+    }
+}
+
+impl fmt::Display for DiskSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.bus.prefix(), self.index)
+    }
 }
 
 fn default_backend_port() -> u16 {
@@ -127,6 +190,7 @@ fn default_backend_port() -> u16 {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerConfig {
     pub name: String,
     pub hostname: String,
@@ -138,8 +202,8 @@ pub struct ContainerConfig {
     pub tcp_ports: Vec<u16>,
     pub dhcp_timeout_seconds: u64,
     pub health_check_timeout_seconds: u64,
-    pub blue_id: u32,
-    pub green_id: u32,
+    pub blue_id: Vmid,
+    pub green_id: Vmid,
     pub image_type: ImageType,
     pub cores: u16,
     pub memory_mb: u32,
@@ -149,23 +213,27 @@ pub struct ContainerConfig {
     #[serde(default)]
     pub privileged: bool,
     #[serde(default)]
-    pub bind_mounts: Vec<BindMount>,
+    pub state: Vec<String>,
+    #[serde(default)]
+    pub mounts: Vec<HostMount>,
+    #[serde(default)]
+    pub secrets: bool,
+    #[serde(default)]
+    pub store: StoreChoice,
     #[serde(default = "default_container_network_bridge")]
     pub network_bridge: String,
     pub impure: bool,
+    #[serde(default)]
+    pub cutover: Option<CutoverChoice>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MountMode {
+    #[default]
     ReadWrite,
     ReadOnly,
-}
-
-impl Default for MountMode {
-    fn default() -> Self {
-        MountMode::ReadWrite
-    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -176,22 +244,26 @@ pub struct BindMount {
     pub mode: MountMode,
 }
 
-impl Workload for ContainerConfig {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn memory_mb(&self) -> u32 {
-        self.memory_mb
-    }
-    fn cores(&self) -> u16 {
-        self.cores
-    }
-    fn id_for_slot(&self, s: Slot) -> SlotId {
-        match s {
-            Slot::Blue => SlotId::Blue(self.blue_id),
-            Slot::Green => SlotId::Green(self.green_id),
-        }
-    }
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HostMount {
+    pub host: String,
+    pub at: String,
+    #[serde(default)]
+    pub mode: MountMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreChoice {
+    #[default]
+    Image,
+    Shared,
+    Private,
+}
+
+fn default_secrets_dir() -> String {
+    String::from("/var/lib/proxnix/sops")
 }
 
 fn default_container_network_bridge() -> String {
@@ -199,136 +271,104 @@ fn default_container_network_bridge() -> String {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct QMList {
-    pub vm_id: u32,
-    pub name: String,
-    pub status: String,
-    pub mem_mb: u32,
-    pub bootdisk_gb: f64,
-    pub pid: u32,
-}
-
-fn default_slot() -> proxnix_core::Slot {
-    proxnix_core::Slot::Blue
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct DeployedVM {
-    pub vm_id: u32,
-    pub vm_name: String,
-    pub nix_hash: Option<NixHash>,
-    pub template_id: Option<u32>,
-    pub mem_mb: u32,
-    pub bootdisk_gb: f64,
-    pub status: String,
-    pub pid: u32,
-    pub cores: u16,
-    pub sockets: u8,
-    #[serde(default = "default_slot")]
-    pub active_slot: proxnix_core::Slot,
+pub struct AppConfig {
+    pub sozu: SozuConfig,
+    pub ssh_key_candidates: Vec<String>,
+    pub template_cache_path: String,
+    pub repo_cache: String,
+    pub server_address: std::net::SocketAddr,
+    pub backend_pool: Option<crate::context::BackendPool>,
+    pub local_repo: Option<String>,
+    pub zfs_images: Option<crate::zfs::ZfsImages>,
+    pub timings_ms: Timings,
+    pub unprivileged_idmap: IdRange,
+    #[serde(default = "default_secrets_dir")]
+    pub secrets_dir: String,
     #[serde(default)]
-    pub service_ip: Option<std::net::Ipv4Addr>,
+    pub store_sync: Option<crate::sync::StoreSyncConfig>,
+    pub guest_check: GuestCheck,
+    pub proxmox: crate::pve::PveConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct DeployedContainer {
-    pub ct_id: u32,
-    pub ct_name: String,
-    pub nix_hash: Option<NixHash>,
-    pub mem_mb: u32,
-    pub bootdisk_gb: f64,
-    pub status: String,
-    pub cores: u16,
-    pub privileged: bool,
-    pub bind_mounts: Vec<BindMount>,
-    #[serde(default = "default_slot")]
-    pub active_slot: proxnix_core::Slot,
-    #[serde(default)]
-    pub service_ip: Option<std::net::Ipv4Addr>,
+pub struct SozuConfig {
+    pub socket_path: String,
+    pub listen_ip: Ipv4Addr,
+    pub http_port: u16,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct QMConfig {
-    pub agent: String,
-    pub balloon: u8,
-    pub boot: String,
-    pub bootdisk: String,
-    pub cipassword: Option<String>,
-    pub ciuser: Option<String>,
-    pub cores: u8,
-    pub cpu: String,
-    pub cpuunits: u16,
-    pub disks: HashMap<String, String>,
-    pub ipconfigs: HashMap<String, String>,
-    pub memory: u32,
-    pub meta: String,
-    pub name: String,
-    pub networks: HashMap<String, String>,
-    pub numa: u8,
-    pub onboot: u8,
-    pub protection: u8,
-    pub serial: HashMap<String, String>,
-    pub sockets: u8,
-    pub sshkeys: Option<String>,
-    pub tags: Option<String>,
-    pub vga: String,
-    pub vmgenid: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct IdRange {
+    pub host_base: u32,
+    pub count: u32,
 }
 
-impl Default for QMConfig {
-    fn default() -> Self {
-        Self {
-            sockets: 1,
-            agent: Default::default(),
-            balloon: Default::default(),
-            boot: Default::default(),
-            bootdisk: Default::default(),
-            cipassword: Default::default(),
-            ciuser: Default::default(),
-            cores: Default::default(),
-            cpu: Default::default(),
-            cpuunits: Default::default(),
-            disks: Default::default(),
-            ipconfigs: Default::default(),
-            memory: Default::default(),
-            meta: Default::default(),
-            name: Default::default(),
-            networks: Default::default(),
-            numa: Default::default(),
-            onboot: Default::default(),
-            protection: Default::default(),
-            serial: Default::default(),
-            sshkeys: Default::default(),
-            tags: Default::default(),
-            vga: Default::default(),
-            vmgenid: Default::default(),
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct GuestCheck {
+    pub shell: String,
+    pub command: String,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Timing {
+    PeriodicReconcile,
+    WebhookLockWait,
+    NixBuild,
+    NixEval,
+    ProvisionStagger,
+    GuestCheckPoll,
+    GuestCheckRun,
+    ArpProbe,
+    SozuTcpIdle,
+    AddressPoll,
+    PortPoll,
+    TaskPoll,
+    TaskTimeout,
+}
+
+impl Timing {
+    pub const ALL: [Timing; 13] = [
+        Timing::PeriodicReconcile,
+        Timing::WebhookLockWait,
+        Timing::NixBuild,
+        Timing::NixEval,
+        Timing::ProvisionStagger,
+        Timing::GuestCheckPoll,
+        Timing::GuestCheckRun,
+        Timing::ArpProbe,
+        Timing::SozuTcpIdle,
+        Timing::AddressPoll,
+        Timing::PortPoll,
+        Timing::TaskPoll,
+        Timing::TaskTimeout,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "BTreeMap<Timing, u64>")]
+pub struct Timings(BTreeMap<Timing, u64>);
+
+impl TryFrom<BTreeMap<Timing, u64>> for Timings {
+    type Error = String;
+
+    fn try_from(millis: BTreeMap<Timing, u64>) -> std::result::Result<Self, String> {
+        match Timing::ALL
+            .iter()
+            .find(|timing| !millis.contains_key(timing))
+        {
+            Some(missing) => Err(format!("timings_ms has no value for {missing:?}")),
+            None => Ok(Timings(millis)),
         }
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct AppConfig {
-    #[serde(default = "default_sozu_socket_path")]
-    pub sozu_socket_path: String,
-    #[serde(default)]
-    pub ssh_key_candidates: Vec<String>,
-    #[serde(default = "default_template_cache_path")]
-    pub template_cache_path: String,
-    pub server_address: std::net::SocketAddr,
-    #[serde(default)]
-    pub backend_pool: Option<crate::context::BackendPool>,
-    #[serde(default)]
-    pub local_repo: Option<String>,
-    #[serde(default)]
-    pub zfs_images: Option<crate::zfs::ZfsImages>,
-}
-
-fn default_sozu_socket_path() -> String {
-    "/run/sozu/command.sock".to_string()
-}
-
-fn default_template_cache_path() -> String {
-    "/var/lib/vz/template/cache/".to_string()
+impl Timings {
+    pub fn get(&self, timing: Timing) -> Duration {
+        Duration::from_millis(self.0[&timing])
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -338,81 +378,8 @@ pub struct DesiredState {
     pub containers: HashMap<String, ContainerConfig>,
 }
 
-impl DesiredState {
-    pub fn into_workload_groups(self) -> Vec<WorkloadGroup> {
-        vec![
-            WorkloadGroup::Vms(self.vms.into_values().collect()),
-            WorkloadGroup::Containers(self.containers.into_values().collect()),
-        ]
-    }
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct DeployedState {
-    pub vms: HashMap<String, DeployedVM>,
-    pub containers: HashMap<String, DeployedContainer>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
-pub enum ContainerFieldChange {
-    Memory,
-    Cores,
-    Image,
-    Privileged,
-    BindMounts,
-    Disk,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
-pub enum FieldChange {
-    Memory,
-    Cores,
-    Sockets,
-    Disk,
-    Image,
-}
-
 #[derive(Debug)]
 pub struct ParsedWebhook {
     pub repository: String,
     pub hash: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum SkipReason {
-    Protected,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum OutcomeKind {
-    Created,
-    Rebuilt,
-    Updated,
-    Destroyed,
-    Skipped(SkipReason),
-    NoOp,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum RebuildStrategy {
-    Rebuild,
-    InPlace,
-    Protected,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct Outcome {
-    pub name: String,
-    pub kind: OutcomeKind,
-    pub error: Option<String>,
-}
-
-impl Outcome {
-    pub fn new(name: &str, kind: OutcomeKind, result: Result<()>) -> Self {
-        Self {
-            name: name.to_string(),
-            kind,
-            error: result.err().map(|e| e.to_string()),
-        }
-    }
 }

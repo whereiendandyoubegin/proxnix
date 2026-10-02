@@ -1,0 +1,16 @@
+{
+  "tags": "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;ip-192.168.1.206;nix-ljq18axhhh1viglz3v1q547wna77zv87;proxnix;slot-green",
+  "ostype": "unmanaged",
+  "digest": "3add1a2e08fcb5e086b21ca5293498118e96479f",
+  "rootfs": "ZFS:subvol-930-disk-0,size=10G",
+  "mp0": "/var/lib/proxnix/sops,mp=/var/lib/sops-key,ro=1",
+  "features": "nesting=1",
+  "hostname": "test-container",
+  "cores": 1,
+  "mp1": "/var/lib/proxnix/logs/test-container,mp=/var/log/journal",
+  "protection": 0,
+  "unprivileged": 1,
+  "memory": 512,
+  "net0": "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:B9:04:CB,type=veth",
+  "arch": "amd64"
+}

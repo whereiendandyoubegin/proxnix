@@ -1,0 +1,5 @@
+error: pure_only: strings are not allowed in signatures; take and return typed values
+ --> tests/ui/fail/string_return.rs:4:14
+  |
+4 | fn name() -> String {
+  |              ^^^^^^

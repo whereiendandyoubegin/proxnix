@@ -1,0 +1,5 @@
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/sleep.rs:5:10
+  |
+5 |     std::thread::sleep(std::time::Duration::from_secs(1));
+  |          ^^^^^^

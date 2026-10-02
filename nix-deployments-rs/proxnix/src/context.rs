@@ -5,11 +5,12 @@ use proxnix_core::Slot;
 use crate::types::{AppError, Result};
 use crate::zfs::ZfsImages;
 
-/// The hash segment extracted from a nix store path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NixHash(String);
 
 impl NixHash {
+    pub const STORE_LEN: usize = 32;
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -32,7 +33,6 @@ impl TryFrom<&str> for NixHash {
     }
 }
 
-/// A full path to a nix build output (e.g. /nix/store/abc123...-name).
 #[derive(Debug, Clone)]
 pub struct StorePath(String);
 
@@ -62,8 +62,7 @@ impl TryFrom<String> for StorePath {
             Ok(StorePath(s))
         } else {
             Err(AppError::CmdError(format!(
-                "not a valid nix store path: {}",
-                s
+                "not a valid nix store path: {s}"
             )))
         }
     }
@@ -136,6 +135,8 @@ pub struct Tags {
     pub commit: String,
     pub slot: Slot,
     pub service_ip: Option<Ipv4Addr>,
+    pub pending: bool,
+    pub role: Option<String>,
 }
 
 impl Tags {
@@ -145,70 +146,60 @@ impl Tags {
             commit: commit.to_string(),
             slot,
             service_ip: None,
+            pending: false,
+            role: None,
         }
     }
 
-    pub fn with_service_ip(&self, ip: Ipv4Addr) -> Self {
-        Self {
-            service_ip: Some(ip),
-            ..self.clone()
-        }
+    pub fn fresh(fresh: &proxnix_core::Fresh) -> Result<Self> {
+        Ok(Self {
+            role: fresh.role().map(|role| role.as_ref().to_string()),
+            pending: true,
+            ..Self::new(NixHash::try_from(fresh.nix().as_ref())?, fresh.commit().as_ref(), fresh.slot())
+        })
     }
 
     pub fn render(&self) -> String {
         let base = format!(
             "proxnix;nix-{};commit-{};{}",
-            self.nix_hash, self.commit, self.slot
+            self.nix_hash,
+            self.commit,
+            match self.slot {
+                Slot::Blue => "slot-blue",
+                Slot::Green => "slot-green",
+            }
         );
-        match self.service_ip {
-            Some(ip) => format!("{};ip-{}", base, ip),
-            None => base,
-        }
+        [
+            Some(base),
+            self.service_ip.map(|ip| format!("ip-{ip}")),
+            self.pending.then(|| String::from("pending")),
+            self.role.as_ref().map(|role| format!("role-{role}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(";")
     }
 }
 
-/// A git commit hash, borrowed from its owner.
-#[derive(Debug, Clone, Copy)]
-pub struct CommitHash<'a>(&'a str);
-
-impl<'a> CommitHash<'a> {
-    pub fn as_str(self) -> &'a str {
-        self.0
-    }
-}
-
-impl<'a> TryFrom<&'a str> for CommitHash<'a> {
-    type Error = AppError;
-    fn try_from(s: &'a str) -> Result<Self> {
-        if s.is_empty() {
-            Err(AppError::CmdError("commit hash cannot be empty".to_string()))
-        } else {
-            Ok(CommitHash(s))
-        }
-    }
-}
-
-/// Path to the sozu control socket, borrowed from app config.
-#[derive(Debug, Clone, Copy)]
-pub struct SozuSocketPath<'a>(&'a str);
-
-impl<'a> SozuSocketPath<'a> {
-    pub fn as_str(self) -> &'a str {
-        self.0
-    }
-}
-
-impl<'a> TryFrom<&'a str> for SozuSocketPath<'a> {
-    type Error = AppError;
-    fn try_from(s: &'a str) -> Result<Self> {
-        if s.is_empty() {
-            Err(AppError::CmdError(
-                "sozu socket path cannot be empty".to_string(),
-            ))
-        } else {
-            Ok(SozuSocketPath(s))
-        }
-    }
+pub fn render_managed(tags: &proxnix_core::ManagedTags) -> String {
+    [
+        Some(String::from("proxnix")),
+        Some(format!("nix-{}", tags.nix.as_ref())),
+        Some(format!("commit-{}", tags.commit.as_ref())),
+        Some(String::from(match tags.slot {
+            Slot::Blue => "slot-blue",
+            Slot::Green => "slot-green",
+        })),
+        tags.service_ip.map(|ip| format!("ip-{ip}")),
+        tags.generation.map(|generation| format!("gen-{}", generation.get())),
+        tags.pending.then(|| String::from("pending")),
+        tags.role.as_ref().map(|role| format!("role-{}", role.as_ref())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(";")
 }
 
 /// Path to the template cache directory, borrowed from app config.
@@ -238,6 +229,9 @@ impl<'a> TryFrom<&'a str> for TemplateCachePath<'a> {
 pub struct ImageStore<'a> {
     pub template_cache_path: TemplateCachePath<'a>,
     pub zfs: Option<&'a ZfsImages>,
+    pub idmap: crate::types::IdRange,
+    pub store: Option<&'a proxnix_core::Dataset>,
+    pub seed_timeout: std::time::Duration,
 }
 
 /// Path to the cloned nix repository, borrowed from the pipeline.
@@ -261,21 +255,6 @@ impl<'a> TryFrom<&'a str> for RepoPath<'a> {
     }
 }
 
-/// All inputs needed for a reconcile pass, fully typed.
-pub struct ReconcileContext<'a> {
-    /// Nix hash for each successfully built image type.
-    pub image_hashes: &'a HashMap<ImageType, NixHash>,
-    /// Store path for each successfully built image type.
-    pub pre_built: &'a HashMap<ImageType, StorePath>,
-    /// Build errors keyed by image type.
-    pub image_type_errors: &'a HashMap<ImageType, String>,
-    pub repo_path: RepoPath<'a>,
-    pub commit_hash: CommitHash<'a>,
-    pub image_store: ImageStore<'a>,
-    pub sozu_socket_path: SozuSocketPath<'a>,
-    pub backend_pool: Option<&'a BackendPool>,
-}
-
 #[derive(Debug, Clone, serde::Deserialize)]
 struct RawBackendPool {
     start: Ipv4Addr,
@@ -292,16 +271,13 @@ pub struct BackendPool {
 impl TryFrom<RawBackendPool> for BackendPool {
     type Error = String;
     fn try_from(raw: RawBackendPool) -> std::result::Result<Self, Self::Error> {
-        match u32::from(raw.start) > u32::from(raw.end) {
-            true => Err(format!(
-                "backend pool start {} is above its end {}",
-                raw.start, raw.end
-            )),
-            false => Ok(BackendPool {
-                start: raw.start,
-                end: raw.end,
-            }),
-        }
+        if u32::from(raw.start) > u32::from(raw.end) { Err(format!(
+            "backend pool start {} is above its end {}",
+            raw.start, raw.end
+        )) } else { Ok(BackendPool {
+            start: raw.start,
+            end: raw.end,
+        }) }
     }
 }
 
@@ -322,13 +298,10 @@ impl BackendPool {
 
     pub fn fits(&self, service_count: u32) -> PoolFit {
         let required = service_count * 2;
-        match self.capacity() >= required {
-            true => PoolFit::Sufficient,
-            false => PoolFit::TooSmall {
-                capacity: self.capacity(),
-                required,
-            },
-        }
+        if self.capacity() >= required { PoolFit::Sufficient } else { PoolFit::TooSmall {
+            capacity: self.capacity(),
+            required,
+        } }
     }
 }
 
@@ -396,10 +369,16 @@ mod tests {
 
     #[test]
     fn four_services_need_eight_addresses() {
-        assert_eq!(pool("192.168.1.200", "192.168.1.207").fits(4), PoolFit::Sufficient);
+        assert_eq!(
+            pool("192.168.1.200", "192.168.1.207").fits(4),
+            PoolFit::Sufficient
+        );
         assert_eq!(
             pool("192.168.1.200", "192.168.1.206").fits(4),
-            PoolFit::TooSmall { capacity: 7, required: 8 }
+            PoolFit::TooSmall {
+                capacity: 7,
+                required: 8
+            }
         );
     }
 
@@ -421,8 +400,6 @@ mod tests {
 
     #[test]
     fn empty_borrowed_paths_are_rejected() {
-        assert!(CommitHash::try_from("").is_err());
-        assert!(SozuSocketPath::try_from("").is_err());
         assert!(TemplateCachePath::try_from("").is_err());
         assert!(RepoPath::try_from("").is_err());
     }

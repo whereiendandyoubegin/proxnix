@@ -1,0 +1,5 @@
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/clock.rs:5:16
+  |
+5 |     std::time::Instant::now().elapsed()
+  |                ^^^^^^^

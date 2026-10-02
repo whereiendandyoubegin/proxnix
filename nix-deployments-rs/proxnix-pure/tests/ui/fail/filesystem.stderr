@@ -1,0 +1,5 @@
+error: pure_only: this reaches the outside world (process, filesystem, sockets, environment, threads, clock or an effectful crate)
+ --> tests/ui/fail/filesystem.rs:5:10
+  |
+5 |     std::fs::metadata("/").is_ok()
+  |          ^^

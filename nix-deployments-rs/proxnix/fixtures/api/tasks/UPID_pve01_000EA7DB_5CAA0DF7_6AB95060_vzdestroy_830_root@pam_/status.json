@@ -1,0 +1,12 @@
+{
+  "starttime": 1790529632,
+  "node": "pve01",
+  "pstart": 1554648567,
+  "type": "vzdestroy",
+  "exitstatus": "OK",
+  "id": "830",
+  "pid": 960475,
+  "status": "stopped",
+  "upid": "UPID:pve01:000EA7DB:5CAA0DF7:6AB95060:vzdestroy:830:root@pam:",
+  "user": "root@pam"
+}

@@ -3,26 +3,72 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixology.url = "git+ssh://git@ssh.dan-gilmour.com:2222/dan/nixology.git";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    nixology.url = "git+ssh://git@forgejo.lan:2222/dan/nixology.git";
+    debtmap-src = {
+      url = "github:iepathos/debtmap";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, nixology }:
+  outputs = { self, nixpkgs, fenix, nixology, debtmap-src }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+
+      toolchain = fenix.packages.${system}.stable.withComponents [
+        "cargo"
+        "clippy"
+        "rust-src"
+        "rustc"
+        "rustfmt"
+      ];
+      rustPlatform = pkgs.makeRustPlatform {
+        cargo = toolchain;
+        rustc = toolchain;
+      };
+
+      rustflags = "-Clinker-features=-lld";
+
       commonAttrs = {
         pname = "proxnix";
         version = "0.1.0";
         src = ./nix-deployments-rs;
         cargoLock.lockFile = ./nix-deployments-rs/Cargo.lock;
-        nativeBuildInputs = [ pkgs.pkg-config ];
+        nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake ];
         buildInputs = [ pkgs.openssl pkgs.libgit2 ];
         PROXNIX_NIXOLOGY_PATH = "${nixology}";
+        RUSTFLAGS = rustflags;
       };
-      proxnixPkg = pkgs.rustPlatform.buildRustPackage commonAttrs;
+      proxnixPkg = rustPlatform.buildRustPackage commonAttrs;
+
+      proxnix = pkgs.writeShellApplication {
+        name = "proxnix";
+        text = ''
+          ${nixology.packages.${system}.proxnix-secrets}/bin/proxnix-secrets
+          exec ${proxnixPkg}/bin/proxnix "$@"
+        '';
+      };
+
+      debtmap = rustPlatform.buildRustPackage {
+        pname = "debtmap";
+        version = "unstable";
+        src = debtmap-src;
+        cargoLock.lockFile = "${debtmap-src}/Cargo.lock";
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.openssl pkgs.libgit2 ];
+        OPENSSL_NO_VENDOR = "1";
+        RUSTFLAGS = rustflags;
+        doCheck = false;
+      };
+
+      sozu = nixology.proxnixcfg.sozu;
 
       sozuConfig = pkgs.writeText "sozu-config.toml" ''
-        command_socket = "/run/sozu/command.sock"
+        command_socket = "${sozu.socket_path}"
         log_level      = "info"
         log_target     = "stdout"
         command_buffer_size     = 16384
@@ -30,7 +76,7 @@
 
         [[listeners]]
         protocol = "http"
-        address  = "0.0.0.0:80"
+        address  = "${sozu.listen_ip}:${toString sozu.http_port}"
       '';
 
       sozuUnit = pkgs.writeText "sozu.service" ''
@@ -59,7 +105,7 @@
         [Service]
         Type=simple
         Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
-        ExecStart=${proxnixPkg}/bin/proxnix
+        ExecStart=${proxnix}/bin/proxnix
         Restart=always
         RestartSec=5
 
@@ -86,7 +132,7 @@
       };
     in {
       packages.${system} = {
-        default = proxnixPkg;
+        default = proxnix;
         sozu = pkgs.sozu;
       };
 
@@ -95,15 +141,22 @@
         program = "${installScript}/bin/proxnix-install";
       };
 
-      checks.${system}.clippy = pkgs.rustPlatform.buildRustPackage (commonAttrs // {
-        nativeBuildInputs = commonAttrs.nativeBuildInputs ++ [ pkgs.clippy ];
-        buildPhase = "cargo clippy -- -D warnings";
+      checks.${system}.clippy = rustPlatform.buildRustPackage (commonAttrs // {
+        nativeBuildInputs = commonAttrs.nativeBuildInputs ++ [ toolchain ];
+        buildPhase = "cargo clippy -- -W clippy::pedantic -D warnings";
         installPhase = "touch $out";
         doCheck = false;
       });
 
       devShells.${system}.default = pkgs.mkShell {
-        buildInputs = [ pkgs.openssl pkgs.libgit2 pkgs.pkg-config pkgs.rustup pkgs.sozu ];
+        inputsFrom = [ proxnixPkg ];
+        packages = [
+          toolchain
+          fenix.packages.${system}.rust-analyzer
+          pkgs.sozu
+          debtmap
+        ];
+        RUSTFLAGS = rustflags;
       };
     };
 }
