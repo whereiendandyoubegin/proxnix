@@ -8,6 +8,7 @@ license = "MIT"
 proxnix-pure = { path = "../proxnix-pure" }
 thiserror = "2.0.17"
 serde = { version = "1.0.228", features = ["derive"] }
+# zfs-core = "0.5.0"
 
 [dev-dependencies]
 trybuild = "1"

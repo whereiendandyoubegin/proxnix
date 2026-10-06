@@ -98,7 +98,10 @@ pub fn eval_config(repo_path: &str, timeout: Duration) -> Result<String> {
         Exit::TimedOut => {
             warn!("nix eval exceeded {}s, killing it", timeout.as_secs());
             child::kill_group(&mut child);
-            return Err(AppError::NixError(format!("eval of .#proxnix timed out after {}s", timeout.as_secs())));
+            return Err(AppError::NixError(format!(
+                "eval of .#proxnix timed out after {}s",
+                timeout.as_secs()
+            )));
         }
     };
     let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
@@ -106,7 +109,11 @@ pub fn eval_config(repo_path: &str, timeout: Duration) -> Result<String> {
     if status.success() {
         Ok(stdout)
     } else {
-        Err(AppError::NixError(format!("eval of .#proxnix failed (exit: {:?}): {}", status.code(), stderr)))
+        Err(AppError::NixError(format!(
+            "eval of .#proxnix failed (exit: {:?}): {}",
+            status.code(),
+            stderr
+        )))
     }
 }
 
@@ -128,18 +135,30 @@ impl From<NixFault> for AppError {
 const STDERR_TAIL: usize = 20;
 
 fn flake_dir(repo_path: &str) -> std::result::Result<PathBuf, NixFault> {
-    let flake_path = find_in_repo(repo_path, "flake.nix").map_err(|e| NixFault::NoFlake(e.to_string()))?;
+    let flake_path =
+        find_in_repo(repo_path, "flake.nix").map_err(|e| NixFault::NoFlake(e.to_string()))?;
     Path::new(&flake_path)
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| NixFault::NoFlake(String::from("flake.nix has no parent directory")))
 }
 
-fn nix(dir: &Path, label: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, NixFault> {
+fn nix(
+    dir: &Path,
+    label: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::result::Result<String, NixFault> {
     run("nix", dir, label, args, timeout)
 }
 
-pub(crate) fn run(program: &str, dir: &Path, label: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, NixFault> {
+pub(crate) fn run(
+    program: &str,
+    dir: &Path,
+    label: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::result::Result<String, NixFault> {
     let mut child = Command::new(program)
         .current_dir(dir)
         .args(args)
@@ -167,44 +186,78 @@ pub(crate) fn run(program: &str, dir: &Path, label: &str, args: &[&str], timeout
             lines[lines.len().saturating_sub(STDERR_TAIL)..].to_vec()
         })
     });
-    let status = match child::wait(&mut child, timeout).map_err(|e| NixFault::Spawn(e.to_string()))? {
-        Exit::Finished(status) => status,
-        Exit::TimedOut => {
-            warn!("nix {} exceeded {}s, killing it", label, timeout.as_secs());
-            child::kill_group(&mut child);
-            return Err(NixFault::TimedOut(timeout));
-        }
-    };
+    let status =
+        match child::wait(&mut child, timeout).map_err(|e| NixFault::Spawn(e.to_string()))? {
+            Exit::Finished(status) => status,
+            Exit::TimedOut => {
+                warn!("nix {} exceeded {}s, killing it", label, timeout.as_secs());
+                child::kill_group(&mut child);
+                return Err(NixFault::TimedOut(timeout));
+            }
+        };
     let stdout = stdout_pump.and_then(|h| h.join().ok()).unwrap_or_default();
     let stderr: Vec<String> = stderr_pump.and_then(|h| h.join().ok()).unwrap_or_default();
-    if status.success() { Ok(stdout) } else { Err(NixFault::Exited { code: status.code(), stderr: stderr.join("\n") }) }
+    if status.success() {
+        Ok(stdout)
+    } else {
+        Err(NixFault::Exited {
+            code: status.code(),
+            stderr: stderr.join("\n"),
+        })
+    }
 }
 
 fn first_line(stdout: &str) -> std::result::Result<String, NixFault> {
-    stdout.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_string).ok_or(NixFault::NoOutput)
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+        .ok_or(NixFault::NoOutput)
 }
 
 fn installable(config_name: &str, build_attr: &str) -> String {
     format!(".#nixosConfigurations.{config_name}.{build_attr}")
 }
 
-pub fn realise(config_name: &str, build_attr: &str, repo_path: &str, impure: bool, timeout: Duration) -> std::result::Result<String, NixFault> {
+pub fn realise(
+    config_name: &str,
+    build_attr: &str,
+    repo_path: &str,
+    impure: bool,
+    timeout: Duration,
+) -> std::result::Result<String, NixFault> {
     let dir = flake_dir(repo_path)?;
     let target = installable(config_name, build_attr);
     let flags: &[&str] = if impure { &["--impure"] } else { &[] };
-    let build: Vec<&str> = ["build", target.as_str(), "--no-link"].into_iter().chain(flags.iter().copied()).collect();
+    let build: Vec<&str> = ["build", target.as_str(), "--no-link"]
+        .into_iter()
+        .chain(flags.iter().copied())
+        .collect();
     nix(&dir, config_name, &build, timeout)?;
-    let path_info: Vec<&str> = ["path-info", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
+    let path_info: Vec<&str> = ["path-info", target.as_str()]
+        .into_iter()
+        .chain(flags.iter().copied())
+        .collect();
     let store_path = first_line(&nix(&dir, config_name, &path_info, timeout)?)?;
     info!("Nix build succeeded for '{}': {}", config_name, store_path);
     Ok(store_path)
 }
 
-pub fn out_path(config_name: &str, build_attr: &str, repo_path: &str, impure: bool, timeout: Duration) -> std::result::Result<String, NixFault> {
+pub fn out_path(
+    config_name: &str,
+    build_attr: &str,
+    repo_path: &str,
+    impure: bool,
+    timeout: Duration,
+) -> std::result::Result<String, NixFault> {
     let dir = flake_dir(repo_path)?;
     let target = format!("{}.outPath", installable(config_name, build_attr));
     let flags: &[&str] = if impure { &["--impure"] } else { &[] };
-    let eval: Vec<&str> = ["eval", "--raw", target.as_str()].into_iter().chain(flags.iter().copied()).collect();
+    let eval: Vec<&str> = ["eval", "--raw", target.as_str()]
+        .into_iter()
+        .chain(flags.iter().copied())
+        .collect();
     first_line(&nix(&dir, config_name, &eval, timeout)?)
 }
 
@@ -219,9 +272,19 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\necho working >&2\nsleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
-        let result = run(script.to_str().unwrap(), Path::new("/"), "hung", &[], Duration::from_secs(1));
+        let result = run(
+            script.to_str().unwrap(),
+            Path::new("/"),
+            "hung",
+            &[],
+            Duration::from_secs(1),
+        );
         let _ = std::fs::remove_file(&script);
         assert_eq!(result, Err(NixFault::TimedOut(Duration::from_secs(1))));
-        assert!(started.elapsed() < Duration::from_secs(10), "waited {:?} on a killed command", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "waited {:?} on a killed command",
+            started.elapsed()
+        );
     }
 }

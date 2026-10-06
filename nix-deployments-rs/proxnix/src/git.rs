@@ -4,25 +4,21 @@ use std::path::Path;
 use tracing::info;
 
 fn find_ssh_key(candidates: &[String]) -> Option<String> {
-    candidates
-        .iter()
-        .find(|p| Path::new(p).exists())
-        .cloned()
+    candidates.iter().find(|p| Path::new(p).exists()).cloned()
 }
 
-pub fn git_clone(repo_url: &str, dest_path: &str, ssh_key_candidates: &[String]) -> Result<Repository> {
+pub fn git_clone(
+    repo_url: &str,
+    dest_path: &str,
+    ssh_key_candidates: &[String],
+) -> Result<Repository> {
     info!("Cloning {} to {}", repo_url, dest_path);
     let key_path = find_ssh_key(ssh_key_candidates)
         .ok_or_else(|| AppError::GitError("No SSH private key found".to_string()))?;
     info!("Using SSH key: {}", key_path);
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(move |_url, username, _allowed| {
-        git2::Cred::ssh_key(
-            username.unwrap_or("git"),
-            None,
-            Path::new(&key_path),
-            None,
-        )
+        git2::Cred::ssh_key(username.unwrap_or("git"), None, Path::new(&key_path), None)
     });
     let mut fetch_opts = FetchOptions::new();
     fetch_opts.remote_callbacks(callbacks);
@@ -45,7 +41,12 @@ pub fn git_checkout(repo: &Repository, commit_hash: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn git_ensure_commit(repo_url: &str, dest_path: &str, commit_hash: &str, ssh_key_candidates: &[String]) -> Result<Repository> {
+pub fn git_ensure_commit(
+    repo_url: &str,
+    dest_path: &str,
+    commit_hash: &str,
+    ssh_key_candidates: &[String],
+) -> Result<Repository> {
     let repo = if Path::new(dest_path).exists() {
         info!("Repo already exists at {}, opening", dest_path);
         Repository::open(dest_path).map_err(|e| AppError::GitError(e.to_string()))?

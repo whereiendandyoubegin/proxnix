@@ -1,16 +1,21 @@
 use crate::api::{self, Cli, Execute, GuestOp, Lxc, Qemu};
 use crate::context::{ImageStore, StorePath, Tags};
-use crate::host::{LxcConf, PveFs, copy_to_template_storage, ensure, ensure_all, host_text, mount_spec, stub_rootfs, write_conf};
-use crate::nixstore::{NixStore, store_text};
+use crate::host::{
+    LxcConf, PveFs, copy_to_template_storage, ensure, ensure_all, host_text, mount_spec,
+    stub_rootfs, write_conf,
+};
 use crate::interpret::Placed;
+use crate::nixstore::{NixStore, store_text};
 use crate::types::{AppError, ContainerConfig, DiskBus, IdRange, Result, StoreChoice, VMConfig};
-use crate::zfs::{BaseImage, DiskSize, ImageKey, Ownership, RootfsVolume, Sealed, Tarball, ZfsImages};
+use crate::zfs::{
+    BaseImage, DiskSize, ImageKey, Ownership, RootfsVolume, Sealed, Tarball, ZfsImages,
+};
 use proxmox_api::nodes::node::lxc::{self, PostParams as LxcCreate};
 use proxmox_api::nodes::node::qemu;
 use proxnix_core::{HostEffect, Mount, Owner, RootHolder, SlotId, Storage, Toplevel};
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 fn qcow2_path(artifact_path: &str) -> String {
@@ -18,7 +23,13 @@ fn qcow2_path(artifact_path: &str) -> String {
 }
 
 pub trait Materialise {
-    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, image_store: ImageStore<'_>, target: SlotId) -> Result<()>;
+    fn provision_inactive(
+        &self,
+        artifact: &StorePath,
+        tags: &Tags,
+        image_store: ImageStore<'_>,
+        target: SlotId,
+    ) -> Result<()>;
 }
 
 macro_rules! lxc_settings {
@@ -44,7 +55,12 @@ fn mount_points(mounts: &[Mount]) -> Result<HashMap<u32, String>> {
         .collect()
 }
 
-fn vm_create(config: &VMConfig, artifact: &StorePath, tags: &Tags, target: SlotId) -> Result<qemu::PostParams> {
+fn vm_create(
+    config: &VMConfig,
+    artifact: &StorePath,
+    tags: &Tags,
+    target: SlotId,
+) -> Result<qemu::PostParams> {
     let disk = HashMap::from([(
         config.disk_slot.index,
         format!(
@@ -66,9 +82,18 @@ fn vm_create(config: &VMConfig, artifact: &StorePath, tags: &Tags, target: SlotI
         ..qemu::PostParams::new(api::vmid(target.inner())?)
     };
     Ok(match config.disk_slot.bus {
-        DiskBus::Scsi => qemu::PostParams { scsis: disk, ..base },
-        DiskBus::Virtio => qemu::PostParams { virtios: disk, ..base },
-        DiskBus::Sata => qemu::PostParams { satas: disk, ..base },
+        DiskBus::Scsi => qemu::PostParams {
+            scsis: disk,
+            ..base
+        },
+        DiskBus::Virtio => qemu::PostParams {
+            virtios: disk,
+            ..base
+        },
+        DiskBus::Sata => qemu::PostParams {
+            satas: disk,
+            ..base
+        },
         DiskBus::Ide => qemu::PostParams { ides: disk, ..base },
     })
 }
@@ -85,7 +110,13 @@ fn vm_resize(config: &VMConfig) -> Result<qemu::vmid::resize::PutParams> {
     ))
 }
 
-fn container_create(config: &ContainerConfig, mounts: &[Mount], ostemplate: String, tags: &Tags, target: SlotId) -> Result<LxcCreate> {
+fn container_create(
+    config: &ContainerConfig,
+    mounts: &[Mount],
+    ostemplate: String,
+    tags: &Tags,
+    target: SlotId,
+) -> Result<LxcCreate> {
     Ok(lxc_settings!(
         LxcCreate,
         config,
@@ -118,13 +149,24 @@ fn create_from_clone(
     if let Err(e) = &written
         && let Err(cleanup) = clone.discard()
     {
-        warn!("could not discard rootfs clone for {} after {}: {}", target.inner().get(), e, cleanup);
+        warn!(
+            "could not discard rootfs clone for {} after {}: {}",
+            target.inner().get(),
+            e,
+            cleanup
+        );
     }
     written
 }
 
 impl Materialise for VMConfig {
-    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, _image_store: ImageStore<'_>, target: SlotId) -> Result<()> {
+    fn provision_inactive(
+        &self,
+        artifact: &StorePath,
+        tags: &Tags,
+        _image_store: ImageStore<'_>,
+        target: SlotId,
+    ) -> Result<()> {
         let id = target.inner();
         let create = vm_create(self, artifact, tags, target)?;
         let resize = vm_resize(self)?;
@@ -134,15 +176,30 @@ impl Materialise for VMConfig {
     }
 }
 
-fn store_root(config: &ContainerConfig, storage: &Storage, shared: &proxnix_core::Dataset) -> Result<PathBuf> {
+fn store_root(
+    config: &ContainerConfig,
+    storage: &Storage,
+    shared: &proxnix_core::Dataset,
+) -> Result<PathBuf> {
     match config.store {
         StoreChoice::Private => storage
             .mounts
             .iter()
             .find(|mount| mount.guest.0 == "/nix")
-            .and_then(|mount| PathBuf::from(host_text(&mount.host)).parent().map(Path::to_path_buf))
-            .ok_or_else(|| AppError::CmdError(format!("{} has a private store but no /nix mount", config.name))),
-        StoreChoice::Shared | StoreChoice::Image => Ok(PathBuf::from(host_text(&shared.mountpoint()))),
+            .and_then(|mount| {
+                PathBuf::from(host_text(&mount.host))
+                    .parent()
+                    .map(Path::to_path_buf)
+            })
+            .ok_or_else(|| {
+                AppError::CmdError(format!(
+                    "{} has a private store but no /nix mount",
+                    config.name
+                ))
+            }),
+        StoreChoice::Shared | StoreChoice::Image => {
+            Ok(PathBuf::from(host_text(&shared.mountpoint())))
+        }
     }
 }
 
@@ -154,18 +211,35 @@ fn create_on_store(
     image_store: ImageStore<'_>,
     target: SlotId,
 ) -> Result<()> {
-    let refuse = |why: &str| AppError::CmdError(format!("{} boots from the store, but {why}", config.name));
-    let zfs = image_store.zfs.filter(|zfs| zfs.storage.is(&config.storage_location)).ok_or_else(|| refuse("its rootfs is not on the zfs storage"))?;
-    let shared = image_store.store.ok_or_else(|| refuse("there is no zfs pool to hold the store"))?;
+    let refuse =
+        |why: &str| AppError::CmdError(format!("{} boots from the store, but {why}", config.name));
+    let zfs = image_store
+        .zfs
+        .filter(|zfs| zfs.storage.is(&config.storage_location))
+        .ok_or_else(|| refuse("its rootfs is not on the zfs storage"))?;
+    let shared = image_store
+        .store
+        .ok_or_else(|| refuse("there is no zfs pool to hold the store"))?;
     let toplevel = artifact
         .as_str()
         .parse::<proxnix_core::StorePath>()
         .map(Toplevel::from)
-        .map_err(|fault| refuse(&format!("{} is not a store path ({fault:?})", artifact.as_str())))?;
+        .map_err(|fault| {
+            refuse(&format!(
+                "{} is not a store path ({fault:?})",
+                artifact.as_str()
+            ))
+        })?;
     let volume = RootfsVolume::for_slot(zfs.storage.clone(), target, DiskSize::gib(config.disk_gb));
     let conf = LxcConf::of(config, &storage.mounts, tags, &volume, target)?;
     let root = store_root(config, storage, shared)?;
-    ensure(&HostEffect::EnsureDataset { dataset: shared.clone(), owner: Owner::HostRoot }, image_store.idmap)?;
+    ensure(
+        &HostEffect::EnsureDataset {
+            dataset: shared.clone(),
+            owner: Owner::HostRoot,
+        },
+        image_store.idmap,
+    )?;
     ensure_all(&storage.prepare, image_store.idmap)?;
     let store = NixStore::seeding(root, image_store.seed_timeout);
     let _roots = store.hold_roots()?;
@@ -173,12 +247,20 @@ fn create_on_store(
     store.root(&RootHolder::Guest(target.inner()), &toplevel)?;
     let rootfs = volume.allocate()?;
     let owner = (!config.privileged).then_some(image_store.idmap.host_base);
-    let written = stub_rootfs(rootfs.path(), Path::new(&store_text(toplevel.path())), owner).and_then(|()| write_conf(&PveFs::live(), target, &conf));
+    let written = stub_rootfs(
+        rootfs.path(),
+        Path::new(&store_text(toplevel.path())),
+        owner,
+    )
+    .and_then(|()| write_conf(&PveFs::live(), target, &conf));
     match written {
         Ok(()) => Ok(()),
         Err(error) => {
             if let Err(cleanup) = rootfs.release() {
-                warn!("could not free the rootfs of {} after {error}: {cleanup}", target.inner().get());
+                warn!(
+                    "could not free the rootfs of {} after {error}: {cleanup}",
+                    target.inner().get()
+                );
             }
             Err(error)
         }
@@ -186,22 +268,42 @@ fn create_on_store(
 }
 
 impl Materialise for Placed {
-    fn provision_inactive(&self, artifact: &StorePath, tags: &Tags, image_store: ImageStore<'_>, target: SlotId) -> Result<()> {
+    fn provision_inactive(
+        &self,
+        artifact: &StorePath,
+        tags: &Tags,
+        image_store: ImageStore<'_>,
+        target: SlotId,
+    ) -> Result<()> {
         let config = &self.config;
-        let storage = self
-            .storage
-            .as_ref()
-            .map_err(|fault| AppError::CmdError(format!("{} has no usable storage: {fault:?}", config.name)))?;
+        let storage = self.storage.as_ref().map_err(|fault| {
+            AppError::CmdError(format!("{} has no usable storage: {fault:?}", config.name))
+        })?;
         if config.store != StoreChoice::Image {
             return create_on_store(config, storage, artifact, tags, image_store, target);
         }
         let tarball = Tarball::find(artifact.as_str())?;
-        if let Some(zfs) = image_store.zfs.filter(|zfs| zfs.storage.is(&config.storage_location)) {
+        if let Some(zfs) = image_store
+            .zfs
+            .filter(|zfs| zfs.storage.is(&config.storage_location))
+        {
             let key = ImageKey::new(tags.nix_hash.clone(), Ownership::of(config.privileged));
             let image = BaseImage::ensure(zfs, &key, &tarball, image_store.idmap)?;
-            create_from_clone(config, storage, image_store.idmap, zfs, &image, tags, target)
+            create_from_clone(
+                config,
+                storage,
+                image_store.idmap,
+                zfs,
+                &image,
+                tags,
+                target,
+            )
         } else {
-            let ostemplate = copy_to_template_storage(&tarball, image_store.template_cache_path.as_str(), &tags.nix_hash)?;
+            let ostemplate = copy_to_template_storage(
+                &tarball,
+                image_store.template_cache_path.as_str(),
+                &tags.nix_hash,
+            )?;
             let create = container_create(config, &storage.mounts, ostemplate, tags, target)?;
             ensure_all(&storage.prepare, image_store.idmap)?;
             Cli.run(&GuestOp::<Lxc>::Create(create)).map(|_| ())
@@ -217,7 +319,11 @@ mod tests {
     use proxnix_core::{Slot, Vmid};
 
     fn tags() -> Tags {
-        Tags::new(NixHash::try_from("k8whj0lg7k95jn6h57k99kvikc0zrpp3").unwrap(), "abc123", Slot::Blue)
+        Tags::new(
+            NixHash::try_from("k8whj0lg7k95jn6h57k99kvikc0zrpp3").unwrap(),
+            "abc123",
+            Slot::Blue,
+        )
     }
 
     fn vm() -> VMConfig {
@@ -274,7 +380,9 @@ mod tests {
 
     #[test]
     fn a_vm_is_created_with_its_disk_imported_in_one_call() {
-        let artifact = StorePath::try_from("/nix/store/k8whj0lg7k95jn6h57k99kvikc0zrpp3-website".to_string()).unwrap();
+        let artifact =
+            StorePath::try_from("/nix/store/k8whj0lg7k95jn6h57k99kvikc0zrpp3-website".to_string())
+                .unwrap();
         let create = vm_create(&vm(), &artifact, &tags(), SlotId::Blue(Vmid::new(823))).unwrap();
         assert_eq!(
             rendered(&GuestOp::<Qemu>::Create(create)),
@@ -288,7 +396,10 @@ mod tests {
 
     #[test]
     fn the_disk_slot_picks_the_bus_it_is_imported_on() {
-        let config = VMConfig { disk_slot: "virtio1".parse().unwrap(), ..vm() };
+        let config = VMConfig {
+            disk_slot: "virtio1".parse().unwrap(),
+            ..vm()
+        };
         let artifact = StorePath::try_from("/nix/store/x-website".to_string()).unwrap();
         let create = vm_create(&config, &artifact, &tags(), SlotId::Blue(Vmid::new(823))).unwrap();
         assert_eq!(create.virtios.keys().collect::<Vec<_>>(), [&1]);
@@ -299,7 +410,10 @@ mod tests {
     #[test]
     fn a_vm_disk_is_resized_after_import() {
         assert_eq!(
-            rendered(&GuestOp::<Qemu>::Resize(Vmid::new(823), vm_resize(&vm()).unwrap())),
+            rendered(&GuestOp::<Qemu>::Resize(
+                Vmid::new(823),
+                vm_resize(&vm()).unwrap()
+            )),
             "qm disk resize 823 scsi0 20G"
         );
     }
@@ -311,7 +425,14 @@ mod tests {
             guest: proxnix_core::GuestPath(String::from("/var/lib/web")),
             mode: proxnix_core::MountMode::ReadOnly,
         }];
-        let create = container_create(&container("web"), &mounts, "local:vztmpl/web.tar.xz".to_string(), &tags(), SlotId::Blue(Vmid::new(946))).unwrap();
+        let create = container_create(
+            &container("web"),
+            &mounts,
+            "local:vztmpl/web.tar.xz".to_string(),
+            &tags(),
+            SlotId::Blue(Vmid::new(946)),
+        )
+        .unwrap();
         assert_eq!(
             rendered(&GuestOp::<Lxc>::Create(create)),
             "pct create 946 local:vztmpl/web.tar.xz --cores 2 --features nesting=1 --hostname web \
@@ -323,10 +444,16 @@ mod tests {
 
     #[test]
     fn a_shared_container_seeds_the_shared_store_and_a_private_one_its_own_nix() {
-        let settings = crate::state::parse_appconfig(crate::state::tests_support::NIXOLOGY_APPCONFIG).unwrap();
+        let settings =
+            crate::state::parse_appconfig(crate::state::tests_support::NIXOLOGY_APPCONFIG).unwrap();
         let layout = crate::engine::layout(&settings).unwrap();
         let spec = |store: StoreChoice| {
-            let config = ContainerConfig { name: String::from("hydra"), store, cutover: Some(crate::types::CutoverChoice::StopStart), ..container("hydra") };
+            let config = ContainerConfig {
+                name: String::from("hydra"),
+                store,
+                cutover: Some(crate::types::CutoverChoice::StopStart),
+                ..container("hydra")
+            };
             let wanted = proxnix_core::StorageSpec {
                 state: vec![],
                 mounts: vec![],
@@ -338,12 +465,23 @@ mod tests {
                     StoreChoice::Private => proxnix_core::StoreMode::Private,
                 },
             };
-            (layout.storage(&proxnix_core::GuestName(String::from("hydra")), &wanted).unwrap(), config)
+            (
+                layout
+                    .storage(&proxnix_core::GuestName(String::from("hydra")), &wanted)
+                    .unwrap(),
+                config,
+            )
         };
         let (shared, shared_config) = spec(StoreChoice::Shared);
-        assert_eq!(store_root(&shared_config, &shared, &layout.store()).unwrap(), PathBuf::from("/ZFS/proxnix/store"));
+        assert_eq!(
+            store_root(&shared_config, &shared, &layout.store()).unwrap(),
+            PathBuf::from("/ZFS/proxnix/store")
+        );
         let (private, private_config) = spec(StoreChoice::Private);
-        assert_eq!(store_root(&private_config, &private, &layout.store()).unwrap(), PathBuf::from("/ZFS/proxnix/state/hydra/nix"));
+        assert_eq!(
+            store_root(&private_config, &private, &layout.store()).unwrap(),
+            PathBuf::from("/ZFS/proxnix/state/hydra/nix")
+        );
     }
 
     fn vm_with(key: &str, value: &str) -> serde_json::Result<VMConfig> {

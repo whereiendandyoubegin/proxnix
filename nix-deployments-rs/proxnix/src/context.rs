@@ -155,7 +155,11 @@ impl Tags {
         Ok(Self {
             role: fresh.role().map(|role| role.as_ref().to_string()),
             pending: true,
-            ..Self::new(NixHash::try_from(fresh.nix().as_ref())?, fresh.commit().as_ref(), fresh.slot())
+            ..Self::new(
+                NixHash::try_from(fresh.nix().as_ref())?,
+                fresh.commit().as_ref(),
+                fresh.slot(),
+            )
         })
     }
 
@@ -192,9 +196,12 @@ pub fn render_managed(tags: &proxnix_core::ManagedTags) -> String {
             Slot::Green => "slot-green",
         })),
         tags.service_ip.map(|ip| format!("ip-{ip}")),
-        tags.generation.map(|generation| format!("gen-{}", generation.get())),
+        tags.generation
+            .map(|generation| format!("gen-{}", generation.get())),
         tags.pending.then(|| String::from("pending")),
-        tags.role.as_ref().map(|role| format!("role-{}", role.as_ref())),
+        tags.role
+            .as_ref()
+            .map(|role| format!("role-{}", role.as_ref())),
     ]
     .into_iter()
     .flatten()
@@ -271,13 +278,17 @@ pub struct BackendPool {
 impl TryFrom<RawBackendPool> for BackendPool {
     type Error = String;
     fn try_from(raw: RawBackendPool) -> std::result::Result<Self, Self::Error> {
-        if u32::from(raw.start) > u32::from(raw.end) { Err(format!(
-            "backend pool start {} is above its end {}",
-            raw.start, raw.end
-        )) } else { Ok(BackendPool {
-            start: raw.start,
-            end: raw.end,
-        }) }
+        if u32::from(raw.start) > u32::from(raw.end) {
+            Err(format!(
+                "backend pool start {} is above its end {}",
+                raw.start, raw.end
+            ))
+        } else {
+            Ok(BackendPool {
+                start: raw.start,
+                end: raw.end,
+            })
+        }
     }
 }
 
@@ -298,10 +309,14 @@ impl BackendPool {
 
     pub fn fits(&self, service_count: u32) -> PoolFit {
         let required = service_count * 2;
-        if self.capacity() >= required { PoolFit::Sufficient } else { PoolFit::TooSmall {
-            capacity: self.capacity(),
-            required,
-        } }
+        if self.capacity() >= required {
+            PoolFit::Sufficient
+        } else {
+            PoolFit::TooSmall {
+                capacity: self.capacity(),
+                required,
+            }
+        }
     }
 }
 

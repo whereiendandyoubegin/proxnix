@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use proxnix_core::SlotId;
+use proxnix_core::{DataSnapshot, DataTag, Dataset as CoreDataset, SlotId};
 use tracing::{info, warn};
 
 use crate::context::NixHash;
@@ -28,6 +28,18 @@ impl Dataset {
     }
 }
 
+impl From<&CoreDataset> for Dataset {
+    fn from(core: &CoreDataset) -> Dataset {
+        Dataset(
+            core.segments()
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>()
+                .join("/"),
+        )
+    }
+}
+
 impl TryFrom<String> for Dataset {
     type Error = AppError;
     fn try_from(s: String) -> Result<Self> {
@@ -37,7 +49,11 @@ impl TryFrom<String> for Dataset {
             && !s.contains("//")
             && !s.contains('@')
             && !s.contains(char::is_whitespace);
-        if valid { Ok(Dataset(s)) } else { Err(AppError::InvalidZfsName(s)) }
+        if valid {
+            Ok(Dataset(s))
+        } else {
+            Err(AppError::InvalidZfsName(s))
+        }
     }
 }
 
@@ -73,7 +89,11 @@ impl StorageId {
 impl TryFrom<String> for StorageId {
     type Error = AppError;
     fn try_from(s: String) -> Result<Self> {
-        if s.is_empty() || s.contains(':') || s.contains(char::is_whitespace) { Err(AppError::InvalidZfsName(s)) } else { Ok(StorageId(s)) }
+        if s.is_empty() || s.contains(':') || s.contains(char::is_whitespace) {
+            Err(AppError::InvalidZfsName(s))
+        } else {
+            Ok(StorageId(s))
+        }
     }
 }
 
@@ -99,12 +119,37 @@ pub struct ZfsImages {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotTag {
     Base,
+    Start,
+    Final,
+}
+
+impl From<DataTag> for SnapshotTag {
+    fn from(value: DataTag) -> Self {
+        match value {
+            DataTag::Start => SnapshotTag::Start,
+            DataTag::Final => SnapshotTag::Final,
+        }
+    }
+}
+
+impl TryFrom<&str> for SnapshotTag {
+    type Error = AppError;
+    fn try_from(s: &str) -> Result<Self> {
+        match s {
+            "base" => Ok(SnapshotTag::Base),
+            "start" => Ok(SnapshotTag::Start),
+            "final" => Ok(SnapshotTag::Final),
+            other => Err(AppError::InvalidZfsName(other.to_string())),
+        }
+    }
 }
 
 impl fmt::Display for SnapshotTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             SnapshotTag::Base => "base",
+            SnapshotTag::Start => "start",
+            SnapshotTag::Final => "final",
         })
     }
 }
@@ -117,7 +162,32 @@ pub struct Snapshot {
 
 impl Snapshot {
     fn base(dataset: &Dataset) -> Snapshot {
-        Snapshot { dataset: dataset.clone(), tag: SnapshotTag::Base }
+        Snapshot {
+            dataset: dataset.clone(),
+            tag: SnapshotTag::Base,
+        }
+    }
+}
+
+impl From<&DataSnapshot> for Snapshot {
+    fn from(value: &DataSnapshot) -> Self {
+        Snapshot {
+            dataset: Dataset::from(&value.dataset),
+            tag: SnapshotTag::from(value.tag),
+        }
+    }
+}
+
+impl TryFrom<&str> for Snapshot {
+    type Error = AppError;
+    fn try_from(s: &str) -> Result<Self> {
+        let (dataset, tag) = s
+            .split_once('@')
+            .ok_or_else(|| AppError::InvalidZfsName(s.to_string()))?;
+        Ok(Snapshot {
+            dataset: Dataset::try_from(dataset)?,
+            tag: SnapshotTag::try_from(tag)?,
+        })
     }
 }
 
@@ -156,7 +226,11 @@ pub enum Ownership {
 
 impl Ownership {
     pub fn of(privileged: bool) -> Ownership {
-        if privileged { Ownership::Privileged } else { Ownership::Unprivileged }
+        if privileged {
+            Ownership::Privileged
+        } else {
+            Ownership::Unprivileged
+        }
     }
 
     fn suffix(self) -> &'static str {
@@ -182,7 +256,11 @@ struct IdMap {
 
 impl IdMap {
     fn of(kind: IdKind, range: IdRange) -> IdMap {
-        IdMap { kind, host_base: range.host_base, count: range.count }
+        IdMap {
+            kind,
+            host_base: range.host_base,
+            count: range.count,
+        }
     }
 }
 
@@ -215,7 +293,14 @@ impl TryFrom<&str> for ImageKey {
             Some(hash) => (hash, Ownership::Privileged),
             None => (s, Ownership::Unprivileged),
         };
-        if hash.len() == NixHash::STORE_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) { Ok(ImageKey { hash: NixHash::try_from(hash)?, ownership }) } else { Err(AppError::InvalidZfsName(s.to_string())) }
+        if hash.len() == NixHash::STORE_LEN && hash.chars().all(|c| c.is_ascii_alphanumeric()) {
+            Ok(ImageKey {
+                hash: NixHash::try_from(hash)?,
+                ownership,
+            })
+        } else {
+            Err(AppError::InvalidZfsName(s.to_string()))
+        }
     }
 }
 
@@ -292,13 +377,26 @@ impl RootfsVolume {
     pub fn allocate(&self) -> Result<AllocatedRootfs> {
         run(Command::new("pvesm").args(self.alloc_args()), "pvesm alloc")?;
         let released = |error: AppError| {
-            if let Err(cleanup) = run(Command::new("pvesm").args(["free", self.volume_id().as_str()]), "pvesm free") {
-                warn!("could not free {} after {error}: {cleanup}", self.volume_id());
+            if let Err(cleanup) = run(
+                Command::new("pvesm").args(["free", self.volume_id().as_str()]),
+                "pvesm free",
+            ) {
+                warn!(
+                    "could not free {} after {error}: {cleanup}",
+                    self.volume_id()
+                );
             }
             error
         };
-        let path = run(Command::new("pvesm").args(["path", self.volume_id().as_str()]), "pvesm path").map_err(released)?;
-        Ok(AllocatedRootfs { volume: self.clone(), path: PathBuf::from(path.trim()) })
+        let path = run(
+            Command::new("pvesm").args(["path", self.volume_id().as_str()]),
+            "pvesm path",
+        )
+        .map_err(released)?;
+        Ok(AllocatedRootfs {
+            volume: self.clone(),
+            path: PathBuf::from(path.trim()),
+        })
     }
 }
 
@@ -314,7 +412,11 @@ impl AllocatedRootfs {
     }
 
     pub fn release(self) -> Result<()> {
-        run(Command::new("pvesm").args(["free", self.volume.volume_id().as_str()]), "pvesm free").map(|_| ())
+        run(
+            Command::new("pvesm").args(["free", self.volume.volume_id().as_str()]),
+            "pvesm free",
+        )
+        .map(|_| ())
     }
 }
 
@@ -362,11 +464,14 @@ impl BaseImage<Absent> {
             ownership: key.ownership,
             state: PhantomData,
         };
-        match (exists(&Snapshot::base(&image.dataset).to_string())?, exists(image.dataset.as_str())?) {
+        match (
+            exists(&Snapshot::base(&image.dataset).to_string())?,
+            exists(image.dataset.as_str())?,
+        ) {
             (true, _) => Ok(Located::Sealed(image.into_state())),
             (false, true) => {
                 warn!("discarding unsealed base image {}", image.dataset);
-                destroy_recursive(&image.dataset)?;
+                Destroy::Recursive(image.dataset.clone()).run_cmd()?;
                 Ok(Located::Absent(image))
             }
             (false, false) => Ok(Located::Absent(image)),
@@ -374,20 +479,29 @@ impl BaseImage<Absent> {
     }
 
     fn create(self) -> Result<BaseImage<Empty>> {
-        zfs_cmd(&["create", "-p", self.dataset.as_str()])?;
+        Create::Parents(self.dataset.clone()).run_cmd()?;
         Ok(self.into_state())
     }
 }
 
 impl BaseImage<Empty> {
     fn unpack(self, tarball: &Tarball, idmap: IdRange) -> Result<BaseImage<Unpacked>> {
-        info!("unpacking {} into {}", tarball.path().display(), self.dataset);
-        let unpacked = mountpoint(&self.dataset).and_then(|into| extract(tarball, &into, self.ownership, idmap));
+        info!(
+            "unpacking {} into {}",
+            tarball.path().display(),
+            self.dataset
+        );
+        let unpacked = get::<MountpointProp, _>(&self.dataset)
+            .run_cmd()
+            .and_then(|into| extract(tarball, &into, self.ownership, idmap));
         match unpacked {
             Ok(()) => Ok(self.into_state()),
             Err(e) => {
-                if let Err(cleanup) = destroy_recursive(&self.dataset) {
-                    warn!("could not discard half-unpacked {}: {}", self.dataset, cleanup);
+                if let Err(cleanup) = Destroy::Recursive(self.dataset.clone()).run_cmd() {
+                    warn!(
+                        "could not discard half-unpacked {}: {}",
+                        self.dataset, cleanup
+                    );
                 }
                 Err(e)
             }
@@ -397,13 +511,21 @@ impl BaseImage<Empty> {
 
 impl BaseImage<Unpacked> {
     fn seal(self) -> Result<BaseImage<Sealed>> {
-        zfs_cmd(&["snapshot", &Snapshot::base(&self.dataset).to_string()])?;
+        TakeSnapshot {
+            snapshot: Snapshot::base(&self.dataset),
+        }
+        .run_cmd()?;
         Ok(self.into_state())
     }
 }
 
 impl BaseImage<Sealed> {
-    pub fn ensure(zfs: &ZfsImages, key: &ImageKey, tarball: &Tarball, idmap: IdRange) -> Result<BaseImage<Sealed>> {
+    pub fn ensure(
+        zfs: &ZfsImages,
+        key: &ImageKey,
+        tarball: &Tarball,
+        idmap: IdRange,
+    ) -> Result<BaseImage<Sealed>> {
         match BaseImage::locate(zfs, key)? {
             Located::Sealed(image) => Ok(image),
             Located::Absent(image) => image.create()?.unpack(tarball, idmap)?.seal(),
@@ -412,10 +534,17 @@ impl BaseImage<Sealed> {
 
     pub fn clone_rootfs(&self, zfs: &ZfsImages, volume: &RootfsVolume) -> Result<RootfsClone> {
         let dataset = zfs.pool.child(&volume.volume);
-        if exists(dataset.as_str())? { Err(AppError::ZfsError(format!(
-            "{dataset} already exists; destroy the leftover volume before provisioning into it"
-        ))) } else {
-            zfs_clone(&Snapshot::base(&self.dataset), &dataset, volume.size)?;
+        if exists(dataset.as_str())? {
+            Err(AppError::ZfsError(format!(
+                "{dataset} already exists; destroy the leftover volume before provisioning into it"
+            )))
+        } else {
+            CloneSnapshot {
+                origin: Snapshot::base(&self.dataset),
+                into: dataset.clone(),
+                props: Props::Rootfs(volume.size),
+            }
+            .run_cmd()?;
             Ok(RootfsClone { dataset })
         }
     }
@@ -428,7 +557,7 @@ pub struct RootfsClone {
 
 impl RootfsClone {
     pub fn discard(self) -> Result<()> {
-        zfs_cmd(&["destroy", self.dataset.as_str()]).map(|_| ())
+        Destroy::Single(self.dataset).run_cmd()
     }
 }
 
@@ -439,7 +568,13 @@ impl Tarball {
     pub fn find(result_path: &str) -> Result<Tarball> {
         let dir = Path::new(result_path).join("tarball");
         std::fs::read_dir(&dir)
-            .map_err(|e| AppError::CmdError(format!("failed to read tarball dir {}: {}", dir.display(), e)))?
+            .map_err(|e| {
+                AppError::CmdError(format!(
+                    "failed to read tarball dir {}: {}",
+                    dir.display(),
+                    e
+                ))
+            })?
             .filter_map(std::result::Result::ok)
             .map(|e| e.path())
             .find(|p| p.extension().is_some_and(|ext| ext == "xz"))
@@ -456,33 +591,48 @@ impl Tarball {
 pub struct ReapedImages(pub usize);
 
 pub fn reap_images(zfs: &ZfsImages, keep: &HashSet<NixHash>) -> Result<ReapedImages> {
-    if exists(zfs.images.as_str())? { Ok(image_datasets(zfs)?
-    .into_iter()
-    .filter(|(key, _)| !keep.contains(&key.hash))
-    .fold(ReapedImages::default(), |acc, (_, dataset)| match reap_image(&dataset) {
-        Ok(true) => ReapedImages(acc.0 + 1),
-        Ok(false) => acc,
-        Err(e) => {
-            warn!("could not reap base image {}: {}", dataset, e);
-            acc
-        }
-    })) } else { Ok(ReapedImages::default()) }
+    if exists(zfs.images.as_str())? {
+        Ok(image_datasets(zfs)?
+            .into_iter()
+            .filter(|(key, _)| !keep.contains(&key.hash))
+            .fold(
+                ReapedImages::default(),
+                |acc, (_, dataset)| match reap_image(&dataset) {
+                    Ok(true) => ReapedImages(acc.0 + 1),
+                    Ok(false) => acc,
+                    Err(e) => {
+                        warn!("could not reap base image {}: {}", dataset, e);
+                        acc
+                    }
+                },
+            ))
+    } else {
+        Ok(ReapedImages::default())
+    }
 }
 
 fn image_datasets(zfs: &ZfsImages) -> Result<Vec<(ImageKey, Dataset)>> {
-    Ok(zfs_cmd(&["list", "-H", "-o", "name", "-t", "filesystem", "-d", "1", zfs.images.as_str()])?
-        .lines()
-        .filter_map(|line| Dataset::try_from(line.trim()).ok())
-        .filter(|dataset| *dataset != zfs.images)
-        .filter_map(|dataset| ImageKey::try_from(dataset.leaf()).ok().map(|key| (key, dataset)))
-        .collect())
+    Ok(ListChildren {
+        parent: zfs.images.clone(),
+    }
+    .run_cmd()?
+    .into_iter()
+    .filter(|dataset| *dataset != zfs.images)
+    .filter_map(|dataset| {
+        ImageKey::try_from(dataset.leaf())
+            .ok()
+            .map(|key| (key, dataset))
+    })
+    .collect())
 }
 
 fn reap_image(dataset: &Dataset) -> Result<bool> {
-    let clones = zfs_cmd(&["get", "-H", "-o", "value", "clones", &Snapshot::base(dataset).to_string()])?;
-    if has_clones(&clones) { Ok(false) } else {
-        info!("reaping base image {}", dataset);
-        destroy_recursive(dataset).map(|()| true)
+    match get::<ClonesProp, _>(Snapshot::base(dataset)).run_cmd()? {
+        HasClones(true) => Ok(false),
+        HasClones(false) => {
+            info!("reaping base image {}", dataset);
+            Destroy::Recursive(dataset.clone()).run_cmd().map(|()| true)
+        }
     }
 }
 
@@ -490,12 +640,16 @@ fn has_clones(value: &str) -> bool {
     !matches!(value.trim(), "" | "-")
 }
 
-fn mountpoint(dataset: &Dataset) -> Result<Mountpoint> {
-    Mountpoint::try_from(zfs_cmd(&["get", "-H", "-o", "value", "mountpoint", dataset.as_str()])?.as_str())
-}
-
-fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership, idmap: IdRange) -> Result<()> {
-    let (uid_map, gid_map) = (IdMap::of(IdKind::User, idmap), IdMap::of(IdKind::Group, idmap));
+fn extract(
+    tarball: &Tarball,
+    into: &Mountpoint,
+    ownership: Ownership,
+    idmap: IdRange,
+) -> Result<()> {
+    let (uid_map, gid_map) = (
+        IdMap::of(IdKind::User, idmap),
+        IdMap::of(IdKind::Group, idmap),
+    );
     let tar = [
         "tar",
         "-x",
@@ -531,25 +685,6 @@ fn extract(tarball: &Tarball, into: &Mountpoint, ownership: Ownership, idmap: Id
     run(&mut cmd, "unpack base image").map(|_| ())
 }
 
-fn zfs_clone(origin: &Snapshot, dataset: &Dataset, size: DiskSize) -> Result<()> {
-    zfs_cmd(&[
-        "clone",
-        "-o",
-        &format!("refquota={size}"),
-        "-o",
-        "acltype=posixacl",
-        "-o",
-        "xattr=sa",
-        &origin.to_string(),
-        dataset.as_str(),
-    ])
-    .map(|_| ())
-}
-
-fn destroy_recursive(dataset: &Dataset) -> Result<()> {
-    zfs_cmd(&["destroy", "-r", dataset.as_str()]).map(|_| ())
-}
-
 fn exists(name: &str) -> Result<bool> {
     Ok(Command::new("zfs")
         .args(["list", "-H", "-o", "name", "-t", "all", name])
@@ -565,27 +700,270 @@ pub(crate) enum Presence {
 }
 
 pub(crate) fn ensure_dataset(name: &str) -> Result<(PathBuf, Presence)> {
+    let dataset = Dataset::try_from(name)?;
     let presence = if exists(name)? {
         Presence::Existed
     } else {
-        zfs_cmd(&["create", "-o", "acltype=posixacl", "-o", "xattr=sa", "-o", "atime=off", name])?;
+        Create::Data(dataset.clone()).run_cmd()?;
         Presence::Created
     };
-    Ok((PathBuf::from(zfs_cmd(&["get", "-H", "-o", "value", "mountpoint", name])?.trim()), presence))
+    Ok((get::<RawMountpointProp, _>(&dataset).run_cmd()?, presence))
 }
 
-fn zfs_cmd(args: &[&str]) -> Result<String> {
-    run(Command::new("zfs").args(args), &format!("zfs {}", args.first().copied().unwrap_or("")))
+fn zfs(args: &[String]) -> Result<String> {
+    run(
+        Command::new("zfs").args(args),
+        &format!("zfs {}", args.first().map_or("", String::as_str)),
+    )
+}
+
+fn argv(head: &[&str], tail: impl IntoIterator<Item = String>) -> Vec<String> {
+    head.iter().copied().map(String::from).chain(tail).collect()
+}
+
+pub trait FromStdout: Sized {
+    fn from_stdout(stdout: &str) -> Result<Self>;
+}
+
+impl FromStdout for () {
+    fn from_stdout(_: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl FromStdout for PathBuf {
+    fn from_stdout(stdout: &str) -> Result<PathBuf> {
+        Ok(PathBuf::from(stdout.trim()))
+    }
+}
+
+impl FromStdout for Mountpoint {
+    fn from_stdout(stdout: &str) -> Result<Mountpoint> {
+        Mountpoint::try_from(stdout)
+    }
+}
+
+impl FromStdout for Vec<Dataset> {
+    fn from_stdout(stdout: &str) -> Result<Vec<Dataset>> {
+        Ok(stdout
+            .lines()
+            .filter_map(|line| Dataset::try_from(line.trim()).ok())
+            .collect())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HasClones(bool);
+
+impl FromStdout for HasClones {
+    fn from_stdout(stdout: &str) -> Result<HasClones> {
+        Ok(HasClones(has_clones(stdout)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginOut {
+    NotCloned,
+    Cloned { snapshot: Snapshot },
+}
+
+impl FromStdout for OriginOut {
+    fn from_stdout(stdout: &str) -> Result<OriginOut> {
+        match stdout.trim() {
+            "-" => Ok(OriginOut::NotCloned),
+            other => Snapshot::try_from(other).map(|snapshot| OriginOut::Cloned { snapshot }),
+        }
+    }
+}
+
+pub trait Property {
+    const NAME: &'static str;
+    type Value: FromStdout;
+}
+
+pub enum MountpointProp {}
+pub enum RawMountpointProp {}
+pub enum ClonesProp {}
+pub enum OriginProp {}
+
+impl Property for MountpointProp {
+    const NAME: &'static str = "mountpoint";
+    type Value = Mountpoint;
+}
+
+impl Property for RawMountpointProp {
+    const NAME: &'static str = "mountpoint";
+    type Value = PathBuf;
+}
+
+impl Property for ClonesProp {
+    const NAME: &'static str = "clones";
+    type Value = HasClones;
+}
+
+impl Property for OriginProp {
+    const NAME: &'static str = "origin";
+    type Value = OriginOut;
+}
+
+pub struct Get<P, T> {
+    target: T,
+    property: PhantomData<P>,
+}
+
+fn get<P: Property, T: fmt::Display>(target: T) -> Get<P, T> {
+    Get {
+        target,
+        property: PhantomData,
+    }
+}
+
+pub enum Props {
+    Data,
+    Rootfs(DiskSize),
+}
+
+impl Props {
+    fn options(&self) -> Vec<String> {
+        match self {
+            Props::Data => vec![
+                String::from("acltype=posixacl"),
+                String::from("xattr=sa"),
+                String::from("atime=off"),
+            ],
+            Props::Rootfs(size) => vec![
+                format!("refquota={size}"),
+                String::from("acltype=posixacl"),
+                String::from("xattr=sa"),
+            ],
+        }
+        .into_iter()
+        .flat_map(|prop| [String::from("-o"), prop])
+        .collect()
+    }
+}
+
+pub struct Promote {
+    dataset: Dataset,
+}
+
+pub enum Destroy {
+    Single(Dataset),
+    Recursive(Dataset),
+}
+
+pub enum Create {
+    Parents(Dataset),
+    Data(Dataset),
+}
+
+pub struct TakeSnapshot {
+    snapshot: Snapshot,
+}
+
+pub struct CloneSnapshot {
+    origin: Snapshot,
+    into: Dataset,
+    props: Props,
+}
+
+pub struct ListChildren {
+    parent: Dataset,
+}
+
+pub trait ZfsCmd {
+    type Output: FromStdout;
+    fn construct_args(&self) -> Vec<String>;
+    fn run_cmd(&self) -> Result<Self::Output> {
+        Self::Output::from_stdout(&zfs(&self.construct_args())?)
+    }
+}
+
+impl ZfsCmd for Promote {
+    type Output = ();
+    fn construct_args(&self) -> Vec<String> {
+        argv(&["promote"], [self.dataset.to_string()])
+    }
+}
+
+impl ZfsCmd for Destroy {
+    type Output = ();
+    fn construct_args(&self) -> Vec<String> {
+        match self {
+            Destroy::Single(dataset) => argv(&["destroy"], [dataset.to_string()]),
+            Destroy::Recursive(dataset) => argv(&["destroy", "-r"], [dataset.to_string()]),
+        }
+    }
+}
+
+impl ZfsCmd for Create {
+    type Output = ();
+    fn construct_args(&self) -> Vec<String> {
+        match self {
+            Create::Parents(dataset) => argv(&["create", "-p"], [dataset.to_string()]),
+            Create::Data(dataset) => argv(
+                &["create"],
+                Props::Data
+                    .options()
+                    .into_iter()
+                    .chain([dataset.to_string()]),
+            ),
+        }
+    }
+}
+
+impl ZfsCmd for TakeSnapshot {
+    type Output = ();
+    fn construct_args(&self) -> Vec<String> {
+        argv(&["snapshot"], [self.snapshot.to_string()])
+    }
+}
+
+impl ZfsCmd for CloneSnapshot {
+    type Output = ();
+    fn construct_args(&self) -> Vec<String> {
+        argv(
+            &["clone"],
+            self.props
+                .options()
+                .into_iter()
+                .chain([self.origin.to_string(), self.into.to_string()]),
+        )
+    }
+}
+
+impl ZfsCmd for ListChildren {
+    type Output = Vec<Dataset>;
+    fn construct_args(&self) -> Vec<String> {
+        argv(
+            &["list", "-H", "-o", "name", "-t", "filesystem", "-d", "1"],
+            [self.parent.to_string()],
+        )
+    }
+}
+
+impl<P: Property, T: fmt::Display> ZfsCmd for Get<P, T> {
+    type Output = P::Value;
+    fn construct_args(&self) -> Vec<String> {
+        argv(
+            &["get", "-H", "-o", "value", P::NAME],
+            [self.target.to_string()],
+        )
+    }
 }
 
 fn run(cmd: &mut Command, what: &str) -> Result<String> {
     let output = cmd.output()?;
-    if output.status.success() { Ok(String::from_utf8(output.stdout)?) } else { Err(AppError::ZfsError(format!(
-        "{} failed (exit: {:?}): {}",
-        what,
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))) }
+    if output.status.success() {
+        Ok(String::from_utf8(output.stdout)?)
+    } else {
+        Err(AppError::ZfsError(format!(
+            "{} failed (exit: {:?}): {}",
+            what,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -594,8 +972,15 @@ mod tests {
 
     #[test]
     fn an_empty_rootfs_is_allocated_through_proxmox_under_the_slot_it_belongs_to() {
-        let volume = RootfsVolume::for_slot(StorageId::try_from(String::from("ZFS")).unwrap(), SlotId::Blue(proxnix_core::Vmid::new(830)), DiskSize::gib(10));
-        assert_eq!(volume.alloc_args().join(" "), "alloc ZFS 830 subvol-830-disk-0 10G --format subvol");
+        let volume = RootfsVolume::for_slot(
+            StorageId::try_from(String::from("ZFS")).unwrap(),
+            SlotId::Blue(proxnix_core::Vmid::new(830)),
+            DiskSize::gib(10),
+        );
+        assert_eq!(
+            volume.alloc_args().join(" "),
+            "alloc ZFS 830 subvol-830-disk-0 10G --format subvol"
+        );
         assert_eq!(volume.volume_id(), "ZFS:subvol-830-disk-0");
         assert_eq!(volume.to_string(), "ZFS:subvol-830-disk-0,size=10G");
     }
@@ -640,8 +1025,14 @@ mod tests {
     fn image_keys_round_trip_through_dataset_names() {
         let unprivileged = ImageKey::new(NixHash::try_from(HASH).unwrap(), Ownership::Unprivileged);
         let privileged = ImageKey::new(NixHash::try_from(HASH).unwrap(), Ownership::Privileged);
-        assert_eq!(ImageKey::try_from(unprivileged.to_string().as_str()).unwrap(), unprivileged);
-        assert_eq!(ImageKey::try_from(privileged.to_string().as_str()).unwrap(), privileged);
+        assert_eq!(
+            ImageKey::try_from(unprivileged.to_string().as_str()).unwrap(),
+            unprivileged
+        );
+        assert_eq!(
+            ImageKey::try_from(privileged.to_string().as_str()).unwrap(),
+            privileged
+        );
         assert_eq!(privileged.to_string(), format!("{}-privileged", HASH));
     }
 
@@ -658,12 +1049,19 @@ mod tests {
         let dataset = images().images.child(&key);
         assert_eq!(dataset.as_str(), format!("ZFS/proxnix-images/{}", HASH));
         assert_eq!(dataset.leaf(), HASH);
-        assert_eq!(Snapshot::base(&dataset).to_string(), format!("ZFS/proxnix-images/{}@base", HASH));
+        assert_eq!(
+            Snapshot::base(&dataset).to_string(),
+            format!("ZFS/proxnix-images/{}@base", HASH)
+        );
     }
 
     #[test]
     fn a_rootfs_volume_renders_as_a_proxmox_volume() {
-        let volume = RootfsVolume::for_slot(images().storage, SlotId::Blue(Vmid::new(842)), DiskSize::gib(10));
+        let volume = RootfsVolume::for_slot(
+            images().storage,
+            SlotId::Blue(Vmid::new(842)),
+            DiskSize::gib(10),
+        );
         assert_eq!(volume.to_string(), "ZFS:subvol-842-disk-0,size=10G");
     }
 
@@ -680,9 +1078,18 @@ mod tests {
 
     #[test]
     fn id_maps_render_for_lxc_usernsexec() {
-        let range = IdRange { host_base: 100_000, count: 65_536 };
-        assert_eq!(IdMap::of(IdKind::User, range).to_string(), "u:0:100000:65536");
-        assert_eq!(IdMap::of(IdKind::Group, range).to_string(), "g:0:100000:65536");
+        let range = IdRange {
+            host_base: 100_000,
+            count: 65_536,
+        };
+        assert_eq!(
+            IdMap::of(IdKind::User, range).to_string(),
+            "u:0:100000:65536"
+        );
+        assert_eq!(
+            IdMap::of(IdKind::Group, range).to_string(),
+            "g:0:100000:65536"
+        );
     }
 
     #[test]
@@ -695,10 +1102,170 @@ mod tests {
     #[test]
     fn zfs_images_deserialise_with_validation() {
         let parsed: ZfsImages =
-            serde_json::from_str(r#"{"storage":"ZFS","pool":"ZFS","images":"ZFS/proxnix-images"}"#).unwrap();
+            serde_json::from_str(r#"{"storage":"ZFS","pool":"ZFS","images":"ZFS/proxnix-images"}"#)
+                .unwrap();
         assert_eq!(parsed, images());
-        let invalid: std::result::Result<ZfsImages, _> =
-            serde_json::from_str(r#"{"storage":"ZFS","pool":"/ZFS","images":"ZFS/proxnix-images"}"#);
+        let invalid: std::result::Result<ZfsImages, _> = serde_json::from_str(
+            r#"{"storage":"ZFS","pool":"/ZFS","images":"ZFS/proxnix-images"}"#,
+        );
         assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn a_data_snapshot_is_taken_by_its_full_name() {
+        let data = DataSnapshot {
+            dataset: CoreDataset::try_from("ZFS/proxnix/state/monitoring/blue").unwrap(),
+            tag: DataTag::Final,
+        };
+        assert_eq!(
+            TakeSnapshot {
+                snapshot: Snapshot::from(&data)
+            }
+            .construct_args()
+            .join(" "),
+            "snapshot ZFS/proxnix/state/monitoring/blue@final"
+        );
+    }
+
+    #[test]
+    fn a_data_clone_carries_the_dataset_properties_and_names_origin_and_target() {
+        let data = DataSnapshot {
+            dataset: CoreDataset::try_from("ZFS/proxnix/state/monitoring/blue").unwrap(),
+            tag: DataTag::Start,
+        };
+        let green = Dataset::try_from("ZFS/proxnix/state/monitoring/green").unwrap();
+        assert_eq!(
+            CloneSnapshot {
+                origin: Snapshot::from(&data),
+                into: green,
+                props: Props::Data,
+            }
+            .construct_args()
+            .join(" "),
+            "clone -o acltype=posixacl -o xattr=sa -o atime=off ZFS/proxnix/state/monitoring/blue@start ZFS/proxnix/state/monitoring/green"
+        );
+    }
+
+    fn image() -> Dataset {
+        images().images.child(&ImageKey::new(
+            NixHash::try_from(HASH).unwrap(),
+            Ownership::Unprivileged,
+        ))
+    }
+
+    fn joined(cmd: &impl ZfsCmd) -> String {
+        cmd.construct_args().join(" ")
+    }
+
+    #[test]
+    fn destroying_names_its_target_and_recurses_only_when_asked() {
+        assert_eq!(
+            joined(&Destroy::Recursive(image())),
+            format!("destroy -r ZFS/proxnix-images/{HASH}")
+        );
+        assert_eq!(
+            joined(&Destroy::Single(
+                Dataset::try_from("ZFS/subvol-842-disk-0").unwrap()
+            )),
+            "destroy ZFS/subvol-842-disk-0"
+        );
+    }
+
+    #[test]
+    fn a_base_image_is_created_with_parents_and_no_options() {
+        assert_eq!(
+            joined(&Create::Parents(image())),
+            format!("create -p ZFS/proxnix-images/{HASH}")
+        );
+    }
+
+    #[test]
+    fn a_host_dataset_is_created_with_the_data_properties() {
+        assert_eq!(
+            joined(&Create::Data(
+                Dataset::try_from("ZFS/proxnix/state").unwrap()
+            )),
+            "create -o acltype=posixacl -o xattr=sa -o atime=off ZFS/proxnix/state"
+        );
+    }
+
+    #[test]
+    fn a_base_image_is_sealed_by_its_base_snapshot() {
+        assert_eq!(
+            joined(&TakeSnapshot {
+                snapshot: Snapshot::base(&image())
+            }),
+            format!("snapshot ZFS/proxnix-images/{HASH}@base")
+        );
+    }
+
+    #[test]
+    fn a_rootfs_clone_carries_its_quota_first_and_no_atime() {
+        assert_eq!(
+            joined(&CloneSnapshot {
+                origin: Snapshot::base(&image()),
+                into: Dataset::try_from("ZFS/subvol-842-disk-0").unwrap(),
+                props: Props::Rootfs(DiskSize::gib(10)),
+            }),
+            format!(
+                "clone -o refquota=10G -o acltype=posixacl -o xattr=sa ZFS/proxnix-images/{HASH}@base ZFS/subvol-842-disk-0"
+            )
+        );
+    }
+
+    #[test]
+    fn image_datasets_are_listed_one_level_deep() {
+        assert_eq!(
+            joined(&ListChildren {
+                parent: images().images
+            }),
+            "list -H -o name -t filesystem -d 1 ZFS/proxnix-images"
+        );
+    }
+
+    #[test]
+    fn properties_are_read_as_bare_values_from_their_target() {
+        assert_eq!(
+            joined(&get::<MountpointProp, _>(&image())),
+            format!("get -H -o value mountpoint ZFS/proxnix-images/{HASH}")
+        );
+        assert_eq!(
+            joined(&get::<RawMountpointProp, _>("ZFS/proxnix/state")),
+            "get -H -o value mountpoint ZFS/proxnix/state"
+        );
+        assert_eq!(
+            joined(&get::<ClonesProp, _>(Snapshot::base(&image()))),
+            format!("get -H -o value clones ZFS/proxnix-images/{HASH}@base")
+        );
+        assert_eq!(
+            joined(&get::<OriginProp, _>(&image())),
+            format!("get -H -o value origin ZFS/proxnix-images/{HASH}")
+        );
+    }
+
+    #[test]
+    fn an_origin_parses_into_its_snapshot() {
+        assert_eq!(
+            OriginOut::from_stdout("ZFS/proxnix/state/monitoring/blue@final\n").unwrap(),
+            OriginOut::Cloned {
+                snapshot: Snapshot {
+                    dataset: Dataset::try_from("ZFS/proxnix/state/monitoring/blue").unwrap(),
+                    tag: SnapshotTag::Final,
+                }
+            }
+        );
+        assert_eq!(OriginOut::from_stdout("-\n").unwrap(), OriginOut::NotCloned);
+        assert!(OriginOut::from_stdout("ZFS/x@other").is_err());
+    }
+
+    #[test]
+    fn a_listing_parses_into_datasets() {
+        assert_eq!(
+            Vec::<Dataset>::from_stdout("ZFS/proxnix-images\nZFS/proxnix-images/a\n").unwrap(),
+            vec![
+                Dataset::try_from("ZFS/proxnix-images").unwrap(),
+                Dataset::try_from("ZFS/proxnix-images/a").unwrap(),
+            ]
+        );
     }
 }

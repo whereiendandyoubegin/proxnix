@@ -64,9 +64,7 @@ pub fn find_string(json: &serde_json::Value, predicate: &impl Fn(&str) -> bool) 
             }
             None
         }
-        _ => {
-            None
-        }
+        _ => None,
     }
 }
 
@@ -95,13 +93,19 @@ mod tests {
     fn reads_the_pushed_commit_and_repo_ssh_url() {
         let parsed = webhook_parse(push("bump")).unwrap();
         assert_eq!(parsed.hash, AFTER);
-        assert_eq!(parsed.repository, "ssh://git@forgejo.thesta.rs:2222/dan/nixology.git");
+        assert_eq!(
+            parsed.repository,
+            "ssh://git@forgejo.thesta.rs:2222/dan/nixology.git"
+        );
     }
 
     #[test]
     fn a_commit_message_quoting_an_ssh_url_does_not_redirect_the_clone() {
         let parsed = webhook_parse(push("point updater at ssh://git@evil.example/x.git")).unwrap();
-        assert_eq!(parsed.repository, "ssh://git@forgejo.thesta.rs:2222/dan/nixology.git");
+        assert_eq!(
+            parsed.repository,
+            "ssh://git@forgejo.thesta.rs:2222/dan/nixology.git"
+        );
     }
 
     #[test]
@@ -112,7 +116,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(parsed.hash, AFTER);
-        assert_eq!(parsed.repository, "ssh://git@forgejo.thesta.rs:2222/dan/nixology.git");
+        assert_eq!(
+            parsed.repository,
+            "ssh://git@forgejo.thesta.rs:2222/dan/nixology.git"
+        );
     }
 
     #[test]

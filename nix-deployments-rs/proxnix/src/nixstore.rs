@@ -22,7 +22,11 @@ pub struct NixStore {
 }
 
 pub(crate) fn store_text(path: &StorePath) -> String {
-    format!("/nix/store/{}-{}", path.hash().as_ref(), path.name().as_ref())
+    format!(
+        "/nix/store/{}-{}",
+        path.hash().as_ref(),
+        path.name().as_ref()
+    )
 }
 
 fn holder_name(holder: &RootHolder) -> String {
@@ -37,7 +41,10 @@ fn holder_of(name: &str) -> Option<RootHolder> {
         Some(("guest", id)) => id.parse().ok().map(|id| RootHolder::Guest(Vmid::new(id))),
         Some(("recent", rest)) => {
             let (rev, job) = rest.split_once('-')?;
-            Some(RootHolder::Recent(Key { job: proxnix_core::ImageType(String::from(job)), rev: rev.parse().ok()? }))
+            Some(RootHolder::Recent(Key {
+                job: proxnix_core::ImageType(String::from(job)),
+                rev: rev.parse().ok()?,
+            }))
         }
         _ => None,
     }
@@ -45,11 +52,24 @@ fn holder_of(name: &str) -> Option<RootHolder> {
 
 impl NixStore {
     pub fn new(root: PathBuf, cache: String, flake: Flake, timeout: Duration) -> NixStore {
-        NixStore { root, cache, flake, timeout }
+        NixStore {
+            root,
+            cache,
+            flake,
+            timeout,
+        }
     }
 
     pub fn seeding(root: PathBuf, timeout: Duration) -> NixStore {
-        NixStore { root, cache: String::new(), flake: Flake { repo: PathBuf::new(), dir: None }, timeout }
+        NixStore {
+            root,
+            cache: String::new(),
+            flake: Flake {
+                repo: PathBuf::new(),
+                dir: None,
+            },
+            timeout,
+        }
     }
 
     fn uri(&self) -> String {
@@ -72,16 +92,32 @@ impl NixStore {
     }
 
     fn seed_args(&self, toplevel: &Toplevel) -> Vec<String> {
-        vec![String::from("copy"), String::from("--no-check-sigs"), String::from("--to"), self.uri(), store_text(toplevel.path())]
+        vec![
+            String::from("copy"),
+            String::from("--no-check-sigs"),
+            String::from("--to"),
+            self.uri(),
+            store_text(toplevel.path()),
+        ]
     }
 
     pub(crate) fn seed(&self, toplevel: &Toplevel) -> Result<()> {
-        info!("seeding {} from the host store into {}", store_text(toplevel.path()), self.root.display());
-        self.tool("nix", "seed", &self.seed_args(toplevel)).map(|_| ()).map_err(AppError::from)
+        info!(
+            "seeding {} from the host store into {}",
+            store_text(toplevel.path()),
+            self.root.display()
+        );
+        self.tool("nix", "seed", &self.seed_args(toplevel))
+            .map(|_| ())
+            .map_err(AppError::from)
     }
 
     fn build_args(&self, key: &Key) -> Vec<String> {
-        let dir = self.flake.dir.as_ref().map_or(String::new(), |dir| format!("&dir={dir}"));
+        let dir = self
+            .flake
+            .dir
+            .as_ref()
+            .map_or(String::new(), |dir| format!("&dir={dir}"));
         vec![
             String::from("build"),
             String::from("--store"),
@@ -103,21 +139,44 @@ impl NixStore {
         vec![String::from("--store"), self.uri(), String::from("--gc")]
     }
 
-    fn tool(&self, program: &str, label: &str, args: &[String]) -> std::result::Result<String, NixFault> {
+    fn tool(
+        &self,
+        program: &str,
+        label: &str,
+        args: &[String],
+    ) -> std::result::Result<String, NixFault> {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         run(program, Path::new("/"), label, &args, self.timeout)
     }
 
     fn copy(&self, key: &Key, toplevel: &Toplevel) -> std::result::Result<(), Detail> {
-        info!("copying {} into the store for {}", store_text(toplevel.path()), key.job.0);
-        self.tool("nix", &key.job.0, &self.copy_args(toplevel)).map(|_| ()).map_err(|fault| Detail(format!("{fault:?}")))
+        info!(
+            "copying {} into the store for {}",
+            store_text(toplevel.path()),
+            key.job.0
+        );
+        self.tool("nix", &key.job.0, &self.copy_args(toplevel))
+            .map(|_| ())
+            .map_err(|fault| Detail(format!("{fault:?}")))
     }
 
     fn build(&self, key: &Key) -> std::result::Result<Toplevel, proxnix_core::BuildFault> {
-        info!("building {} at {} into the store", key.job.0, key.rev.as_ref());
-        let built = self.tool("nix", &key.job.0, &self.build_args(key)).map_err(|nix| fault(nix, Realisation::Build))?;
-        let line = built.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
-        line.parse::<StorePath>().map(Toplevel::from).map_err(proxnix_core::BuildFault::Output)
+        info!(
+            "building {} at {} into the store",
+            key.job.0,
+            key.rev.as_ref()
+        );
+        let built = self
+            .tool("nix", &key.job.0, &self.build_args(key))
+            .map_err(|nix| fault(nix, Realisation::Build))?;
+        let line = built
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default();
+        line.parse::<StorePath>()
+            .map(Toplevel::from)
+            .map_err(proxnix_core::BuildFault::Output)
     }
 
     pub(crate) fn root(&self, holder: &RootHolder, toplevel: &Toplevel) -> Result<()> {
@@ -134,20 +193,27 @@ impl NixStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         file.lock()?;
         Ok(file)
     }
 
     pub(crate) fn unroot(&self, holder: &RootHolder) -> Result<()> {
         match std::fs::remove_file(self.roots().join(holder_name(holder))) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(AppError::from(error)),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(AppError::from(error))
+            }
             _ => Ok(()),
         }
     }
 
     fn collect(&self) -> Result<()> {
-        self.tool("nix-store", "gc", &self.collect_args()).map(|_| ()).map_err(AppError::from)
+        self.tool("nix-store", "gc", &self.collect_args())
+            .map(|_| ())
+            .map_err(AppError::from)
     }
 
     pub fn present(&self) -> Result<BTreeSet<Toplevel>> {
@@ -156,7 +222,11 @@ impl NixStore {
             Err(error) => Err(AppError::from(error)),
             Ok(entries) => Ok(entries
                 .filter_map(std::result::Result::ok)
-                .filter_map(|entry| format!("/nix/store/{}", entry.file_name().to_string_lossy()).parse::<StorePath>().ok())
+                .filter_map(|entry| {
+                    format!("/nix/store/{}", entry.file_name().to_string_lossy())
+                        .parse::<StorePath>()
+                        .ok()
+                })
                 .map(Toplevel::from)
                 .collect()),
         }
@@ -188,8 +258,14 @@ impl NixStore {
         effects
             .iter()
             .filter_map(|effect| match effect {
-                StoreEffect::Copy { key, toplevel } => Some(StoreEvent::Copied { key: key.clone(), outcome: self.copy(key, toplevel) }),
-                StoreEffect::Build { key } => Some(StoreEvent::Built { key: key.clone(), outcome: self.build(key) }),
+                StoreEffect::Copy { key, toplevel } => Some(StoreEvent::Copied {
+                    key: key.clone(),
+                    outcome: self.copy(key, toplevel),
+                }),
+                StoreEffect::Build { key } => Some(StoreEvent::Built {
+                    key: key.clone(),
+                    outcome: self.build(key),
+                }),
                 StoreEffect::Root { holder, toplevel } => {
                     self.quietly("root", self.root(holder, toplevel));
                     None
@@ -216,7 +292,8 @@ mod tests {
     const TOPLEVEL: &str = "/nix/store/78s0iadvjz6s48aqvx4rw78lwrzkjzlw-nixos-system-forgejo-26.11";
 
     fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("proxnix-store-{}-{name}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("proxnix-store-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -226,13 +303,19 @@ mod tests {
         NixStore::new(
             root,
             String::from("file:///ZFS/hydra-cache"),
-            Flake { repo: PathBuf::from("/tmp/proxnix/repos/nixology"), dir: dir.map(String::from) },
+            Flake {
+                repo: PathBuf::from("/tmp/proxnix/repos/nixology"),
+                dir: dir.map(String::from),
+            },
             Duration::from_secs(1),
         )
     }
 
     fn key(job: &str) -> Key {
-        Key { job: ImageType(String::from(job)), rev: REV.parse().unwrap() }
+        Key {
+            job: ImageType(String::from(job)),
+            rev: REV.parse().unwrap(),
+        }
     }
 
     fn toplevel(text: &str) -> Toplevel {
@@ -242,35 +325,55 @@ mod tests {
     #[test]
     fn a_copy_pulls_one_toplevel_from_the_hydra_cache_into_the_chroot_store() {
         assert_eq!(
-            store(PathBuf::from("/ZFS/proxnix/store"), None).copy_args(&toplevel(TOPLEVEL)).join(" "),
-            format!("copy --from file:///ZFS/hydra-cache --to local?root=/ZFS/proxnix/store {TOPLEVEL}")
+            store(PathBuf::from("/ZFS/proxnix/store"), None)
+                .copy_args(&toplevel(TOPLEVEL))
+                .join(" "),
+            format!(
+                "copy --from file:///ZFS/hydra-cache --to local?root=/ZFS/proxnix/store {TOPLEVEL}"
+            )
         );
     }
 
     #[test]
     fn a_build_evaluates_the_pushed_commit_not_whatever_the_checkout_holds() {
         assert_eq!(
-            store(PathBuf::from("/ZFS/proxnix/store"), None).build_args(&key("build-lxc-forgejo")).join(" "),
+            store(PathBuf::from("/ZFS/proxnix/store"), None)
+                .build_args(&key("build-lxc-forgejo"))
+                .join(" "),
             format!(
                 "build --store local?root=/ZFS/proxnix/store --extra-substituters file:///ZFS/hydra-cache --no-link --print-out-paths \
                  git+file:///tmp/proxnix/repos/nixology?rev={REV}#nixosConfigurations.build-lxc-forgejo.config.system.build.toplevel"
             )
         );
-        assert!(store(PathBuf::from("/s"), Some("infra")).build_args(&key("build-lxc")).last().unwrap().contains(&format!("?rev={REV}&dir=infra#")));
-        assert_eq!(store(PathBuf::from("/s"), None).collect_args().join(" "), "--store local?root=/s --gc");
+        assert!(
+            store(PathBuf::from("/s"), Some("infra"))
+                .build_args(&key("build-lxc"))
+                .last()
+                .unwrap()
+                .contains(&format!("?rev={REV}&dir=infra#"))
+        );
+        assert_eq!(
+            store(PathBuf::from("/s"), None).collect_args().join(" "),
+            "--store local?root=/s --gc"
+        );
     }
 
     #[test]
     fn seeding_copies_a_closure_out_of_the_host_store_into_this_one() {
         assert_eq!(
-            store(PathBuf::from("/ZFS/proxnix/state/hydra/nix"), None).seed_args(&toplevel(TOPLEVEL)).join(" "),
+            store(PathBuf::from("/ZFS/proxnix/state/hydra/nix"), None)
+                .seed_args(&toplevel(TOPLEVEL))
+                .join(" "),
             format!("copy --no-check-sigs --to local?root=/ZFS/proxnix/state/hydra/nix {TOPLEVEL}")
         );
     }
 
     #[test]
     fn root_names_survive_a_round_trip_even_with_dashes_in_the_job() {
-        for holder in [RootHolder::Guest(Vmid::new(844)), RootHolder::Recent(key("build-lxc-neon-safekeeper-1"))] {
+        for holder in [
+            RootHolder::Guest(Vmid::new(844)),
+            RootHolder::Recent(key("build-lxc-neon-safekeeper-1")),
+        ] {
             assert_eq!(holder_of(&holder_name(&holder)), Some(holder));
         }
         assert_eq!(holder_of("somebody-elses-root"), None);
@@ -283,18 +386,33 @@ mod tests {
         let guest = RootHolder::Guest(Vmid::new(844));
         let newer = "/nix/store/i3d00236fdkfw1v9cmasajkjhzl8zi5j-nixos-system-forgejo-26.11";
         nix.root(&guest, &toplevel(TOPLEVEL)).unwrap();
-        nix.root(&RootHolder::Recent(key("build-lxc-forgejo")), &toplevel(newer)).unwrap();
+        nix.root(
+            &RootHolder::Recent(key("build-lxc-forgejo")),
+            &toplevel(newer),
+        )
+        .unwrap();
         assert_eq!(nix.rooted().unwrap().get(&guest), Some(&toplevel(TOPLEVEL)));
         nix.root(&guest, &toplevel(newer)).unwrap();
         assert_eq!(nix.rooted().unwrap().get(&guest), Some(&toplevel(newer)));
         nix.unroot(&guest).unwrap();
         nix.unroot(&guest).unwrap();
-        assert_eq!(nix.rooted().unwrap().keys().collect::<Vec<_>>(), vec![&RootHolder::Recent(key("build-lxc-forgejo"))]);
+        assert_eq!(
+            nix.rooted().unwrap().keys().collect::<Vec<_>>(),
+            vec![&RootHolder::Recent(key("build-lxc-forgejo"))]
+        );
     }
 
     fn git(repo: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git").current_dir(repo).args(args).output().unwrap();
-        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -311,19 +429,48 @@ mod tests {
         .unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["add", "flake.nix"]);
-        git(&repo, &["-c", "user.name=proxnix", "-c", "user.email=proxnix@localhost", "commit", "-qm", "tiny"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=proxnix",
+                "-c",
+                "user.email=proxnix@localhost",
+                "commit",
+                "-qm",
+                "tiny",
+            ],
+        );
         let rev = git(&repo, &["rev-parse", "HEAD"]);
-        let nix = NixStore::new(root.join("store"), String::from("https://cache.nixos.org"), Flake { repo, dir: None }, Duration::from_secs(600));
-        let wanted = Key { job: ImageType(String::from("tiny")), rev: rev.parse().unwrap() };
+        let nix = NixStore::new(
+            root.join("store"),
+            String::from("https://cache.nixos.org"),
+            Flake { repo, dir: None },
+            Duration::from_secs(600),
+        );
+        let wanted = Key {
+            job: ImageType(String::from("tiny")),
+            rev: rev.parse().unwrap(),
+        };
         let built = nix.build(&wanted).unwrap();
         assert!(nix.present().unwrap().contains(&built));
-        nix.root(&RootHolder::Recent(wanted.clone()), &built).unwrap();
+        nix.root(&RootHolder::Recent(wanted.clone()), &built)
+            .unwrap();
         nix.collect().unwrap();
-        assert!(nix.present().unwrap().contains(&built), "a rooted toplevel must survive collection");
+        assert!(
+            nix.present().unwrap().contains(&built),
+            "a rooted toplevel must survive collection"
+        );
         nix.unroot(&RootHolder::Recent(wanted)).unwrap();
         nix.collect().unwrap();
-        assert!(!nix.present().unwrap().contains(&built), "an unrooted toplevel must be collected");
-        let _ = std::process::Command::new("chmod").args(["-R", "u+w"]).arg(&root).status();
+        assert!(
+            !nix.present().unwrap().contains(&built),
+            "an unrooted toplevel must be collected"
+        );
+        let _ = std::process::Command::new("chmod")
+            .args(["-R", "u+w"])
+            .arg(&root)
+            .status();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -333,7 +480,10 @@ mod tests {
         let nix = store(root.clone(), None);
         assert!(nix.present().unwrap().is_empty());
         assert!(nix.rooted().unwrap().is_empty());
-        std::fs::create_dir_all(root.join("nix/store/78s0iadvjz6s48aqvx4rw78lwrzkjzlw-nixos-system-forgejo-26.11")).unwrap();
+        std::fs::create_dir_all(
+            root.join("nix/store/78s0iadvjz6s48aqvx4rw78lwrzkjzlw-nixos-system-forgejo-26.11"),
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("nix/store/.links")).unwrap();
         assert_eq!(nix.present().unwrap(), [toplevel(TOPLEVEL)].into());
     }

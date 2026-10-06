@@ -1,19 +1,20 @@
 use crate::api::{self, Kind, Lxc, Qemu};
 use crate::pve::Pve;
 use crate::types::{AppConfig, AppError, BindMount, DesiredState, MountMode, Result};
+use proxmox_api::access::permissions;
 use proxmox_api::nodes::node::{lxc, qemu};
 use proxmox_api::types::bounded_integer::BoundedInteger;
-use proxmox_api::access::permissions;
 use proxnix_core::{
-    Audited, Cores, DiskGib, Grant, GuestName, GuestPath, GuestStatus, HostPath, KindFacts, LockKind, MemoryMb, Mount,
-    MountMode as CoreMountMode, Observation, Permissions, Privilege, RawTags, Resources as CoreResources, Settled,
-    Sighting, Sockets, Unsettled, VisibilityFault, Vmid,
+    Audited, Cores, DiskGib, Grant, GuestName, GuestPath, GuestStatus, HostPath, KindFacts,
+    LockKind, MemoryMb, Mount, MountMode as CoreMountMode, Observation, Permissions, Privilege,
+    RawTags, Resources as CoreResources, Settled, Sighting, Sockets, Unsettled, VisibilityFault,
+    Vmid,
 };
 use rayon::prelude::*;
-use tracing::{debug, warn};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use tracing::{debug, warn};
 
 pub fn parse_config(json: &str) -> Result<DesiredState> {
     let state: DesiredState = serde_json::from_str(json)?;
@@ -108,7 +109,10 @@ pub trait Observe: Kind {
     fn tags_of(config: &Self::Config) -> Option<&str>;
     fn lock_of(config: &Self::Config) -> Option<LockKind>;
     fn lock_named(name: &str) -> LockKind;
-    fn decode(listing: Self::Listing, config: Self::Config) -> std::result::Result<(Resources, Self::Extra), DecodeFault>;
+    fn decode(
+        listing: Self::Listing,
+        config: Self::Config,
+    ) -> std::result::Result<(Resources, Self::Extra), DecodeFault>;
 }
 
 fn vmid_of(id: &impl BoundedInteger) -> Result<Vmid> {
@@ -166,7 +170,9 @@ fn qemu_lock(lock: &qemu::vmid::config::Lock) -> LockKind {
     }
 }
 
-fn narrowed<T: TryFrom<i128, Error = std::num::TryFromIntError>>(value: &impl BoundedInteger) -> Result<T> {
+fn narrowed<T: TryFrom<i128, Error = std::num::TryFromIntError>>(
+    value: &impl BoundedInteger,
+) -> Result<T> {
     Ok(T::try_from(value.get())?)
 }
 
@@ -235,7 +241,10 @@ impl Observe for Qemu {
         qemu::vmid::config::Lock::try_from(name).map_or(LockKind::Other, |lock| qemu_lock(&lock))
     }
 
-    fn decode(listing: QemuListing, config: Self::Config) -> std::result::Result<(Resources, QemuExtra), DecodeFault> {
+    fn decode(
+        listing: QemuListing,
+        config: Self::Config,
+    ) -> std::result::Result<(Resources, QemuExtra), DecodeFault> {
         Ok((
             Resources {
                 memory_mb: listing.memory_mb,
@@ -283,7 +292,10 @@ impl Observe for Lxc {
         lxc::vmid::config::Lock::try_from(name).map_or(LockKind::Other, |lock| lxc_lock(&lock))
     }
 
-    fn decode((): (), config: Self::Config) -> std::result::Result<(Resources, LxcExtra), DecodeFault> {
+    fn decode(
+        (): (),
+        config: Self::Config,
+    ) -> std::result::Result<(Resources, LxcExtra), DecodeFault> {
         Ok((
             Resources {
                 memory_mb: narrowed(&required(config.memory, ConfigKey::Memory)?)?,
@@ -330,7 +342,8 @@ pub(crate) fn audited(granted: &HashMap<String, serde_json::Value>) -> Result<Au
 }
 
 pub fn observe(pve: &Pve) -> std::result::Result<Observation, ObserveFault> {
-    let audited = audited(&granted(pve).map_err(ObserveFault::Transient)?).map_err(ObserveFault::Denied)?;
+    let audited =
+        audited(&granted(pve).map_err(ObserveFault::Transient)?).map_err(ObserveFault::Denied)?;
     let qemu = Qemu::list(pve).map_err(ObserveFault::Transient)?;
     let lxc = Lxc::list(pve).map_err(ObserveFault::Transient)?;
     Ok(Observation::new(
@@ -342,7 +355,10 @@ pub fn observe(pve: &Pve) -> std::result::Result<Observation, ObserveFault> {
     ))
 }
 
-fn sightings<K: Observe>(listed: Vec<Listed<K::Listing>>, config: impl Fn(Vmid) -> Result<K::Config> + Sync) -> Vec<Sighting> {
+fn sightings<K: Observe>(
+    listed: Vec<Listed<K::Listing>>,
+    config: impl Fn(Vmid) -> Result<K::Config> + Sync,
+) -> Vec<Sighting> {
     listed
         .into_par_iter()
         .map(|entry| {
@@ -370,12 +386,24 @@ fn sighting<K: Observe>(entry: Listed<K::Listing>, fetched: Result<K::Config>) -
 }
 
 fn unreadable(id: Vmid, error: &AppError) -> Sighting {
-    warn!("guest {} cannot be read and stays occupied: {error}", id.get());
+    warn!(
+        "guest {} cannot be read and stays occupied: {error}",
+        id.get()
+    );
     Sighting::Unsettled(id, Unsettled::Unreadable)
 }
 
-fn settled<K: Observe>(entry: Listed<K::Listing>, config: K::Config) -> std::result::Result<Settled, DecodeFault> {
-    let Listed { id, name, status, extra, .. } = entry;
+fn settled<K: Observe>(
+    entry: Listed<K::Listing>,
+    config: K::Config,
+) -> std::result::Result<Settled, DecodeFault> {
+    let Listed {
+        id,
+        name,
+        status,
+        extra,
+        ..
+    } = entry;
     let tags = RawTags::from(K::tags_of(&config).map(str::to_string).unwrap_or_default());
     let (resources, extra) = K::decode(extra, config)?;
     Ok(Settled {
@@ -408,7 +436,9 @@ fn observed_resources(resources: &Resources, id: Vmid) -> Result<CoreResources> 
 
 impl From<QemuExtra> for KindFacts {
     fn from(extra: QemuExtra) -> KindFacts {
-        KindFacts::Qemu { sockets: Sockets(extra.sockets) }
+        KindFacts::Qemu {
+            sockets: Sockets(extra.sockets),
+        }
     }
 }
 
@@ -577,14 +607,21 @@ mod tests {
             "maxmem": 2_147_483_648_i64, "maxdisk": 10_737_418_240_i64
         }]));
         assert_eq!(
-            items.into_iter().map(listed_qemu).collect::<Result<Vec<_>>>().unwrap(),
+            items
+                .into_iter()
+                .map(listed_qemu)
+                .collect::<Result<Vec<_>>>()
+                .unwrap(),
             vec![Listed {
                 id: Vmid::new(823),
                 name: "web".to_string(),
                 status: GuestStatus::Running,
                 tags: Some(MANAGED.to_string()),
                 lock: None,
-                extra: QemuListing { memory_mb: 2048, disk_gb: 10.0 },
+                extra: QemuListing {
+                    memory_mb: 2048,
+                    disk_gb: 10.0
+                },
             }]
         );
     }
@@ -597,17 +634,42 @@ mod tests {
             status: GuestStatus::Running,
             tags: Some(MANAGED.to_string()),
             lock: None,
-            extra: QemuListing { memory_mb: 2048, disk_gb: 10.0 },
+            extra: QemuListing {
+                memory_mb: 2048,
+                disk_gb: 10.0,
+            },
         };
-        let config: qemu::vmid::config::GetOutput =
-            decoded(&json!({ "digest": "0123", "balloon": 1024, "cores": 2, "sockets": 1, "memory": "2048", "tags": MANAGED }));
-        let Sighting::Settled(seen) = sighting::<Qemu>(listing, Ok(config)) else { panic!("a full vm config must settle") };
-        assert_eq!(seen.resources, CoreResources { memory: MemoryMb(2048), disk: DiskGib(10), cores: Cores(2) });
-        assert_eq!(seen.facts, KindFacts::Qemu { sockets: Sockets(1) });
+        let config: qemu::vmid::config::GetOutput = decoded(
+            &json!({ "digest": "0123", "balloon": 1024, "cores": 2, "sockets": 1, "memory": "2048", "tags": MANAGED }),
+        );
+        let Sighting::Settled(seen) = sighting::<Qemu>(listing, Ok(config)) else {
+            panic!("a full vm config must settle")
+        };
+        assert_eq!(
+            seen.resources,
+            CoreResources {
+                memory: MemoryMb(2048),
+                disk: DiskGib(10),
+                cores: Cores(2)
+            }
+        );
+        assert_eq!(
+            seen.facts,
+            KindFacts::Qemu {
+                sockets: Sockets(1)
+            }
+        );
     }
 
     fn container(id: u32, lock: Option<LockKind>) -> Listed<()> {
-        Listed { id: Vmid::new(id), name: format!("guest-{id}"), status: GuestStatus::Stopped, tags: None, lock, extra: () }
+        Listed {
+            id: Vmid::new(id),
+            name: format!("guest-{id}"),
+            status: GuestStatus::Stopped,
+            tags: None,
+            lock,
+            extra: (),
+        }
     }
 
     fn lxc_config(json: &serde_json::Value) -> Result<lxc::vmid::config::GetOutput> {
@@ -624,13 +686,19 @@ mod tests {
 
     #[test]
     fn a_half_written_container_occupies_its_id_instead_of_failing_the_observation() {
-        let seen = sightings::<Lxc>(vec![container(930, None), container(947, None)], |id| match id.get() {
-            947 => lxc_config(&half_written()),
-            _ => lxc_config(&full()),
-        });
+        let seen = sightings::<Lxc>(
+            vec![container(930, None), container(947, None)],
+            |id| match id.get() {
+                947 => lxc_config(&half_written()),
+                _ => lxc_config(&full()),
+            },
+        );
         assert_eq!(seen.len(), 2);
         assert!(matches!(&seen[0], Sighting::Settled(settled) if settled.id == Vmid::new(930)));
-        assert_eq!(seen[1], Sighting::Unsettled(Vmid::new(947), Unsettled::Incomplete));
+        assert_eq!(
+            seen[1],
+            Sighting::Unsettled(Vmid::new(947), Unsettled::Incomplete)
+        );
     }
 
     #[test]
@@ -653,8 +721,15 @@ mod tests {
 
     #[test]
     fn a_guest_gone_between_list_and_config_still_occupies_its_id() {
-        let gone = || Err(AppError::ProxmoxError(String::from("Configuration file does not exist")));
-        assert_eq!(sighting::<Lxc>(container(947, None), gone()), Sighting::Unsettled(Vmid::new(947), Unsettled::Unreadable));
+        let gone = || {
+            Err(AppError::ProxmoxError(String::from(
+                "Configuration file does not exist",
+            )))
+        };
+        assert_eq!(
+            sighting::<Lxc>(container(947, None), gone()),
+            Sighting::Unsettled(Vmid::new(947), Unsettled::Unreadable)
+        );
         assert_eq!(
             sighting::<Lxc>(container(947, Some(LockKind::Create)), gone()),
             Sighting::Unsettled(Vmid::new(947), Unsettled::Locked(LockKind::Create))
@@ -664,7 +739,10 @@ mod tests {
     #[test]
     fn a_config_that_cannot_be_decoded_is_unreadable_not_fatal() {
         let bad_mount = json!({ "digest": "0123", "memory": 512, "cores": 1, "rootfs": "ZFS:x,size=8G", "mp0": "/nowhere" });
-        assert_eq!(sighting::<Lxc>(container(947, None), lxc_config(&bad_mount)), Sighting::Unsettled(Vmid::new(947), Unsettled::Unreadable));
+        assert_eq!(
+            sighting::<Lxc>(container(947, None), lxc_config(&bad_mount)),
+            Sighting::Unsettled(Vmid::new(947), Unsettled::Unreadable)
+        );
     }
 
     #[test]
@@ -672,8 +750,12 @@ mod tests {
         assert_eq!(Lxc::lock_named("create"), LockKind::Create);
         assert_eq!(Qemu::lock_named("suspending"), LockKind::Suspending);
         assert_eq!(Lxc::lock_named("something-new"), LockKind::Other);
-        let items: Vec<lxc::GetOutputItems> = decoded(&json!([{ "vmid": 947, "status": "stopped", "lock": "create" }]));
-        assert_eq!(listed_lxc(items.into_iter().next().unwrap()).unwrap().lock, Some(LockKind::Create));
+        let items: Vec<lxc::GetOutputItems> =
+            decoded(&json!([{ "vmid": 947, "status": "stopped", "lock": "create" }]));
+        assert_eq!(
+            listed_lxc(items.into_iter().next().unwrap()).unwrap().lock,
+            Some(LockKind::Create)
+        );
     }
 
     #[test]
@@ -681,7 +763,11 @@ mod tests {
         let items: Vec<lxc::GetOutputItems> =
             decoded(&json!([{ "vmid": 833, "name": "pihole", "status": "stopped" }]));
         assert_eq!(
-            items.into_iter().map(listed_lxc).collect::<Result<Vec<_>>>().unwrap(),
+            items
+                .into_iter()
+                .map(listed_lxc)
+                .collect::<Result<Vec<_>>>()
+                .unwrap(),
             vec![Listed {
                 id: Vmid::new(833),
                 name: "pihole".to_string(),
@@ -719,13 +805,20 @@ mod tests {
                 .join(path),
         )
         .ok()
-        .map(|text| serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path} does not decode: {e}")))
+        .map(|text| {
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path} does not decode: {e}"))
+        })
     }
 
     fn managed_ids<X>(listed: &[Listed<X>]) -> Vec<Vmid> {
         listed
             .iter()
-            .filter(|entry| matches!(Ownership::from(&RawTags::from(entry.tags.clone().unwrap_or_default())), Ownership::Managed(_)))
+            .filter(|entry| {
+                matches!(
+                    Ownership::from(&RawTags::from(entry.tags.clone().unwrap_or_default())),
+                    Ownership::Managed(_)
+                )
+            })
             .map(|entry| entry.id)
             .collect()
     }
@@ -738,15 +831,30 @@ mod tests {
             .map(|item| listed_qemu(item).unwrap())
             .collect();
         for id in managed_ids(&listed) {
-            let config: Option<qemu::vmid::config::GetOutput> = fixture(&format!("qemu/{}/config.json", id.get()));
-            let listing = QemuListing { memory_mb: 0, disk_gb: 0.0 };
+            let config: Option<qemu::vmid::config::GetOutput> =
+                fixture(&format!("qemu/{}/config.json", id.get()));
+            let listing = QemuListing {
+                memory_mb: 0,
+                disk_gb: 0.0,
+            };
             if let Some(config) = config {
-                assert!(Qemu::decode(listing, config).is_ok(), "config of {} is unusable", id.get());
+                assert!(
+                    Qemu::decode(listing, config).is_ok(),
+                    "config of {} is unusable",
+                    id.get()
+                );
             }
-            let agent: Option<qemu::vmid::agent::network_get_interfaces::GetOutput> =
-                fixture(&format!("qemu/{}/agent/network-get-interfaces.json", id.get()));
+            let agent: Option<qemu::vmid::agent::network_get_interfaces::GetOutput> = fixture(
+                &format!("qemu/{}/agent/network-get-interfaces.json", id.get()),
+            );
             if let Some(agent) = agent {
-                assert!(agent.additional_properties.get("result").and_then(agent_ipv4).is_some());
+                assert!(
+                    agent
+                        .additional_properties
+                        .get("result")
+                        .and_then(agent_ipv4)
+                        .is_some()
+                );
             }
         }
     }
@@ -759,9 +867,14 @@ mod tests {
             .map(|item| listed_lxc(item).unwrap())
             .collect();
         for id in managed_ids(&listed) {
-            let config: Option<lxc::vmid::config::GetOutput> = fixture(&format!("lxc/{}/config.json", id.get()));
+            let config: Option<lxc::vmid::config::GetOutput> =
+                fixture(&format!("lxc/{}/config.json", id.get()));
             if let Some(config) = config {
-                assert!(Lxc::decode((), config).is_ok(), "config of {} is unusable", id.get());
+                assert!(
+                    Lxc::decode((), config).is_ok(),
+                    "config of {} is unusable",
+                    id.get()
+                );
             }
             let interfaces: Option<Vec<lxc::vmid::interfaces::GetOutputItems>> =
                 fixture(&format!("lxc/{}/interfaces.json", id.get()));
@@ -776,23 +889,45 @@ mod tests {
         }
     }
 
-
     #[test]
     fn nixology_appconfig_points_the_api_client_at_the_decrypted_token() {
         let config = parse_appconfig(NIXOLOGY_APPCONFIG).unwrap();
         assert_eq!(config.proxmox.node, "pve01");
-        assert_eq!(config.proxmox.token_file, std::path::PathBuf::from("/run/secrets/proxnix/api_token"));
-        assert_eq!(config.proxmox.ca_file, std::path::PathBuf::from("/etc/pve/pve-root-ca.pem"));
+        assert_eq!(
+            config.proxmox.token_file,
+            std::path::PathBuf::from("/run/secrets/proxnix/api_token")
+        );
+        assert_eq!(
+            config.proxmox.ca_file,
+            std::path::PathBuf::from("/etc/pve/pve-root-ca.pem")
+        );
     }
 
     #[test]
     fn nixology_supplies_every_setting_in_its_own_units() {
         let config = parse_appconfig(NIXOLOGY_APPCONFIG).unwrap();
-        assert_eq!(config.timings_ms.get(crate::types::Timing::ProvisionStagger), std::time::Duration::from_millis(150));
-        assert_eq!(config.timings_ms.get(crate::types::Timing::NixBuild), std::time::Duration::from_secs(3600));
+        assert_eq!(
+            config
+                .timings_ms
+                .get(crate::types::Timing::ProvisionStagger),
+            std::time::Duration::from_millis(150)
+        );
+        assert_eq!(
+            config.timings_ms.get(crate::types::Timing::NixBuild),
+            std::time::Duration::from_secs(3600)
+        );
         assert_eq!(config.sozu.http_port, 80);
-        assert_eq!(config.unprivileged_idmap, crate::types::IdRange { host_base: 100_000, count: 65_536 });
-        assert_eq!(config.guest_check.command, "/run/current-system/sw/bin/proxnix-health-check");
+        assert_eq!(
+            config.unprivileged_idmap,
+            crate::types::IdRange {
+                host_base: 100_000,
+                count: 65_536
+            }
+        );
+        assert_eq!(
+            config.guest_check.command,
+            "/run/current-system/sw/bin/proxnix-health-check"
+        );
     }
 
     #[test]
@@ -804,7 +939,9 @@ mod tests {
 
     fn raw_fixture(path: &str) -> serde_json::Value {
         let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api").join(path),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/api")
+                .join(path),
         )
         .unwrap_or_else(|e| panic!("fixture {path} is missing: {e}"));
         serde_json::from_str(&text).unwrap()
@@ -814,7 +951,12 @@ mod tests {
         raw.as_array()
             .unwrap()
             .iter()
-            .map(|item| (item["vmid"].as_u64().unwrap(), item["tags"].as_str().map(str::to_string)))
+            .map(|item| {
+                (
+                    item["vmid"].as_u64().unwrap(),
+                    item["tags"].as_str().map(str::to_string),
+                )
+            })
             .collect()
     }
 
@@ -844,14 +986,23 @@ mod tests {
             .flat_map(|kind| {
                 std::fs::read_dir(dir.join(kind))
                     .unwrap()
-                    .map(move |entry| (kind, entry.unwrap().file_name().to_string_lossy().to_string()))
+                    .map(move |entry| {
+                        (
+                            kind,
+                            entry.unwrap().file_name().to_string_lossy().to_string(),
+                        )
+                    })
             })
             .filter_map(|(kind, id)| {
                 let path = format!("{kind}/{id}/config.json");
                 let raw = raw_fixture(&path);
                 let decoded = match kind {
-                    "qemu" => serde_json::from_str::<qemu::vmid::config::GetOutput>(&raw.to_string()).map(|_| ()),
-                    _ => serde_json::from_str::<lxc::vmid::config::GetOutput>(&raw.to_string()).map(|_| ()),
+                    "qemu" => {
+                        serde_json::from_str::<qemu::vmid::config::GetOutput>(&raw.to_string())
+                            .map(|_| ())
+                    }
+                    _ => serde_json::from_str::<lxc::vmid::config::GetOutput>(&raw.to_string())
+                        .map(|_| ()),
                 };
                 decoded.err().map(|e| format!("{path}: {e}"))
             })
@@ -863,26 +1014,43 @@ mod tests {
         decoded::<permissions::GetOutput>(&raw_fixture("permissions.json")).additional_properties
     }
 
-    fn observed_from_fixtures(granted: &HashMap<String, serde_json::Value>) -> std::result::Result<Observation, ObserveFault> {
+    fn observed_from_fixtures(
+        granted: &HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<Observation, ObserveFault> {
         let audited = audited(granted).map_err(ObserveFault::Denied)?;
         let qemu = sightings::<Qemu>(
             decoded::<Vec<qemu::GetOutputItems>>(&raw_fixture("qemu.json"))
                 .into_iter()
                 .map(|item| listed_qemu(item).unwrap())
                 .collect(),
-            |id| Ok(decoded(&raw_fixture(&format!("qemu/{}/config.json", id.get())))),
+            |id| {
+                Ok(decoded(&raw_fixture(&format!(
+                    "qemu/{}/config.json",
+                    id.get()
+                ))))
+            },
         );
         let lxc = sightings::<Lxc>(
             decoded::<Vec<lxc::GetOutputItems>>(&raw_fixture("lxc.json"))
                 .into_iter()
                 .map(|item| listed_lxc(item).unwrap())
                 .collect(),
-            |id| Ok(decoded(&raw_fixture(&format!("lxc/{}/config.json", id.get())))),
+            |id| {
+                Ok(decoded(&raw_fixture(&format!(
+                    "lxc/{}/config.json",
+                    id.get()
+                ))))
+            },
         );
-        Ok(Observation::new(audited, qemu.into_iter().chain(lxc).collect()))
+        Ok(Observation::new(
+            audited,
+            qemu.into_iter().chain(lxc).collect(),
+        ))
     }
 
-    fn without_vm_audit(granted: &HashMap<String, serde_json::Value>) -> HashMap<String, serde_json::Value> {
+    fn without_vm_audit(
+        granted: &HashMap<String, serde_json::Value>,
+    ) -> HashMap<String, serde_json::Value> {
         granted
             .iter()
             .map(|(path, privileges)| {
@@ -910,7 +1078,10 @@ mod tests {
         assert!(audited(&stripped).is_err());
         assert!(audited(&HashMap::new()).is_err());
         assert!(audited(&[(String::from("/vms"), json!({ "VM.Audit": 0 }))].into()).is_err());
-        assert!(matches!(observed_from_fixtures(&stripped), Err(ObserveFault::Denied(_))));
+        assert!(matches!(
+            observed_from_fixtures(&stripped),
+            Err(ObserveFault::Denied(_))
+        ));
     }
 
     #[test]
@@ -936,7 +1107,11 @@ mod tests {
             .map(|(id, name)| (id, String::from(name)))
             .into()
         );
-        assert!(observed.anomalies().is_empty(), "{:?}", observed.anomalies());
+        assert!(
+            observed.anomalies().is_empty(),
+            "{:?}",
+            observed.anomalies()
+        );
     }
 
     #[test]
@@ -949,7 +1124,9 @@ mod tests {
             );
         }
         for id in [944, 923, 941] {
-            assert!(matches!(observed.slot(Vmid::new(id)), proxnix_core::SlotState::Vacant(v) if v.id() == Vmid::new(id)));
+            assert!(
+                matches!(observed.slot(Vmid::new(id)), proxnix_core::SlotState::Vacant(v) if v.id() == Vmid::new(id))
+            );
         }
     }
 
@@ -961,11 +1138,21 @@ mod tests {
             other => panic!("844 must be managed, got {other:?}"),
         };
         assert_eq!(forgejo.tags().slot, Slot::Blue);
-        assert_eq!(forgejo.tags().nix.as_ref(), "78s0iadvjz6s48aqvx4rw78lwrzkjzlw");
-        assert_eq!(forgejo.tags().service_ip, Some(Ipv4Addr::new(192, 168, 1, 214)));
+        assert_eq!(
+            forgejo.tags().nix.as_ref(),
+            "78s0iadvjz6s48aqvx4rw78lwrzkjzlw"
+        );
+        assert_eq!(
+            forgejo.tags().service_ip,
+            Some(Ipv4Addr::new(192, 168, 1, 214))
+        );
         assert_eq!(
             forgejo.guest().resources(),
-            CoreResources { memory: MemoryMb(2048), disk: DiskGib(20), cores: Cores(2) }
+            CoreResources {
+                memory: MemoryMb(2048),
+                disk: DiskGib(20),
+                cores: Cores(2)
+            }
         );
         assert!(matches!(
             forgejo.guest().facts(),
@@ -975,8 +1162,17 @@ mod tests {
         assert_eq!(website.len(), 1);
         assert_eq!(
             website[0].guest().resources(),
-            CoreResources { memory: MemoryMb(2048), disk: DiskGib(10), cores: Cores(2) }
+            CoreResources {
+                memory: MemoryMb(2048),
+                disk: DiskGib(10),
+                cores: Cores(2)
+            }
         );
-        assert_eq!(website[0].guest().facts(), &KindFacts::Qemu { sockets: Sockets(1) });
+        assert_eq!(
+            website[0].guest().facts(),
+            &KindFacts::Qemu {
+                sockets: Sockets(1)
+            }
+        );
     }
 }

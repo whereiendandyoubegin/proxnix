@@ -3,7 +3,10 @@ use tracing::{error, info, warn};
 use crate::{
     context::BackendPool,
     git::{git_ensure_commit, git_head_commit},
-    host_net::{AddressesHeld, ServiceBinding, Uniqueness, by_bridge, check_uniqueness, choose_prober, ensure_service_addresses},
+    host_net::{
+        AddressesHeld, ServiceBinding, Uniqueness, by_bridge, check_uniqueness, choose_prober,
+        ensure_service_addresses,
+    },
     types::{AppConfig, AppError, Result},
 };
 
@@ -37,11 +40,18 @@ impl<'a> RepoSource<'a> {
     }
 }
 
-pub fn hold_service_addresses(bindings: &[ServiceBinding], backend_pool: Option<&BackendPool>, probe_wait: std::time::Duration) -> Result<()> {
+pub fn hold_service_addresses(
+    bindings: &[ServiceBinding],
+    backend_pool: Option<&BackendPool>,
+    probe_wait: std::time::Duration,
+) -> Result<()> {
     match check_uniqueness(bindings) {
         Uniqueness::Clashing { duplicates } => {
             for address in &duplicates {
-                error!("service address {} is declared by more than one workload", address);
+                error!(
+                    "service address {} is declared by more than one workload",
+                    address
+                );
             }
             return match duplicates.first() {
                 Some(first) => Err(AppError::DuplicateServiceAddress(*first)),
@@ -65,7 +75,12 @@ pub fn hold_service_addresses(bindings: &[ServiceBinding], backend_pool: Option<
     for b in &by_bridge(bindings) {
         match ensure_service_addresses(prober, &b.bridge, &b.addresses) {
             Err(e) => warn!("could not inspect {}: {}", b.bridge, e),
-            Ok(AddressesHeld { added: 0, conflicted: 0, failed: 0, .. }) => {}
+            Ok(AddressesHeld {
+                added: 0,
+                conflicted: 0,
+                failed: 0,
+                ..
+            }) => {}
             Ok(held) => info!(
                 "{}: {} service addresses newly held, {} already held, {} refused because another host answers for them, {} otherwise unclaimed",
                 b.bridge, held.added, held.already, held.conflicted, held.failed

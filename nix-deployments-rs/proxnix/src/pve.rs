@@ -25,8 +25,9 @@ pub struct Pve {
 }
 
 fn read(path: &Path, what: &str) -> Result<Vec<u8>> {
-    std::fs::read(path)
-        .map_err(|e| AppError::ProxmoxError(format!("could not read {what} {}: {e}", path.display())))
+    std::fs::read(path).map_err(|e| {
+        AppError::ProxmoxError(format!("could not read {what} {}: {e}", path.display()))
+    })
 }
 
 fn secret(path: &Path) -> Result<String> {
@@ -37,11 +38,7 @@ fn secret(path: &Path) -> Result<String> {
 
 fn pinned_client(ca_file: &Path) -> Result<reqwest::Client> {
     reqwest::Certificate::from_pem(&read(ca_file, "ca certificate")?)
-        .and_then(|ca| {
-            reqwest::ClientBuilder::new()
-                .tls_certs_only([ca])
-                .build()
-        })
+        .and_then(|ca| reqwest::ClientBuilder::new().tls_certs_only([ca]).build())
         .map_err(|e| AppError::ProxmoxError(format!("could not build the api client: {e}")))
 }
 
@@ -64,15 +61,28 @@ impl Pve {
         NodesClient::new(&self.client).node(&self.node)
     }
 
-    pub fn api(&self, poll: std::time::Duration, timeout: std::time::Duration) -> crate::remote::Api<proxmox_api::ReqwestClient> {
-        crate::remote::Api::new(self.client.clone(), self.node.clone(), self.runtime.clone(), poll, timeout)
+    pub fn api(
+        &self,
+        poll: std::time::Duration,
+        timeout: std::time::Duration,
+    ) -> crate::remote::Api<proxmox_api::ReqwestClient> {
+        crate::remote::Api::new(
+            self.client.clone(),
+            self.node.clone(),
+            self.runtime.clone(),
+            poll,
+            timeout,
+        )
     }
 
     pub fn access(&self) -> AccessClient<&proxmox_api::ReqwestClient> {
         AccessClient::new(&self.client)
     }
 
-    pub fn call<T>(&self, request: impl Future<Output = std::result::Result<T, proxmox_api::ReqwestError>>) -> Result<T> {
+    pub fn call<T>(
+        &self,
+        request: impl Future<Output = std::result::Result<T, proxmox_api::ReqwestError>>,
+    ) -> Result<T> {
         self.runtime.block_on(request).map_err(AppError::from)
     }
 }

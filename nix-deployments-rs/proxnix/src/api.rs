@@ -256,7 +256,11 @@ impl<K: Kind> GuestOp<K> {
     }
 
     pub fn reclaim(id: Vmid) -> [Self; 3] {
-        [Self::protection(id, false), Self::stop(id), Self::destroy(id)]
+        [
+            Self::protection(id, false),
+            Self::stop(id),
+            Self::destroy(id),
+        ]
     }
 
     pub fn invocation(&self) -> Result<Invocation> {
@@ -265,7 +269,9 @@ impl<K: Kind> GuestOp<K> {
             GuestOp::Set(id, p) => Invocation::new::<K>(Verb::Set, Some(vmid(*id)?), p, &[]),
             GuestOp::Start(id, p) => Invocation::new::<K>(Verb::Start, Some(vmid(*id)?), p, &[]),
             GuestOp::Stop(id, p) => Invocation::new::<K>(Verb::Stop, Some(vmid(*id)?), p, &[]),
-            GuestOp::Destroy(id, p) => Invocation::new::<K>(Verb::Destroy, Some(vmid(*id)?), p, &[]),
+            GuestOp::Destroy(id, p) => {
+                Invocation::new::<K>(Verb::Destroy, Some(vmid(*id)?), p, &[])
+            }
             GuestOp::Resize(id, p) => {
                 Invocation::new::<K>(Verb::Resize, Some(vmid(*id)?), p, &["disk", "size"])
             }
@@ -283,7 +289,6 @@ impl<K: Kind> GuestOp<K> {
 
 pub trait Execute {
     fn run<K: Kind>(&self, op: &GuestOp<K>) -> Result<Settled>;
-
 }
 
 pub struct Cli;
@@ -403,7 +408,10 @@ mod tests {
             "pct stop 200"
         );
         assert_eq!(
-            rendered(&GuestOp::<Lxc>::Destroy(id(200), lxc::vmid::DeleteParams::default())),
+            rendered(&GuestOp::<Lxc>::Destroy(
+                id(200),
+                lxc::vmid::DeleteParams::default()
+            )),
             "pct destroy 200"
         );
     }
@@ -471,13 +479,19 @@ mod tests {
 
     #[test]
     fn retiring_stops_before_destroying() {
-        let rendered: Vec<String> = GuestOp::<Lxc>::retire(id(200)).iter().map(rendered).collect();
+        let rendered: Vec<String> = GuestOp::<Lxc>::retire(id(200))
+            .iter()
+            .map(rendered)
+            .collect();
         assert_eq!(rendered, ["pct stop 200", "pct destroy 200"]);
     }
 
     #[test]
     fn reclaiming_unprotects_then_stops_then_destroys() {
-        let rendered: Vec<String> = GuestOp::<Qemu>::reclaim(id(823)).iter().map(rendered).collect();
+        let rendered: Vec<String> = GuestOp::<Qemu>::reclaim(id(823))
+            .iter()
+            .map(rendered)
+            .collect();
         assert_eq!(
             rendered,
             ["qm set 823 --protection 0", "qm stop 823", "qm destroy 823"]

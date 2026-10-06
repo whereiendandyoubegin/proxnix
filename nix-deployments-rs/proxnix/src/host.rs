@@ -25,7 +25,9 @@ mod template_name {
             file_name.contains("-nixos-image-"),
             file_name.split_once('-'),
         ) {
-            (true, true, Some((prefix, _))) if prefix.len() == NixHash::STORE_LEN => NixHash::try_from(prefix).ok(),
+            (true, true, Some((prefix, _))) if prefix.len() == NixHash::STORE_LEN => {
+                NixHash::try_from(prefix).ok()
+            }
             _ => None,
         }
     }
@@ -53,7 +55,11 @@ impl Reaped {
 }
 
 fn cached_template(path: PathBuf, file_name: &str, bytes: u64) -> Option<CachedTemplate> {
-    template_name::nix_hash(file_name).map(|nix_hash| CachedTemplate { path, nix_hash, bytes })
+    template_name::nix_hash(file_name).map(|nix_hash| CachedTemplate {
+        path,
+        nix_hash,
+        bytes,
+    })
 }
 
 pub fn reap_template_cache(template_cache_path: &str, keep: &HashSet<NixHash>) -> Result<Reaped> {
@@ -71,8 +77,9 @@ pub fn reap_template_cache(template_cache_path: &str, keep: &HashSet<NixHash>) -
             cached_template(entry.path(), &name, bytes)
         })
         .filter(|template| !keep.contains(&template.nix_hash))
-        .fold(Reaped::default(), |acc, template| {
-            match std::fs::remove_file(&template.path) {
+        .fold(
+            Reaped::default(),
+            |acc, template| match std::fs::remove_file(&template.path) {
                 Ok(()) => {
                     info!("reaped stale template {}", template.path.display());
                     acc.plus(template.bytes)
@@ -85,26 +92,43 @@ pub fn reap_template_cache(template_cache_path: &str, keep: &HashSet<NixHash>) -
                     );
                     acc
                 }
-            }
-        }))
+            },
+        ))
 }
 
 pub(crate) fn host_text(path: &HostPath) -> String {
     match path.parts() {
         [] => String::from("/"),
-        parts => parts.iter().map(|part| format!("/{}", part.as_ref())).collect(),
+        parts => parts
+            .iter()
+            .map(|part| format!("/{}", part.as_ref()))
+            .collect(),
     }
 }
 
 pub(crate) fn dataset_text(dataset: &Dataset) -> String {
-    dataset.segments().iter().map(AsRef::as_ref).collect::<Vec<&str>>().join("/")
+    dataset
+        .segments()
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<&str>>()
+        .join("/")
 }
 
 pub(crate) fn host_effect_text(effect: &HostEffect) -> String {
     match effect {
-        HostEffect::EnsureDataset { dataset, owner } => format!("dataset {} (owned by {owner:?} when created)", dataset_text(dataset)),
-        HostEffect::EnsureDirectory { path, owner } => format!("directory {} (owned by {owner:?} when created)", host_text(path)),
-        HostEffect::EnsureHostPath { path, owner } => format!("host path {} (owned by {owner:?} if proxnix creates it)", host_text(path)),
+        HostEffect::EnsureDataset { dataset, owner } => format!(
+            "dataset {} (owned by {owner:?} when created)",
+            dataset_text(dataset)
+        ),
+        HostEffect::EnsureDirectory { path, owner } => format!(
+            "directory {} (owned by {owner:?} when created)",
+            host_text(path)
+        ),
+        HostEffect::EnsureHostPath { path, owner } => format!(
+            "host path {} (owned by {owner:?} if proxnix creates it)",
+            host_text(path)
+        ),
     }
 }
 
@@ -123,18 +147,19 @@ pub(crate) fn ensure(effect: &HostEffect, idmap: IdRange) -> Result<()> {
             let name = dataset_text(dataset);
             let expected = PathBuf::from(host_text(&dataset.mountpoint()));
             match crate::zfs::ensure_dataset(&name)? {
-                (mounted, Presence::Created) if mounted == expected => own(&expected, *owner, idmap),
-                (mounted, Presence::Existed) if mounted == expected => Ok(()),
-                (mounted, _) => {
-                    Err(AppError::ZfsError(format!(
-                        "{name} is mounted at {}, but the layout expects {}; proxnix never moves a mountpoint",
-                        mounted.display(),
-                        expected.display()
-                    )))
+                (mounted, Presence::Created) if mounted == expected => {
+                    own(&expected, *owner, idmap)
                 }
+                (mounted, Presence::Existed) if mounted == expected => Ok(()),
+                (mounted, _) => Err(AppError::ZfsError(format!(
+                    "{name} is mounted at {}, but the layout expects {}; proxnix never moves a mountpoint",
+                    mounted.display(),
+                    expected.display()
+                ))),
             }
         }
-        HostEffect::EnsureDirectory { path, owner } | HostEffect::EnsureHostPath { path, owner } => {
+        HostEffect::EnsureDirectory { path, owner }
+        | HostEffect::EnsureHostPath { path, owner } => {
             let path = PathBuf::from(host_text(path));
             if path.exists() {
                 Ok(())
@@ -147,7 +172,15 @@ pub(crate) fn ensure(effect: &HostEffect, idmap: IdRange) -> Result<()> {
     }
 }
 
-const STUB_DIRS: [&str; 7] = ["sbin", "etc", "proc", "sys", "dev", "nix/store", "var/log/journal"];
+const STUB_DIRS: [&str; 7] = [
+    "sbin",
+    "etc",
+    "proc",
+    "sys",
+    "dev",
+    "nix/store",
+    "var/log/journal",
+];
 
 fn own_tree(path: &Path, uid: u32) -> Result<()> {
     std::os::unix::fs::lchown(path, Some(uid), Some(uid))?;
@@ -158,9 +191,14 @@ fn own_tree(path: &Path, uid: u32) -> Result<()> {
 }
 
 pub(crate) fn stub_rootfs(rootfs: &Path, toplevel: &Path, owner: Option<u32>) -> Result<()> {
-    STUB_DIRS.iter().try_for_each(|dir| std::fs::create_dir_all(rootfs.join(dir)))?;
+    STUB_DIRS
+        .iter()
+        .try_for_each(|dir| std::fs::create_dir_all(rootfs.join(dir)))?;
     std::os::unix::fs::symlink(toplevel.join("init"), rootfs.join("sbin/init"))?;
-    std::fs::copy(toplevel.join("etc/os-release"), rootfs.join("etc/os-release"))?;
+    std::fs::copy(
+        toplevel.join("etc/os-release"),
+        rootfs.join("etc/os-release"),
+    )?;
     owner.map_or(Ok(()), |uid| own_tree(rootfs, uid))
 }
 
@@ -182,8 +220,14 @@ pub fn copy_to_template_storage(
 
     let unique = template_name::of(nix_hash, &filename);
     let dest = format!("{template_cache_path}{unique}");
-    std::fs::copy(src, &dest)
-        .map_err(|e| AppError::CmdError(format!("failed to copy {} to {}: {}", src.display(), dest, e)))?;
+    std::fs::copy(src, &dest).map_err(|e| {
+        AppError::CmdError(format!(
+            "failed to copy {} to {}: {}",
+            src.display(),
+            dest,
+            e
+        ))
+    })?;
 
     Ok(format!("local:vztmpl/{unique}"))
 }
@@ -203,7 +247,10 @@ impl MacAddress {
     pub(crate) fn for_guest(id: Vmid) -> Result<MacAddress> {
         match id.get().to_be_bytes() {
             [0, high, middle, low] => Ok(MacAddress([0x02, 0x70, 0x78, high, middle, low])),
-            _ => Err(AppError::CmdError(format!("vmid {} does not fit in a guest mac address", id.get()))),
+            _ => Err(AppError::CmdError(format!(
+                "vmid {} does not fit in a guest mac address",
+                id.get()
+            ))),
         }
     }
 }
@@ -255,11 +302,19 @@ impl fmt::Display for LxcConf<'_> {
             .iter()
             .enumerate()
             .try_for_each(|(index, mount)| writeln!(f, "mp{index}: {}", mount_spec(mount)))?;
-        writeln!(f, "net0: name=eth0,bridge={},hwaddr={},type=veth", self.config.network_bridge, self.hwaddr)?;
+        writeln!(
+            f,
+            "net0: name=eth0,bridge={},hwaddr={},type=veth",
+            self.config.network_bridge, self.hwaddr
+        )?;
         writeln!(f, "ostype: unmanaged")?;
         writeln!(f, "protection: {}", u8::from(self.config.protected))?;
         writeln!(f, "rootfs: {}", self.rootfs)?;
-        writeln!(f, "tags: {}", tags.into_iter().collect::<Vec<_>>().join(";"))?;
+        writeln!(
+            f,
+            "tags: {}",
+            tags.into_iter().collect::<Vec<_>>().join(";")
+        )?;
         writeln!(f, "unprivileged: {}", u8::from(!self.config.privileged))
     }
 }
@@ -288,7 +343,8 @@ impl PveFs {
     }
 
     fn staged(&self, id: Vmid) -> PathBuf {
-        self.conf_dir.join(format!("{}.conf.tmp.{}", id.get(), std::process::id()))
+        self.conf_dir
+            .join(format!("{}.conf.tmp.{}", id.get(), std::process::id()))
     }
 
     fn lock(&self, id: Vmid) -> PathBuf {
@@ -297,7 +353,10 @@ impl PveFs {
 
     fn hold(&self, id: Vmid) -> Result<File> {
         std::fs::create_dir_all(&self.lock_dir)?;
-        let file = OpenOptions::new().create(true).append(true).open(self.lock(id))?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.lock(id))?;
         self.acquire(id, file, self.attempts)
     }
 
@@ -308,7 +367,10 @@ impl PveFs {
                 std::thread::sleep(self.pause);
                 self.acquire(id, file, left - 1)
             }
-            Err(TryLockError::WouldBlock) => Err(AppError::CmdError(format!("timed out waiting for the config lock of {}", id.get()))),
+            Err(TryLockError::WouldBlock) => Err(AppError::CmdError(format!(
+                "timed out waiting for the config lock of {}",
+                id.get()
+            ))),
             Err(TryLockError::Error(error)) => Err(AppError::from(error)),
         }
     }
@@ -318,8 +380,13 @@ fn unclaimed(vmlist: &str, id: Vmid) -> Result<()> {
     let listed: serde_json::Value = serde_json::from_str(vmlist)?;
     match listed.get("ids").map(|ids| ids.get(id.get().to_string())) {
         Some(None) => Ok(()),
-        Some(Some(_)) => Err(AppError::CmdError(format!("vmid {} was claimed before its config could be written", id.get()))),
-        None => Err(AppError::ProxmoxError(String::from("the cluster vmlist has no ids"))),
+        Some(Some(_)) => Err(AppError::CmdError(format!(
+            "vmid {} was claimed before its config could be written",
+            id.get()
+        ))),
+        None => Err(AppError::ProxmoxError(String::from(
+            "the cluster vmlist has no ids",
+        ))),
     }
 }
 
@@ -344,15 +411,19 @@ fn discard(staged: &Path) {
     match std::fs::remove_file(staged) {
         Ok(()) => (),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => warn!("could not remove staged config {}: {}", staged.display(), error),
+        Err(error) => warn!(
+            "could not remove staged config {}: {}",
+            staged.display(),
+            error
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proxnix_core::Vmid;
     use crate::zfs::DiskSize;
+    use proxnix_core::Vmid;
 
     fn hash(s: &str) -> NixHash {
         NixHash::try_from(s).unwrap()
@@ -377,16 +448,36 @@ unprivileged: 1
 ";
 
     fn mount(host: &str, at: &str, mode: MountMode) -> Mount {
-        Mount { host: HostPath::try_from(host).unwrap(), guest: proxnix_core::GuestPath(at.to_string()), mode }
+        Mount {
+            host: HostPath::try_from(host).unwrap(),
+            guest: proxnix_core::GuestPath(at.to_string()),
+            mode,
+        }
     }
 
     fn nixflix_mounts() -> Vec<Mount> {
         vec![
-            mount("/var/lib/proxnix/nixflix", "/data/.state", MountMode::ReadWrite),
+            mount(
+                "/var/lib/proxnix/nixflix",
+                "/data/.state",
+                MountMode::ReadWrite,
+            ),
             mount("/ZFS/nixflix", "/data/media", MountMode::ReadWrite),
-            mount("/var/lib/proxnix/nixflix-sabnzbd", "/var/lib/sabnzbd", MountMode::ReadWrite),
-            mount("/var/lib/proxnix/sops", "/var/lib/sops-key", MountMode::ReadOnly),
-            mount("/var/lib/proxnix/logs/nixflix", "/var/log/journal", MountMode::ReadWrite),
+            mount(
+                "/var/lib/proxnix/nixflix-sabnzbd",
+                "/var/lib/sabnzbd",
+                MountMode::ReadWrite,
+            ),
+            mount(
+                "/var/lib/proxnix/sops",
+                "/var/lib/sops-key",
+                MountMode::ReadOnly,
+            ),
+            mount(
+                "/var/lib/proxnix/logs/nixflix",
+                "/var/log/journal",
+                MountMode::ReadWrite,
+            ),
         ]
     }
 
@@ -421,7 +512,11 @@ unprivileged: 1
     fn fresh_tags() -> Tags {
         Tags {
             pending: true,
-            ..Tags::new(hash("bv7mmn7x00swyhdrlaa0qs7dgqp9gv1n"), "43710d511fca5c72b71e154c8c1d22c0524b2816", proxnix_core::Slot::Green)
+            ..Tags::new(
+                hash("bv7mmn7x00swyhdrlaa0qs7dgqp9gv1n"),
+                "43710d511fca5c72b71e154c8c1d22c0524b2816",
+                proxnix_core::Slot::Green,
+            )
         }
     }
 
@@ -435,16 +530,36 @@ unprivileged: 1
 
     #[test]
     fn a_fresh_container_conf_is_what_pct_set_left_on_pve01_apart_from_its_mac() {
-        let (config, tags, rootfs, mounts) = (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
-        let conf = LxcConf::of(&config, &mounts, &tags, &rootfs, SlotId::Green(Vmid::new(947))).unwrap();
+        let (config, tags, rootfs, mounts) =
+            (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
+        let conf = LxcConf::of(
+            &config,
+            &mounts,
+            &tags,
+            &rootfs,
+            SlotId::Green(Vmid::new(947)),
+        )
+        .unwrap();
         assert_eq!(conf.to_string(), NIXFLIX_947);
     }
 
     #[test]
     fn a_hostname_longer_than_proxmox_allows_is_rejected_before_anything_runs() {
-        let config = ContainerConfig { name: "a".repeat(256), ..nixflix() };
+        let config = ContainerConfig {
+            name: "a".repeat(256),
+            ..nixflix()
+        };
         let (tags, rootfs) = (fresh_tags(), green_rootfs());
-        assert!(matches!(LxcConf::of(&config, &nixflix_mounts(), &tags, &rootfs, SlotId::Green(Vmid::new(947))), Err(AppError::ProxmoxString(_))));
+        assert!(matches!(
+            LxcConf::of(
+                &config,
+                &nixflix_mounts(),
+                &tags,
+                &rootfs,
+                SlotId::Green(Vmid::new(947))
+            ),
+            Err(AppError::ProxmoxString(_))
+        ));
     }
 
     #[test]
@@ -457,7 +572,8 @@ unprivileged: 1
     }
 
     fn scratch(name: &str, vmlist: &str) -> PveFs {
-        let root = std::env::temp_dir().join(format!("proxnix-pvefs-{}-{name}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("proxnix-pvefs-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("lxc")).unwrap();
         std::fs::write(root.join("vmlist"), vmlist).unwrap();
@@ -479,23 +595,43 @@ unprivileged: 1
             .collect()
     }
 
-    const VMLIST: &str = r#"{ "version": 1, "ids": { "847": { "node": "pve01", "type": "lxc", "version": 1 } } }"#;
+    const VMLIST: &str =
+        r#"{ "version": 1, "ids": { "847": { "node": "pve01", "type": "lxc", "version": 1 } } }"#;
 
     #[test]
     fn a_conf_appears_whole_under_its_vmid_and_leaves_nothing_staged() {
         let fs = scratch("whole", VMLIST);
-        let (config, tags, rootfs, mounts) = (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
-        let conf = LxcConf::of(&config, &mounts, &tags, &rootfs, SlotId::Green(Vmid::new(947))).unwrap();
+        let (config, tags, rootfs, mounts) =
+            (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
+        let conf = LxcConf::of(
+            &config,
+            &mounts,
+            &tags,
+            &rootfs,
+            SlotId::Green(Vmid::new(947)),
+        )
+        .unwrap();
         write_conf(&fs, SlotId::Green(Vmid::new(947)), &conf).unwrap();
         assert_eq!(written(&fs), vec![String::from("947.conf")]);
-        assert_eq!(std::fs::read_to_string(fs.conf(Vmid::new(947))).unwrap(), NIXFLIX_947);
+        assert_eq!(
+            std::fs::read_to_string(fs.conf(Vmid::new(947))).unwrap(),
+            NIXFLIX_947
+        );
     }
 
     #[test]
     fn a_vmid_the_cluster_already_lists_is_never_written_over() {
         let fs = scratch("claimed", VMLIST);
-        let (config, tags, rootfs, mounts) = (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
-        let conf = LxcConf::of(&config, &mounts, &tags, &rootfs, SlotId::Blue(Vmid::new(847))).unwrap();
+        let (config, tags, rootfs, mounts) =
+            (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
+        let conf = LxcConf::of(
+            &config,
+            &mounts,
+            &tags,
+            &rootfs,
+            SlotId::Blue(Vmid::new(847)),
+        )
+        .unwrap();
         assert!(write_conf(&fs, SlotId::Blue(Vmid::new(847)), &conf).is_err());
         assert!(written(&fs).is_empty());
     }
@@ -504,8 +640,16 @@ unprivileged: 1
     fn a_config_lock_someone_else_holds_is_waited_on_then_refused() {
         let fs = scratch("locked", VMLIST);
         let held = fs.hold(Vmid::new(947)).unwrap();
-        let (config, tags, rootfs, mounts) = (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
-        let conf = LxcConf::of(&config, &mounts, &tags, &rootfs, SlotId::Green(Vmid::new(947))).unwrap();
+        let (config, tags, rootfs, mounts) =
+            (nixflix(), fresh_tags(), green_rootfs(), nixflix_mounts());
+        let conf = LxcConf::of(
+            &config,
+            &mounts,
+            &tags,
+            &rootfs,
+            SlotId::Green(Vmid::new(947)),
+        )
+        .unwrap();
         assert!(write_conf(&fs, SlotId::Green(Vmid::new(947)), &conf).is_err());
         assert!(written(&fs).is_empty());
         drop(held);
@@ -517,9 +661,30 @@ unprivileged: 1
         let existing = std::env::temp_dir().join(format!("proxnix-owned-{}", std::process::id()));
         std::fs::create_dir_all(&existing).unwrap();
         let path = HostPath::try_from(existing.to_str().unwrap()).unwrap();
-        let idmap = IdRange { host_base: 100_000, count: 65_536 };
-        assert!(ensure(&HostEffect::EnsureDirectory { path: path.clone(), owner: Owner::HostRoot }, idmap).is_ok());
-        assert!(ensure(&HostEffect::EnsureHostPath { path, owner: Owner::GuestRoot }, idmap).is_ok());
+        let idmap = IdRange {
+            host_base: 100_000,
+            count: 65_536,
+        };
+        assert!(
+            ensure(
+                &HostEffect::EnsureDirectory {
+                    path: path.clone(),
+                    owner: Owner::HostRoot
+                },
+                idmap
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure(
+                &HostEffect::EnsureHostPath {
+                    path,
+                    owner: Owner::GuestRoot
+                },
+                idmap
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -532,10 +697,22 @@ unprivileged: 1
         let rootfs = root.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
         stub_rootfs(&rootfs, &toplevel, None).unwrap();
-        assert_eq!(std::fs::read_link(rootfs.join("sbin/init")).unwrap(), toplevel.join("init"));
-        assert_eq!(std::fs::read_to_string(rootfs.join("etc/os-release")).unwrap(), "ID=nixos\n");
+        assert_eq!(
+            std::fs::read_link(rootfs.join("sbin/init")).unwrap(),
+            toplevel.join("init")
+        );
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("etc/os-release")).unwrap(),
+            "ID=nixos\n"
+        );
         assert!(STUB_DIRS.iter().all(|dir| rootfs.join(dir).is_dir()));
-        assert!(std::fs::symlink_metadata(rootfs.join("sbin/init")).unwrap().file_type().is_symlink(), "init points into the store, it is never copied");
+        assert!(
+            std::fs::symlink_metadata(rootfs.join("sbin/init"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "init points into the store, it is never copied"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -550,7 +727,10 @@ unprivileged: 1
     const STALE: &str = "qd7rhsd030gx35sqx1bfh9kbq5na28ir";
 
     fn template_name(prefix: &str) -> String {
-        format!("{}-nixos-image-lxc-26.05.20260505.549bd84-x86_64-linux.tar.xz", prefix)
+        format!(
+            "{}-nixos-image-lxc-26.05.20260505.549bd84-x86_64-linux.tar.xz",
+            prefix
+        )
     }
 
     #[test]
@@ -591,7 +771,13 @@ unprivileged: 1
     fn reaping_counts_files_and_bytes() {
         let empty = Reaped::default();
         assert_eq!(empty, Reaped { files: 0, bytes: 0 });
-        assert_eq!(empty.plus(100).plus(50), Reaped { files: 2, bytes: 150 });
+        assert_eq!(
+            empty.plus(100).plus(50),
+            Reaped {
+                files: 2,
+                bytes: 150
+            }
+        );
     }
 
     #[test]
@@ -601,7 +787,13 @@ unprivileged: 1
         let stale_name = template_name(STALE);
         let live = cached_template(PathBuf::from(&live_name), &live_name, 1).unwrap();
         let stale = cached_template(PathBuf::from(&stale_name), &stale_name, 1).unwrap();
-        assert!(keep.contains(&live.nix_hash), "the current build must survive");
-        assert!(!keep.contains(&stale.nix_hash), "an older build must be reaped");
+        assert!(
+            keep.contains(&live.nix_hash),
+            "the current build must survive"
+        );
+        assert!(
+            !keep.contains(&stale.nix_hash),
+            "an older build must be reaped"
+        );
     }
 }

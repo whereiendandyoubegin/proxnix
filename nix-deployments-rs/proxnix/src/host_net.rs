@@ -8,7 +8,6 @@ use tracing::{error, info, warn};
 
 use crate::types::{AppError, Result};
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceBinding {
     pub bridge: String,
@@ -39,7 +38,11 @@ impl TryFrom<&str> for MacAddress {
             && octets
                 .iter()
                 .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit()));
-        if well_formed { Ok(MacAddress(candidate.to_ascii_lowercase())) } else { Err(AppError::MacParseError(candidate.to_string())) }
+        if well_formed {
+            Ok(MacAddress(candidate.to_ascii_lowercase()))
+        } else {
+            Err(AppError::MacParseError(candidate.to_string()))
+        }
     }
 }
 
@@ -122,16 +125,28 @@ pub struct AddressesHeld {
 
 impl AddressesHeld {
     fn added(self) -> Self {
-        Self { added: self.added + 1, ..self }
+        Self {
+            added: self.added + 1,
+            ..self
+        }
     }
     fn already(self) -> Self {
-        Self { already: self.already + 1, ..self }
+        Self {
+            already: self.already + 1,
+            ..self
+        }
     }
     fn conflicted(self) -> Self {
-        Self { conflicted: self.conflicted + 1, ..self }
+        Self {
+            conflicted: self.conflicted + 1,
+            ..self
+        }
     }
     fn failed(self) -> Self {
-        Self { failed: self.failed + 1, ..self }
+        Self {
+            failed: self.failed + 1,
+            ..self
+        }
     }
 }
 
@@ -156,7 +171,9 @@ pub fn plan_service_address(held: &[BridgeAddress], wanted: Ipv4Addr) -> Service
     match held.iter().find(|h| h.address == wanted) {
         Some(_) => ServiceAddress::Held,
         None => match held.first() {
-            Some(primary) => ServiceAddress::Absent { prefix_len: primary.prefix_len },
+            Some(primary) => ServiceAddress::Absent {
+                prefix_len: primary.prefix_len,
+            },
             None => ServiceAddress::NoPrefix,
         },
     }
@@ -165,7 +182,9 @@ pub fn plan_service_address(held: &[BridgeAddress], wanted: Ipv4Addr) -> Service
 pub fn read_arping(probe: ArpProbe, stdout: &str) -> Occupancy {
     match probe {
         ArpProbe::NoReply => Occupancy::Free,
-        ArpProbe::Replied => Occupancy::Occupied { by: bracketed_mac(stdout) },
+        ArpProbe::Replied => Occupancy::Occupied {
+            by: bracketed_mac(stdout),
+        },
     }
 }
 
@@ -205,7 +224,11 @@ pub fn check_uniqueness(bindings: &[ServiceBinding]) -> Uniqueness {
         .into_iter()
         .collect();
 
-    if duplicates.is_empty() { Uniqueness::Unique } else { Uniqueness::Clashing { duplicates } }
+    if duplicates.is_empty() {
+        Uniqueness::Unique
+    } else {
+        Uniqueness::Clashing { duplicates }
+    }
 }
 
 pub fn by_bridge(bindings: &[ServiceBinding]) -> Vec<BridgeBindings> {
@@ -236,12 +259,16 @@ fn bridge_addresses(bridge: &str) -> Result<Vec<BridgeAddress>> {
         .arg("dev")
         .arg(bridge)
         .output()?;
-    if output.status.success() { Ok(parse_bridge_addresses(&String::from_utf8(output.stdout)?)) } else { Err(AppError::CmdError(format!(
-        "ip addr show dev {} failed (exit: {:?}): {}",
-        bridge,
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
-    ))) }
+    if output.status.success() {
+        Ok(parse_bridge_addresses(&String::from_utf8(output.stdout)?))
+    } else {
+        Err(AppError::CmdError(format!(
+            "ip addr show dev {} failed (exit: {:?}): {}",
+            bridge,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
 }
 
 pub fn choose_prober(wait: Duration) -> Prober {
@@ -309,16 +336,22 @@ fn add_address(bridge: &str, address: Ipv4Addr, prefix_len: u8) -> Result<()> {
         .arg("dev")
         .arg(bridge)
         .output()?;
-    if output.status.success() { Ok(()) } else {
+    if output.status.success() {
+        Ok(())
+    } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("File exists") { Ok(()) } else { Err(AppError::CmdError(format!(
-            "ip addr add {}/{} dev {} failed (exit: {:?}): {}",
-            address,
-            prefix_len,
-            bridge,
-            output.status.code(),
-            stderr
-        ))) }
+        if stderr.contains("File exists") {
+            Ok(())
+        } else {
+            Err(AppError::CmdError(format!(
+                "ip addr add {}/{} dev {} failed (exit: {:?}): {}",
+                address,
+                prefix_len,
+                bridge,
+                output.status.code(),
+                stderr
+            )))
+        }
     }
 }
 
@@ -339,36 +372,44 @@ pub fn ensure_service_addresses(
     wanted: &[Ipv4Addr],
 ) -> Result<AddressesHeld> {
     let held = bridge_addresses(bridge)?;
-    Ok(wanted
-        .iter()
-        .fold(AddressesHeld::default(), |acc, address| {
-            match plan_service_address(&held, *address) {
-                ServiceAddress::Held => acc.already(),
-                ServiceAddress::NoPrefix => {
-                    warn!(
-                        "{} has no address of its own, so {} cannot be added without a prefix length",
-                        bridge, address
-                    );
-                    acc.failed()
-                }
-                ServiceAddress::Absent { prefix_len } => {
-                    match claim(prober, bridge, *address, prefix_len) {
-                        Ok(()) => {
-                            info!("holding service address {}/{} on {}", address, prefix_len, bridge);
-                            acc.added()
-                        }
-                        Err(e @ AppError::ServiceAddressConflict { .. }) => {
-                            error!("{}, so it will not be claimed; give the workload a free address", e);
-                            acc.conflicted()
-                        }
-                        Err(e) => {
-                            warn!("could not hold service address {} on {}: {}", address, bridge, e);
-                            acc.failed()
-                        }
+    Ok(wanted.iter().fold(
+        AddressesHeld::default(),
+        |acc, address| match plan_service_address(&held, *address) {
+            ServiceAddress::Held => acc.already(),
+            ServiceAddress::NoPrefix => {
+                warn!(
+                    "{} has no address of its own, so {} cannot be added without a prefix length",
+                    bridge, address
+                );
+                acc.failed()
+            }
+            ServiceAddress::Absent { prefix_len } => {
+                match claim(prober, bridge, *address, prefix_len) {
+                    Ok(()) => {
+                        info!(
+                            "holding service address {}/{} on {}",
+                            address, prefix_len, bridge
+                        );
+                        acc.added()
+                    }
+                    Err(e @ AppError::ServiceAddressConflict { .. }) => {
+                        error!(
+                            "{}, so it will not be claimed; give the workload a free address",
+                            e
+                        );
+                        acc.conflicted()
+                    }
+                    Err(e) => {
+                        warn!(
+                            "could not hold service address {} on {}: {}",
+                            address, bridge, e
+                        );
+                        acc.failed()
                     }
                 }
             }
-        }))
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -451,13 +492,20 @@ mod tests {
 
     #[test]
     fn bindings_are_grouped_by_the_bridge_they_sit_on() {
-        let bindings = vec![binding("vmbr0", 23), binding("vmbr1", 5), binding("vmbr0", 41)];
+        let bindings = vec![
+            binding("vmbr0", 23),
+            binding("vmbr1", 5),
+            binding("vmbr0", 41),
+        ];
         assert_eq!(
             by_bridge(&bindings),
             vec![
                 BridgeBindings {
                     bridge: "vmbr0".into(),
-                    addresses: vec![Ipv4Addr::new(192, 168, 1, 23), Ipv4Addr::new(192, 168, 1, 41)],
+                    addresses: vec![
+                        Ipv4Addr::new(192, 168, 1, 23),
+                        Ipv4Addr::new(192, 168, 1, 41)
+                    ],
                 },
                 BridgeBindings {
                     bridge: "vmbr1".into(),
@@ -474,32 +522,50 @@ mod tests {
 
     #[test]
     fn outcomes_are_counted_separately() {
-        let counted = AddressesHeld::default().added().added().already().conflicted().failed();
+        let counted = AddressesHeld::default()
+            .added()
+            .added()
+            .already()
+            .conflicted()
+            .failed();
         assert_eq!(
             counted,
-            AddressesHeld { added: 2, already: 1, conflicted: 1, failed: 1 }
+            AddressesHeld {
+                added: 2,
+                already: 1,
+                conflicted: 1,
+                failed: 1
+            }
         );
     }
 
     #[test]
     fn a_mac_address_round_trips_lowercased() {
         assert_eq!(
-            MacAddress::try_from("3C:A8:2A:0E:03:BC").expect("valid").to_string(),
+            MacAddress::try_from("3C:A8:2A:0E:03:BC")
+                .expect("valid")
+                .to_string(),
             "3c:a8:2a:0e:03:bc"
         );
     }
 
     #[test]
     fn text_that_is_not_a_mac_address_is_rejected() {
-        ["", "3c:a8:2a:0e:03", "3c:a8:2a:0e:03:bc:de", "zz:a8:2a:0e:03:bc", "3ca82a0e03bc"]
-            .iter()
-            .for_each(|candidate| {
-                assert!(
-                    MacAddress::try_from(*candidate).is_err(),
-                    "{} should not parse as a MAC address",
-                    candidate
-                )
-            });
+        [
+            "",
+            "3c:a8:2a:0e:03",
+            "3c:a8:2a:0e:03:bc:de",
+            "zz:a8:2a:0e:03:bc",
+            "3ca82a0e03bc",
+        ]
+        .iter()
+        .for_each(|candidate| {
+            assert!(
+                MacAddress::try_from(*candidate).is_err(),
+                "{} should not parse as a MAC address",
+                candidate
+            )
+        });
     }
 
     #[test]
@@ -513,22 +579,30 @@ mod tests {
         let answered = "ARPING 192.168.1.42 from 0.0.0.0 vmbr0\nUnicast reply from 192.168.1.42 [3C:A8:2A:0E:03:BC]  0.746ms\nSent 1 probes (1 broadcast(s))\nReceived 1 response(s)";
         assert_eq!(
             read_arping(ArpProbe::Replied, answered),
-            Occupancy::Occupied { by: mac("3c:a8:2a:0e:03:bc") }
+            Occupancy::Occupied {
+                by: mac("3c:a8:2a:0e:03:bc")
+            }
         );
     }
 
     #[test]
     fn a_reply_whose_output_we_cannot_read_is_still_a_conflict() {
-        ["", "Unicast reply from 192.168.1.42  0.746ms", "something unexpected"]
-            .iter()
-            .for_each(|stdout| {
-                assert_eq!(
-                    read_arping(ArpProbe::Replied, stdout),
-                    Occupancy::Occupied { by: Responder::Unidentified },
-                    "a reply must count as a conflict even when stdout reads {:?}",
-                    stdout
-                )
-            });
+        [
+            "",
+            "Unicast reply from 192.168.1.42  0.746ms",
+            "something unexpected",
+        ]
+        .iter()
+        .for_each(|stdout| {
+            assert_eq!(
+                read_arping(ArpProbe::Replied, stdout),
+                Occupancy::Occupied {
+                    by: Responder::Unidentified
+                },
+                "a reply must count as a conflict even when stdout reads {:?}",
+                stdout
+            )
+        });
     }
 
     #[test]
@@ -552,7 +626,10 @@ mod tests {
 
     #[test]
     fn a_neighbour_that_never_resolved_leaves_the_address_free() {
-        assert_eq!(parse_neighbour("192.168.1.207 INCOMPLETE \n"), Occupancy::Free);
+        assert_eq!(
+            parse_neighbour("192.168.1.207 INCOMPLETE \n"),
+            Occupancy::Free
+        );
         assert_eq!(parse_neighbour("192.168.1.32 FAILED \n"), Occupancy::Free);
         assert_eq!(
             parse_neighbour("192.168.1.32 lladdr 00:00:00:00:00:00 INCOMPLETE"),
@@ -564,17 +641,25 @@ mod tests {
     fn a_resolved_neighbour_holds_the_address() {
         assert_eq!(
             parse_neighbour("192.168.1.1 lladdr 80:69:1a:5b:6c:a4 REACHABLE \n"),
-            Occupancy::Occupied { by: mac("80:69:1a:5b:6c:a4") }
+            Occupancy::Occupied {
+                by: mac("80:69:1a:5b:6c:a4")
+            }
         );
         assert_eq!(
             parse_neighbour("192.168.1.222 lladdr bc:24:11:d0:0f:1c STALE \n"),
-            Occupancy::Occupied { by: mac("bc:24:11:d0:0f:1c") }
+            Occupancy::Occupied {
+                by: mac("bc:24:11:d0:0f:1c")
+            }
         );
     }
 
     #[test]
     fn distinct_addresses_are_unique() {
-        let bindings = vec![binding("vmbr0", 23), binding("vmbr0", 41), binding("vmbr1", 5)];
+        let bindings = vec![
+            binding("vmbr0", 23),
+            binding("vmbr0", 41),
+            binding("vmbr1", 5),
+        ];
         assert_eq!(check_uniqueness(&bindings), Uniqueness::Unique);
     }
 
@@ -588,7 +673,9 @@ mod tests {
         ];
         assert_eq!(
             check_uniqueness(&bindings),
-            Uniqueness::Clashing { duplicates: vec![Ipv4Addr::new(192, 168, 1, 23)] }
+            Uniqueness::Clashing {
+                duplicates: vec![Ipv4Addr::new(192, 168, 1, 23)]
+            }
         );
     }
 
@@ -597,7 +684,9 @@ mod tests {
         let bindings = vec![binding("vmbr0", 23), binding("vmbr1", 23)];
         assert_eq!(
             check_uniqueness(&bindings),
-            Uniqueness::Clashing { duplicates: vec![Ipv4Addr::new(192, 168, 1, 23)] }
+            Uniqueness::Clashing {
+                duplicates: vec![Ipv4Addr::new(192, 168, 1, 23)]
+            }
         );
     }
 

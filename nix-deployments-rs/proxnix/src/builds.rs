@@ -39,7 +39,10 @@ impl WallClock {
     }
 
     fn unix(self, moment: Moment) -> Option<u64> {
-        (self.0 + Duration::from_millis(moment.0)).duration_since(UNIX_EPOCH).ok().map(|since| since.as_secs())
+        (self.0 + Duration::from_millis(moment.0))
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs())
     }
 }
 
@@ -49,17 +52,42 @@ fn fault_text(fault: &SyncFault) -> String {
         SyncFault::Build(BuildFault::Eval(_, detail)) => format!("eval: {}", detail.0),
         SyncFault::Build(BuildFault::Build(_, detail)) => format!("build: {}", detail.0),
         SyncFault::Build(BuildFault::Output(fault)) => format!("output: {fault:?}"),
-        SyncFault::Build(BuildFault::TimedOut(after)) => format!("timed out after {}s", after.0 / 1000),
+        SyncFault::Build(BuildFault::TimedOut(after)) => {
+            format!("timed out after {}s", after.0 / 1000)
+        }
     }
 }
 
 fn view(clock: WallClock, job: String, rev: String, state: &BuildState) -> BuildView {
-    let blank = BuildView { job, rev, state: Phase::AwaitingHydra, source: None, toplevel: None, since: None, fault: None };
+    let blank = BuildView {
+        job,
+        rev,
+        state: Phase::AwaitingHydra,
+        source: None,
+        toplevel: None,
+        since: None,
+        fault: None,
+    };
     match state {
-        BuildState::AwaitingHydra { since } => BuildView { since: clock.unix(*since), ..blank },
-        BuildState::Copying { toplevel } => BuildView { state: Phase::Copying, toplevel: Some(store_text(toplevel.path())), ..blank },
-        BuildState::Building { started } => BuildView { state: Phase::Building, since: clock.unix(*started), ..blank },
-        BuildState::Ready { toplevel, source, at } => BuildView {
+        BuildState::AwaitingHydra { since } => BuildView {
+            since: clock.unix(*since),
+            ..blank
+        },
+        BuildState::Copying { toplevel } => BuildView {
+            state: Phase::Copying,
+            toplevel: Some(store_text(toplevel.path())),
+            ..blank
+        },
+        BuildState::Building { started } => BuildView {
+            state: Phase::Building,
+            since: clock.unix(*started),
+            ..blank
+        },
+        BuildState::Ready {
+            toplevel,
+            source,
+            at,
+        } => BuildView {
             state: Phase::Ready,
             source: Some(match source {
                 Source::Hydra => Origin::Hydra,
@@ -69,19 +97,34 @@ fn view(clock: WallClock, job: String, rev: String, state: &BuildState) -> Build
             since: clock.unix(*at),
             ..blank
         },
-        BuildState::Failed { fault } => BuildView { state: Phase::Failed, fault: Some(fault_text(fault)), ..blank },
+        BuildState::Failed { fault } => BuildView {
+            state: Phase::Failed,
+            fault: Some(fault_text(fault)),
+            ..blank
+        },
     }
 }
 
 pub fn views(ledger: &Ledger, clock: WallClock) -> Vec<BuildView> {
-    ledger.entries().map(|(key, state)| view(clock, key.job.0.clone(), String::from(key.rev.as_ref()), state)).collect()
+    ledger
+        .entries()
+        .map(|(key, state)| {
+            view(
+                clock,
+                key.job.0.clone(),
+                String::from(key.rev.as_ref()),
+                state,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use proxnix_core::{
-        Detail, DurationMs, HydraBuild, ImageType, Key, Policy, Retain, StoreEvent, StorePath, SyncInput, Toplevel, sync_step,
+        Detail, DurationMs, HydraBuild, ImageType, Key, Policy, Retain, StoreEvent, StorePath,
+        SyncInput, Toplevel, sync_step,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -89,7 +132,10 @@ mod tests {
     const TOPLEVEL: &str = "/nix/store/78s0iadvjz6s48aqvx4rw78lwrzkjzlw-nixos-system-forgejo";
 
     fn key(job: &str) -> Key {
-        Key { job: ImageType(String::from(job)), rev: REV.parse().unwrap() }
+        Key {
+            job: ImageType(String::from(job)),
+            rev: REV.parse().unwrap(),
+        }
     }
 
     fn ledger() -> Ledger {
@@ -97,8 +143,11 @@ mod tests {
         let failed = key("build-lxc-hydra");
         let waiting = key("build-lxc-monitoring");
         let toplevel = Toplevel::from(TOPLEVEL.parse::<StorePath>().unwrap());
-        let hydra: BTreeMap<Key, HydraBuild> =
-            [(ready.clone(), HydraBuild::Succeeded(toplevel.clone())), (failed.clone(), HydraBuild::Failed)].into();
+        let hydra: BTreeMap<Key, HydraBuild> = [
+            (ready.clone(), HydraBuild::Succeeded(toplevel.clone())),
+            (failed.clone(), HydraBuild::Failed),
+        ]
+        .into();
         let present: BTreeSet<Toplevel> = [toplevel].into();
         let first = sync_step(SyncInput {
             ledger: Ledger::default(),
@@ -109,9 +158,15 @@ mod tests {
             rooted: &BTreeMap::new(),
             events: vec![],
             now: Moment(2_000),
-            policy: Policy { hydra_grace: DurationMs(600_000), retain: Retain(3) },
+            policy: Policy {
+                hydra_grace: DurationMs(600_000),
+                retain: Retain(3),
+            },
         });
-        let broken = StoreEvent::Built { key: failed, outcome: Err(BuildFault::Build(None, Detail(String::from("exit 1")))) };
+        let broken = StoreEvent::Built {
+            key: failed,
+            outcome: Err(BuildFault::Build(None, Detail(String::from("exit 1")))),
+        };
         sync_step(SyncInput {
             ledger: first.ledger,
             wanted: &[],
@@ -121,7 +176,10 @@ mod tests {
             rooted: &BTreeMap::new(),
             events: vec![broken],
             now: Moment(5_000),
-            policy: Policy { hydra_grace: DurationMs(600_000), retain: Retain(3) },
+            policy: Policy {
+                hydra_grace: DurationMs(600_000),
+                retain: Retain(3),
+            },
         })
         .ledger
     }

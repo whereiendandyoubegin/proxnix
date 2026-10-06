@@ -1,5 +1,5 @@
-use std::net::Ipv4Addr;
 use crate::context::BackendId;
+use std::net::Ipv4Addr;
 
 use sozu_command_lib::{
     channel::Channel,
@@ -174,10 +174,16 @@ pub struct Pruned {
 
 impl Pruned {
     fn removed(self) -> Self {
-        Self { removed: self.removed + 1, ..self }
+        Self {
+            removed: self.removed + 1,
+            ..self
+        }
     }
     fn failed(self) -> Self {
-        Self { failed: self.failed + 1, ..self }
+        Self {
+            failed: self.failed + 1,
+            ..self
+        }
     }
 }
 
@@ -188,11 +194,9 @@ pub fn backends_in(content: &ResponseContent) -> Vec<AddBackend> {
             .iter()
             .flat_map(|info| info.backends.iter().cloned())
             .collect(),
-        Some(ContentType::WorkerResponses(responses)) => responses
-            .map
-            .values()
-            .flat_map(backends_in)
-            .collect(),
+        Some(ContentType::WorkerResponses(responses)) => {
+            responses.map.values().flat_map(backends_in).collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -209,7 +213,13 @@ pub fn stale_backends(
             backend_id: b.backend_id.clone(),
             address: b.address,
         })
-        .fold(Vec::new(), |acc, stale| if acc.contains(&stale) { acc } else { [acc, vec![stale]].concat() })
+        .fold(Vec::new(), |acc, stale| {
+            if acc.contains(&stale) {
+                acc
+            } else {
+                [acc, vec![stale]].concat()
+            }
+        })
 }
 
 pub struct SozuClient {
@@ -357,7 +367,9 @@ impl SozuClient {
             }
         };
 
-        let added = if existing.is_some() { Settled::AlreadyApplied } else {
+        let added = if existing.is_some() {
+            Settled::AlreadyApplied
+        } else {
             info!("sozu: adding tcp listener on {}:{}", self.listen_ip, port);
             self.channel.write_message(
                 &RequestType::AddTcpListener(TcpListenerConfig {
@@ -371,8 +383,13 @@ impl SozuClient {
             self.expect_applied("add tcp listener")?
         };
 
-        if let Some(true) = existing { Ok(added) } else {
-            info!("sozu: activating tcp listener on {}:{}", self.listen_ip, port);
+        if let Some(true) = existing {
+            Ok(added)
+        } else {
+            info!(
+                "sozu: activating tcp listener on {}:{}",
+                self.listen_ip, port
+            );
             self.channel.write_message(
                 &RequestType::ActivateListener(ActivateListener {
                     address,
@@ -392,47 +409,50 @@ impl SozuClient {
         backend_id: &BackendId,
         ip: Ipv4Addr,
     ) -> Result<Settled> {
-        config.tcp_ports().iter().try_fold(Settled::AlreadyApplied, |acc, &port| {
-            let cluster_id = tcp_cluster_id(config.cluster_id(), port);
-            let listener = self.ensure_tcp_listener(port)?;
+        config
+            .tcp_ports()
+            .iter()
+            .try_fold(Settled::AlreadyApplied, |acc, &port| {
+                let cluster_id = tcp_cluster_id(config.cluster_id(), port);
+                let listener = self.ensure_tcp_listener(port)?;
 
-            debug!("sozu: adding tcp cluster '{}'", cluster_id);
-            self.channel.write_message(
-                &RequestType::AddCluster(Cluster {
-                    cluster_id: cluster_id.clone(),
-                    ..Default::default()
-                })
-                .into(),
-            )?;
-            self.expect_applied("add tcp cluster")?;
+                debug!("sozu: adding tcp cluster '{}'", cluster_id);
+                self.channel.write_message(
+                    &RequestType::AddCluster(Cluster {
+                        cluster_id: cluster_id.clone(),
+                        ..Default::default()
+                    })
+                    .into(),
+                )?;
+                self.expect_applied("add tcp cluster")?;
 
-            self.channel.write_message(
-                &RequestType::AddTcpFrontend(RequestTcpFrontend {
-                    cluster_id: cluster_id.clone(),
-                    address: socket_address(self.listen_ip, port),
-                    ..Default::default()
-                })
-                .into(),
-            )?;
-            let frontend = self.expect_applied("add tcp frontend")?;
+                self.channel.write_message(
+                    &RequestType::AddTcpFrontend(RequestTcpFrontend {
+                        cluster_id: cluster_id.clone(),
+                        address: socket_address(self.listen_ip, port),
+                        ..Default::default()
+                    })
+                    .into(),
+                )?;
+                let frontend = self.expect_applied("add tcp frontend")?;
 
-            debug!(
-                "sozu: registering tcp backend '{}' at {}:{} for cluster '{}'",
-                backend_id, ip, port, cluster_id
-            );
-            self.channel.write_message(
-                &RequestType::AddBackend(AddBackend {
-                    cluster_id: cluster_id.clone(),
-                    backend_id: backend_id.as_str().to_string(),
-                    address: socket_address(ip, port),
-                    ..Default::default()
-                })
-                .into(),
-            )?;
-            self.expect_applied("add tcp backend")?;
+                debug!(
+                    "sozu: registering tcp backend '{}' at {}:{} for cluster '{}'",
+                    backend_id, ip, port, cluster_id
+                );
+                self.channel.write_message(
+                    &RequestType::AddBackend(AddBackend {
+                        cluster_id: cluster_id.clone(),
+                        backend_id: backend_id.as_str().to_string(),
+                        address: socket_address(ip, port),
+                        ..Default::default()
+                    })
+                    .into(),
+                )?;
+                self.expect_applied("add tcp backend")?;
 
-            Ok(acc.and(listener).and(frontend))
-        })
+                Ok(acc.and(listener).and(frontend))
+            })
     }
 
     pub fn prune_tcp_backends<T: Proxied>(&mut self, config: &T, keep: Ipv4Addr) -> Result<Pruned> {
@@ -461,10 +481,19 @@ impl SozuClient {
         })
     }
 
-    pub fn remove_tcp_backends<T: Proxied>(&mut self, config: &T, backend_id: &BackendId, ip: Ipv4Addr) {
+    pub fn remove_tcp_backends<T: Proxied>(
+        &mut self,
+        config: &T,
+        backend_id: &BackendId,
+        ip: Ipv4Addr,
+    ) {
         config.tcp_ports().iter().for_each(|&port| {
             let cluster_id = tcp_cluster_id(config.cluster_id(), port);
-            match self.remove_backend_at(&cluster_id, backend_id.as_str(), &socket_address(ip, port)) {
+            match self.remove_backend_at(
+                &cluster_id,
+                backend_id.as_str(),
+                &socket_address(ip, port),
+            ) {
                 Ok(()) => {}
                 Err(e) => warn!(
                     "sozu: could not deregister tcp backend '{}' from cluster '{}': {}",
@@ -491,14 +520,14 @@ impl SozuClient {
                 )));
             }
         };
-        ids.iter().try_for_each(|id| self.remove_cluster(id).map(|_| ()))?;
+        ids.iter()
+            .try_for_each(|id| self.remove_cluster(id).map(|_| ()))?;
         Ok(ids.len())
     }
 
     fn cluster_backends(&mut self, cluster_id: &str) -> Result<Vec<AddBackend>> {
-        self.channel.write_message(
-            &RequestType::QueryClusterById(cluster_id.to_string()).into(),
-        )?;
+        self.channel
+            .write_message(&RequestType::QueryClusterById(cluster_id.to_string()).into())?;
         let response = self.settled_response()?;
         match ResponseStatus::try_from(response.status) {
             Ok(ResponseStatus::Ok) => Ok(response
@@ -599,7 +628,9 @@ impl SozuClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sozu_command_lib::proto::command::{ClusterInformation, ClusterInformations, WorkerResponses};
+    use sozu_command_lib::proto::command::{
+        ClusterInformation, ClusterInformations, WorkerResponses,
+    };
     use std::collections::BTreeMap;
 
     fn addr(last: u8, port: u16) -> SocketAddress {
@@ -648,7 +679,10 @@ mod tests {
         ];
         assert_eq!(
             stale_backends(&existing, "test-website", &addr(178, 3000)),
-            vec![StaleBackend { backend_id: "old".to_string(), address: addr(113, 3000) }]
+            vec![StaleBackend {
+                backend_id: "old".to_string(),
+                address: addr(113, 3000)
+            }]
         );
     }
 
@@ -657,7 +691,10 @@ mod tests {
         let existing = vec![backend("test-website", "port80", 178, 80)];
         assert_eq!(
             stale_backends(&existing, "test-website", &addr(178, 3000)),
-            vec![StaleBackend { backend_id: "port80".to_string(), address: addr(178, 80) }]
+            vec![StaleBackend {
+                backend_id: "port80".to_string(),
+                address: addr(178, 80)
+            }]
         );
     }
 
@@ -669,13 +706,19 @@ mod tests {
         ];
         assert_eq!(
             stale_backends(&existing, "test-website", &addr(178, 3000)),
-            vec![StaleBackend { backend_id: "old".to_string(), address: addr(113, 3000) }]
+            vec![StaleBackend {
+                backend_id: "old".to_string(),
+                address: addr(113, 3000)
+            }]
         );
     }
 
     #[test]
     fn a_cluster_with_nothing_registered_has_nothing_to_prune() {
-        assert_eq!(stale_backends(&[], "test-website", &addr(178, 3000)), vec![]);
+        assert_eq!(
+            stale_backends(&[], "test-website", &addr(178, 3000)),
+            vec![]
+        );
     }
 
     #[test]
@@ -693,7 +736,10 @@ mod tests {
     #[test]
     fn backends_are_read_out_of_a_direct_cluster_response() {
         let content = clusters(vec![backend("test-website", "old", 113, 3000)]);
-        assert_eq!(backends_in(&content), vec![backend("test-website", "old", 113, 3000)]);
+        assert_eq!(
+            backends_in(&content),
+            vec![backend("test-website", "old", 113, 3000)]
+        );
     }
 
     #[test]
@@ -701,8 +747,14 @@ mod tests {
         let content = ResponseContent {
             content_type: Some(ContentType::WorkerResponses(WorkerResponses {
                 map: BTreeMap::from([
-                    ("0".to_string(), clusters(vec![backend("test-website", "old", 113, 3000)])),
-                    ("1".to_string(), clusters(vec![backend("test-website", "new", 178, 3000)])),
+                    (
+                        "0".to_string(),
+                        clusters(vec![backend("test-website", "old", 113, 3000)]),
+                    ),
+                    (
+                        "1".to_string(),
+                        clusters(vec![backend("test-website", "new", 178, 3000)]),
+                    ),
                 ]),
             })),
         };
@@ -756,7 +808,10 @@ mod tests {
                 ]),
             })),
         };
-        assert_eq!(tcp_clusters_in(&content, "forgejo"), vec!["forgejo-tcp-2222".to_string()]);
+        assert_eq!(
+            tcp_clusters_in(&content, "forgejo"),
+            vec!["forgejo-tcp-2222".to_string()]
+        );
     }
 
     fn listeners(port: u16, active: bool) -> ResponseContent {
@@ -783,7 +838,10 @@ mod tests {
     fn a_tcp_listener_is_found_by_address() {
         let wanted = socket_address(Ipv4Addr::UNSPECIFIED, 2222);
         assert_eq!(tcp_listener_in(&listeners(2222, true), &wanted), Some(true));
-        assert_eq!(tcp_listener_in(&listeners(2222, false), &wanted), Some(false));
+        assert_eq!(
+            tcp_listener_in(&listeners(2222, false), &wanted),
+            Some(false)
+        );
         assert_eq!(tcp_listener_in(&listeners(2223, true), &wanted), None);
     }
 
@@ -791,7 +849,10 @@ mod tests {
     fn prune_outcomes_are_counted_separately() {
         assert_eq!(
             Pruned::default().removed().removed().failed(),
-            Pruned { removed: 2, failed: 1 }
+            Pruned {
+                removed: 2,
+                failed: 1
+            }
         );
     }
 }
