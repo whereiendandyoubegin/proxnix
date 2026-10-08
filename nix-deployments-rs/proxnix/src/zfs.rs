@@ -12,7 +12,7 @@ use crate::types::{AppError, IdRange, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct Dataset(String);
+pub struct Dataset(pub (String));
 
 impl Dataset {
     pub fn as_str(&self) -> &str {
@@ -776,6 +776,36 @@ impl FromStdout for OriginOut {
     }
 }
 
+impl TryFrom<&Snapshot> for DataSnapshot {
+    type Error = crate::zfs::AppError;
+    fn try_from(shell: &Snapshot) -> Result<DataSnapshot> {
+        Ok(DataSnapshot {
+            dataset: CoreDataset::try_from(&shell.dataset)?,
+            tag: DataTag::try_from(shell.tag)?,
+        })
+    }
+}
+
+impl TryFrom<SnapshotTag> for DataTag {
+    type Error = crate::zfs::AppError;
+    fn try_from(shell: SnapshotTag) -> Result<DataTag> {
+        match shell {
+            SnapshotTag::Start => Ok(DataTag::Start),
+            SnapshotTag::Final => Ok(DataTag::Final),
+            SnapshotTag::Base  => Err(AppError::ConversionError("Error parsing SnapshotTag::Base to DataTag::Base - variant not present in core, base is not slot slot data".to_string())),
+        }
+    }
+}
+
+impl TryFrom<&Dataset> for CoreDataset {
+    type Error = crate::zfs::AppError;
+    fn try_from(shell: &Dataset) -> Result<CoreDataset> {
+        CoreDataset::try_from(shell.as_str()).map_err(|_| {
+            AppError::ConversionError("Error parsing Dataset to CoreDataset".to_string())
+        })
+    }
+}
+
 pub trait Property {
     const NAME: &'static str;
     type Value: FromStdout;
@@ -850,6 +880,7 @@ pub struct Promote {
 pub enum Destroy {
     Single(Dataset),
     Recursive(Dataset),
+    Snapshot(Snapshot),
 }
 
 pub enum Create {
@@ -869,6 +900,11 @@ pub struct CloneSnapshot {
 
 pub struct ListChildren {
     parent: Dataset,
+}
+
+pub struct Rename {
+    old: Dataset,
+    new: Dataset,
 }
 
 pub trait ZfsCmd {
@@ -892,6 +928,7 @@ impl ZfsCmd for Destroy {
         match self {
             Destroy::Single(dataset) => argv(&["destroy"], [dataset.to_string()]),
             Destroy::Recursive(dataset) => argv(&["destroy", "-r"], [dataset.to_string()]),
+            Destroy::Snapshot(snapshot) => argv(&["destroy"], [snapshot.to_string()]),
         }
     }
 }
@@ -939,6 +976,13 @@ impl ZfsCmd for ListChildren {
             &["list", "-H", "-o", "name", "-t", "filesystem", "-d", "1"],
             [self.parent.to_string()],
         )
+    }
+}
+
+impl ZfsCmd for Rename {
+    type Output = ();
+    fn construct_args(&self) -> Vec<String> {
+        argv(&["rename"], [self.old.to_string(), self.new.to_string()])
     }
 }
 
@@ -1267,5 +1311,54 @@ mod tests {
                 Dataset::try_from("ZFS/proxnix-images/a").unwrap(),
             ]
         );
+    }
+
+    #[test]
+    fn a_rename_moves_the_old_name_to_the_new_one() {
+        assert_eq!(
+            joined(&Rename {
+                old: Dataset::try_from("ZFS/proxnix/state/monitoring/green").unwrap(),
+                new: Dataset::try_from("ZFS/proxnix/state/monitoring/green-rehearsal").unwrap(),
+            }),
+            "rename ZFS/proxnix/state/monitoring/green ZFS/proxnix/state/monitoring/green-rehearsal"
+        );
+    }
+    #[test]
+    fn a_single_snapshot_is_destroyed_by_name_without_recursing() {
+        let start = DataSnapshot {
+            dataset: CoreDataset::try_from("ZFS/proxnix/state/monitoring/green").unwrap(),
+            tag: DataTag::Start,
+        };
+        assert_eq!(
+            joined(&Destroy::Snapshot(Snapshot::from(&start))),
+            "destroy ZFS/proxnix/state/monitoring/green@start"
+        );
+    }
+
+    #[test]
+    fn a_slot_snapshot_converts_into_the_core_and_back() {
+        let shell = Snapshot::try_from("ZFS/proxnix/state/monitoring/blue@start").unwrap();
+        let core = DataSnapshot::try_from(&shell).unwrap();
+        assert_eq!(
+            core,
+            DataSnapshot {
+                dataset: CoreDataset::try_from("ZFS/proxnix/state/monitoring/blue").unwrap(),
+                tag: DataTag::Start,
+            }
+        );
+        assert_eq!(Snapshot::from(&core), shell);
+    }
+
+    #[test]
+    fn a_base_image_snapshot_is_not_slot_data() {
+        let shell =
+            Snapshot::try_from("ZFS/proxnix-images/ygpwy38d8s1hgh4m35lapbn8ifwyp8ls@base").unwrap();
+        assert!(DataSnapshot::try_from(&shell).is_err());
+    }
+
+    #[test]
+    fn a_shell_dataset_the_core_cannot_name_does_not_convert() {
+        let shell = Dataset::try_from("ZFS/foo+bar").unwrap();
+        assert!(CoreDataset::try_from(&shell).is_err());
     }
 }

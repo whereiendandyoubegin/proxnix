@@ -76,6 +76,8 @@ pub enum AppError {
     ProxmoxApi(#[from] proxmox_api::ReqwestError),
     #[error("Proxmox task failed: {0:?}")]
     Api(crate::remote::ApiFault),
+    #[error("Type conversion error: {0}")]
+    ConversionError(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

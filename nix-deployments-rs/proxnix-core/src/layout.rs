@@ -42,9 +42,13 @@ enum Fixed {
     State,
     Logs,
     Nix,
-    Blue,
-    Green,
+    Blue { rehearsal: Option<Rehearsal> },
+    Green { rehearsal: Option<Rehearsal> },
 }
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rehearsal {}
 
 #[pure_only]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -69,8 +73,14 @@ impl From<Fixed> for Segment {
             Fixed::State => "state",
             Fixed::Logs => "logs",
             Fixed::Nix => "nix",
-            Fixed::Blue => "blue",
-            Fixed::Green => "green",
+            Fixed::Blue {
+                rehearsal: Some(_rehearsal),
+            } => "blue-rehearsal",
+            Fixed::Blue { rehearsal: None } => "blue",
+            Fixed::Green {
+                rehearsal: Some(_rehearsal),
+            } => "green-rehearsal",
+            Fixed::Green { rehearsal: None } => "green",
         }))
     }
 }
@@ -311,11 +321,10 @@ impl Layout {
         self.root.child(Segment::from(Fixed::State))
     }
 
-    #[must_use]
     pub fn slot_home(&self, name: &GuestName, slot: Slot) -> Result<Dataset, StorageFault> {
         let side = match slot {
-            Slot::Blue => Fixed::Blue,
-            Slot::Green => Fixed::Green,
+            Slot::Blue => Fixed::Blue { rehearsal: None },
+            Slot::Green => Fixed::Green { rehearsal: None },
         };
         Ok(self
             .state()
