@@ -2,7 +2,10 @@ mod sim;
 
 use proptest::prelude::*;
 use proxnix_core::{Builtin, Cutover, Desired, Images, KindSpec, Slot, Tick, Vmid, WorkloadSpec};
-use sim::{COMMIT_A, COMMIT_B, Faults, Kind, NIX_A, NIX_B, Run, SimGuest, SimTags, World, built, images, kinds, lxc, push, qemu, run, settled, spec};
+use sim::{
+    COMMIT_A, COMMIT_B, Faults, Kind, NIX_A, NIX_B, Run, SimGuest, SimTags, World, built, images,
+    kinds, lxc, push, qemu, run, settled, spec,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn scenario(kind: KindSpec, cutover: Cutover) -> (WorkloadSpec, World) {
@@ -13,13 +16,26 @@ fn scenario(kind: KindSpec, cutover: Cutover) -> (WorkloadSpec, World) {
 
 fn settle(done: Run, desired: &Desired) -> World {
     let calm = World {
-        faults: Faults { fail: BTreeSet::new(), lying: BTreeSet::new(), die_after: None, ..done.world.faults.clone() },
+        faults: Faults {
+            fail: BTreeSet::new(),
+            lying: BTreeSet::new(),
+            die_after: None,
+            ..done.world.faults.clone()
+        },
         ..done.world
     };
     let first = run::<Builtin>(calm, desired, &Images::default(), &Tick::Periodic, None);
-    let second = run::<Builtin>(first.world, desired, &Images::default(), &Tick::Periodic, None);
+    let second = run::<Builtin>(
+        first.world,
+        desired,
+        &Images::default(),
+        &Tick::Periodic,
+        None,
+    );
     assert!(
-        kinds(&second.effects).iter().all(|kind| *kind == Kind::Restore),
+        kinds(&second.effects)
+            .iter()
+            .all(|kind| *kind == Kind::Restore),
         "the periodic loop did not converge: {:?}",
         kinds(&second.effects)
     );
@@ -29,7 +45,9 @@ fn settle(done: Run, desired: &Desired) -> World {
 fn cases() -> Vec<(KindSpec, Cutover)> {
     [qemu(), lxc()]
         .into_iter()
-        .flat_map(|kind| [Cutover::Overlap, Cutover::StopStart].map(|cutover| (kind.clone(), cutover)))
+        .flat_map(|kind| {
+            [Cutover::Overlap, Cutover::StopStart].map(|cutover| (kind.clone(), cutover))
+        })
         .collect()
 }
 
@@ -41,11 +59,21 @@ fn every_single_injected_failure_still_leaves_one_serving_routed_guest() {
         let images = images(vec![built(&workload, NIX_B)]);
         let clean = run::<Builtin>(world.clone(), &desired, &images, &push(COMMIT_B), None);
         for index in 0..=clean.effects.len() {
-            let faulty = World { faults: Faults { fail: [index].into(), ..Faults::default() }, ..world.clone() };
+            let faulty = World {
+                faults: Faults {
+                    fail: [index].into(),
+                    ..Faults::default()
+                },
+                ..world.clone()
+            };
             let pushed = run::<Builtin>(faulty, &desired, &images, &push(COMMIT_B), None);
             let world = settle(pushed, &desired);
             settled(&world, &desired);
-            assert_eq!(world.members("forgejo").len(), 1, "failing effect {index} ({cutover:?}) left extra guests");
+            assert_eq!(
+                world.members("forgejo").len(),
+                1,
+                "failing effect {index} ({cutover:?}) left extra guests"
+            );
         }
     }
 }
@@ -58,7 +86,13 @@ fn a_crash_at_any_step_recovers_without_harming_the_serving_guest() {
         let images = images(vec![built(&workload, NIX_B)]);
         let clean = run::<Builtin>(world.clone(), &desired, &images, &push(COMMIT_B), None);
         for crash in 0..=clean.steps {
-            let pushed = run::<Builtin>(world.clone(), &desired, &images, &push(COMMIT_B), Some(crash));
+            let pushed = run::<Builtin>(
+                world.clone(),
+                &desired,
+                &images,
+                &push(COMMIT_B),
+                Some(crash),
+            );
             let world = settle(pushed, &desired);
             settled(&world, &desired);
             assert_eq!(world.members("forgejo").len(), 1);
@@ -74,8 +108,18 @@ fn a_crash_then_only_periodic_ticks_rolls_back_or_forward_but_never_loses_the_se
         let images = images(vec![built(&workload, NIX_B)]);
         let clean = run::<Builtin>(world.clone(), &desired, &images, &push(COMMIT_B), None);
         for cut in 0..clean.effects.len() {
-            let replayed = clean.effects[..cut].iter().fold(world.clone(), |world, effect| world.apply(effect).0);
-            let world = settle(Run { world: replayed, effects: vec![], reports: vec![], steps: 0 }, &desired);
+            let replayed = clean.effects[..cut]
+                .iter()
+                .fold(world.clone(), |world, effect| world.apply(effect).0);
+            let world = settle(
+                Run {
+                    world: replayed,
+                    effects: vec![],
+                    reports: vec![],
+                    steps: 0,
+                },
+                &desired,
+            );
             settled(&world, &desired);
             assert_eq!(world.members("forgejo").len(), 1, "cut after {cut} effects");
         }
@@ -90,17 +134,27 @@ fn fixture(text: &str) -> serde_json::Value {
 }
 
 fn parsed(tags: &str) -> Option<SimTags> {
-    let parts: BTreeMap<&str, &str> =
-        tags.split(';').filter_map(|tag| tag.split_once('-')).collect();
-    tags.split(';').any(|tag| tag == "proxnix").then(|| SimTags {
-        nix: String::from(parts["nix"]),
-        commit: String::from(parts["commit"]),
-        slot: if parts["slot"] == "blue" { Slot::Blue } else { Slot::Green },
-        ip: parts.get("ip").map(|ip| ip.parse().unwrap()),
-        generation: parts.get("gen").map(|generation| generation.parse().unwrap()),
-        pending: false,
-        role: None,
-    })
+    let parts: BTreeMap<&str, &str> = tags
+        .split(';')
+        .filter_map(|tag| tag.split_once('-'))
+        .collect();
+    tags.split(';')
+        .any(|tag| tag == "proxnix")
+        .then(|| SimTags {
+            nix: String::from(parts["nix"]),
+            commit: String::from(parts["commit"]),
+            slot: if parts["slot"] == "blue" {
+                Slot::Blue
+            } else {
+                Slot::Green
+            },
+            ip: parts.get("ip").map(|ip| ip.parse().unwrap()),
+            generation: parts
+                .get("gen")
+                .map(|generation| generation.parse().unwrap()),
+            pending: false,
+            role: None,
+        })
 }
 
 fn pve01() -> (World, Vec<WorkloadSpec>) {
@@ -109,27 +163,53 @@ fn pve01() -> (World, Vec<WorkloadSpec>) {
         .unwrap()
         .iter()
         .map(|item| (item.clone(), lxc()))
-        .chain(fixture(QEMU).as_array().unwrap().iter().map(|item| (item.clone(), qemu())))
+        .chain(
+            fixture(QEMU)
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| (item.clone(), qemu())),
+        )
         .collect();
     let workloads: Vec<WorkloadSpec> = listed
         .iter()
         .filter_map(|(item, kind)| {
             let tags = parsed(item["tags"].as_str().unwrap_or(""))?;
             let id = u32::try_from(item["vmid"].as_u64().unwrap()).unwrap();
-            let blue = if tags.slot == Slot::Blue { id } else { id - 100 };
-            Some(spec(item["name"].as_str().unwrap(), blue, blue + 100, kind.clone(), Cutover::Overlap, true))
+            let blue = if tags.slot == Slot::Blue {
+                id
+            } else {
+                id - 100
+            };
+            Some(spec(
+                item["name"].as_str().unwrap(),
+                blue,
+                blue + 100,
+                kind.clone(),
+                Cutover::Overlap,
+                true,
+            ))
         })
         .collect();
     let world = listed.iter().fold(World::default(), |world, (item, kind)| {
         let id = u32::try_from(item["vmid"].as_u64().unwrap()).unwrap();
         let tags = parsed(item["tags"].as_str().unwrap_or(""));
-        let managed = workloads.iter().find(|workload| workload.name.0 == item["name"].as_str().unwrap_or("") && tags.is_some());
+        let managed = workloads.iter().find(|workload| {
+            workload.name.0 == item["name"].as_str().unwrap_or("") && tags.is_some()
+        });
         world.with_guest(
             Vmid::new(id),
             SimGuest {
                 name: String::from(item["name"].as_str().unwrap_or("")),
                 running: item["status"] == "running",
-                resources: managed.map_or(proxnix_core::Resources { memory: proxnix_core::MemoryMb(1024), disk: proxnix_core::DiskGib(8), cores: proxnix_core::Cores(1) }, |workload| workload.resources),
+                resources: managed.map_or(
+                    proxnix_core::Resources {
+                        memory: proxnix_core::MemoryMb(1024),
+                        disk: proxnix_core::DiskGib(8),
+                        cores: proxnix_core::Cores(1),
+                    },
+                    |workload| workload.resources,
+                ),
                 facts: sim::facts(kind),
                 tags,
             },
@@ -139,28 +219,73 @@ fn pve01() -> (World, Vec<WorkloadSpec>) {
 }
 
 #[test]
-fn the_incident_push_against_the_real_cluster_creates_nothing_into_an_occupied_slot_and_destroys_nothing_serving() {
+fn the_incident_push_against_the_real_cluster_creates_nothing_into_an_occupied_slot_and_destroys_nothing_serving()
+ {
     let (world, workloads) = pve01();
     assert_eq!(workloads.len(), 8);
-    let unmanaged: BTreeMap<Vmid, SimGuest> =
-        world.guests.iter().filter(|(_, guest)| guest.tags.is_none()).map(|(id, guest)| (*id, guest.clone())).collect();
+    let unmanaged: BTreeMap<Vmid, SimGuest> = world
+        .guests
+        .iter()
+        .filter(|(_, guest)| guest.tags.is_none())
+        .map(|(id, guest)| (*id, guest.clone()))
+        .collect();
     let desired = Desired::validate(workloads.clone());
     let deployed: BTreeMap<String, String> = world
         .guests
         .values()
-        .filter_map(|guest| guest.tags.as_ref().map(|tags| (guest.name.clone(), tags.nix.clone())))
+        .filter_map(|guest| {
+            guest
+                .tags
+                .as_ref()
+                .map(|tags| (guest.name.clone(), tags.nix.clone()))
+        })
         .collect();
-    let every_image_changed = images(workloads.iter().map(|workload| built(workload, if deployed[&workload.name.0] == NIX_B { NIX_A } else { NIX_B })).collect());
+    let every_image_changed = images(
+        workloads
+            .iter()
+            .map(|workload| {
+                built(
+                    workload,
+                    if deployed[&workload.name.0] == NIX_B {
+                        NIX_A
+                    } else {
+                        NIX_B
+                    },
+                )
+            })
+            .collect(),
+    );
     let done = run::<Builtin>(world, &desired, &every_image_changed, &push(COMMIT_B), None);
-    let after: BTreeMap<Vmid, SimGuest> =
-        done.world.guests.iter().filter(|(_, guest)| guest.tags.is_none()).map(|(id, guest)| (*id, guest.clone())).collect();
+    let after: BTreeMap<Vmid, SimGuest> = done
+        .world
+        .guests
+        .iter()
+        .filter(|(_, guest)| guest.tags.is_none())
+        .map(|(id, guest)| (*id, guest.clone()))
+        .collect();
     assert_eq!(after, unmanaged, "an unmanaged guest was touched");
-    assert_eq!(kinds(&done.effects).iter().filter(|kind| **kind == Kind::Create).count(), 8);
+    assert_eq!(
+        kinds(&done.effects)
+            .iter()
+            .filter(|kind| **kind == Kind::Create)
+            .count(),
+        8
+    );
     let world = settle(done, &desired);
     settled(&world, &desired);
     for workload in &workloads {
         assert_eq!(world.members(&workload.name.0).len(), 1);
-        assert_eq!(world.serving(&workload.name.0).unwrap().1.tags.as_ref().unwrap().generation, Some(2));
+        assert_eq!(
+            world
+                .serving(&workload.name.0)
+                .unwrap()
+                .1
+                .tags
+                .as_ref()
+                .unwrap()
+                .generation,
+            Some(2)
+        );
     }
 }
 
@@ -172,7 +297,13 @@ fn the_incident_push_with_nothing_changed_only_adopts() {
         workloads
             .iter()
             .map(|workload| {
-                let nix = world.members(&workload.name.0)[0].1.tags.as_ref().unwrap().nix.clone();
+                let nix = world.members(&workload.name.0)[0]
+                    .1
+                    .tags
+                    .as_ref()
+                    .unwrap()
+                    .nix
+                    .clone();
                 built(workload, &nix)
             })
             .collect(),
@@ -189,9 +320,18 @@ fn every_effect_that_happened_but_reported_failure_is_never_built_upon() {
         let images = images(vec![built(&workload, NIX_B)]);
         let clean = run::<Builtin>(world.clone(), &desired, &images, &push(COMMIT_B), None);
         for index in 0..clean.effects.len() {
-            let lying = World { faults: Faults { lying: [index].into(), ..Faults::default() }, ..world.clone() };
+            let lying = World {
+                faults: Faults {
+                    lying: [index].into(),
+                    ..Faults::default()
+                },
+                ..world.clone()
+            };
             let pushed = run::<Builtin>(lying, &desired, &images, &push(COMMIT_B), None);
-            let created = pushed.effects.iter().position(|effect| sim::kind(effect) == Kind::Create);
+            let created = pushed
+                .effects
+                .iter()
+                .position(|effect| sim::kind(effect) == Kind::Create);
             let create_lied = created == Some(index);
             if create_lied {
                 assert!(
@@ -203,7 +343,11 @@ fn every_effect_that_happened_but_reported_failure_is_never_built_upon() {
             }
             let world = settle(pushed, &desired);
             settled(&world, &desired);
-            assert_eq!(world.members("forgejo").len(), 1, "lying effect {index} ({cutover:?}) left extra guests");
+            assert_eq!(
+                world.members("forgejo").len(),
+                1,
+                "lying effect {index} ({cutover:?}) left extra guests"
+            );
         }
     }
 }
@@ -215,18 +359,53 @@ fn the_plan_for_the_incident_push_adopts_then_rebuilds_each_workload_into_its_fr
     let deployed: BTreeMap<String, String> = world
         .guests
         .values()
-        .filter_map(|guest| guest.tags.as_ref().map(|tags| (guest.name.clone(), tags.nix.clone())))
+        .filter_map(|guest| {
+            guest
+                .tags
+                .as_ref()
+                .map(|tags| (guest.name.clone(), tags.nix.clone()))
+        })
         .collect();
-    let changed = images(workloads.iter().map(|workload| built(workload, if deployed[&workload.name.0] == NIX_B { NIX_A } else { NIX_B })).collect());
-    let plan = proxnix_core::project::<Builtin>(&desired, &changed, &world.observe(), &push(COMMIT_B), &sim::pacing());
+    let changed = images(
+        workloads
+            .iter()
+            .map(|workload| {
+                built(
+                    workload,
+                    if deployed[&workload.name.0] == NIX_B {
+                        NIX_A
+                    } else {
+                        NIX_B
+                    },
+                )
+            })
+            .collect(),
+    );
+    let plan = proxnix_core::project::<Builtin>(
+        &desired,
+        &changed,
+        &world.observe(),
+        &push(COMMIT_B),
+        &sim::pacing(),
+    );
     for projection in &plan {
         let seen = kinds(&projection.effects);
         match &projection.scope {
             proxnix_core::Scope::Teardown => assert!(seen.is_empty(), "teardown planned {seen:?}"),
             proxnix_core::Scope::Workload(name) => {
                 assert!(projection.settled, "{} did not settle", name.0);
-                assert_eq!(seen.first(), Some(&Kind::Commit), "{} must be adopted first", name.0);
-                assert_eq!(seen.iter().filter(|kind| **kind == Kind::Create).count(), 1, "{}: {seen:?}", name.0);
+                assert_eq!(
+                    seen.first(),
+                    Some(&Kind::Commit),
+                    "{} must be adopted first",
+                    name.0
+                );
+                assert_eq!(
+                    seen.iter().filter(|kind| **kind == Kind::Create).count(),
+                    1,
+                    "{}: {seen:?}",
+                    name.0
+                );
                 assert_eq!(seen.last(), Some(&Kind::Retire), "{}: {seen:?}", name.0);
                 let touched: Vec<Vmid> = projection
                     .effects
@@ -236,7 +415,14 @@ fn the_plan_for_the_incident_push_adopts_then_rebuilds_each_workload_into_its_fr
                         _ => None,
                     })
                     .collect();
-                assert!(touched.iter().all(|id| world.guests.get(id).is_none_or(|guest| guest.tags.is_some())), "{} touches an unmanaged guest", name.0);
+                assert!(
+                    touched.iter().all(|id| world
+                        .guests
+                        .get(id)
+                        .is_none_or(|guest| guest.tags.is_some())),
+                    "{} touches an unmanaged guest",
+                    name.0
+                );
             }
         }
     }
@@ -248,11 +434,29 @@ fn a_first_deploy_that_never_passed_its_checks_is_never_served_even_after_a_cras
         let workload = spec("forgejo", 844, 944, kind, cutover, true);
         let desired = Desired::validate(vec![workload.clone()]);
         let images = images(vec![built(&workload, NIX_A)]);
-        let broken = World { faults: Faults { unhealthy: [Vmid::new(844)].into(), ..Faults::default() }, ..World::default() };
+        let broken = World {
+            faults: Faults {
+                unhealthy: [Vmid::new(844)].into(),
+                ..Faults::default()
+            },
+            ..World::default()
+        };
         let clean = run::<Builtin>(broken.clone(), &desired, &images, &push(COMMIT_B), None);
         for crash in 0..=clean.steps {
-            let pushed = run::<Builtin>(broken.clone(), &desired, &images, &push(COMMIT_B), Some(crash));
-            let after = run::<Builtin>(pushed.world, &desired, &Images::default(), &Tick::Periodic, None);
+            let pushed = run::<Builtin>(
+                broken.clone(),
+                &desired,
+                &images,
+                &push(COMMIT_B),
+                Some(crash),
+            );
+            let after = run::<Builtin>(
+                pushed.world,
+                &desired,
+                &Images::default(),
+                &Tick::Periodic,
+                None,
+            );
             assert!(
                 after.world.serving("forgejo").is_none(),
                 "{cutover:?}: a guest that never passed its checks became serving after a crash at step {crash}: {:?}",
@@ -270,13 +474,47 @@ fn a_first_deploy_survives_any_single_failure_lie_or_crash_with_exactly_one_serv
         let images = images(vec![built(&workload, NIX_A)]);
         let clean = run::<Builtin>(World::default(), &desired, &images, &push(COMMIT_B), None);
         let schedules = (0..=clean.effects.len())
-            .map(|index| (Faults { fail: [index].into(), ..Faults::default() }, None))
-            .chain((0..clean.effects.len()).map(|index| (Faults { lying: [index].into(), ..Faults::default() }, None)))
+            .map(|index| {
+                (
+                    Faults {
+                        fail: [index].into(),
+                        ..Faults::default()
+                    },
+                    None,
+                )
+            })
+            .chain((0..clean.effects.len()).map(|index| {
+                (
+                    Faults {
+                        lying: [index].into(),
+                        ..Faults::default()
+                    },
+                    None,
+                )
+            }))
             .chain((0..=clean.steps).map(|crash| (Faults::default(), Some(crash))));
         for (faults, crash) in schedules {
             let label = format!("{cutover:?} {faults:?} crash {crash:?}");
-            let pushed = run::<Builtin>(World { faults, ..World::default() }, &desired, &images, &push(COMMIT_B), crash);
-            let again = run::<Builtin>(World { faults: Faults::default(), ..pushed.world }, &desired, &images, &push(COMMIT_B), None);
+            let pushed = run::<Builtin>(
+                World {
+                    faults,
+                    ..World::default()
+                },
+                &desired,
+                &images,
+                &push(COMMIT_B),
+                crash,
+            );
+            let again = run::<Builtin>(
+                World {
+                    faults: Faults::default(),
+                    ..pushed.world
+                },
+                &desired,
+                &images,
+                &push(COMMIT_B),
+                None,
+            );
             let world = settle(again, &desired);
             settled(&world, &desired);
             assert_eq!(world.members("forgejo").len(), 1, "{label}");

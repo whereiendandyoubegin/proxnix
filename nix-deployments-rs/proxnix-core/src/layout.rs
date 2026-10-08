@@ -48,6 +48,13 @@ enum Fixed {
 
 #[pure_only]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotColour {
+    Blue,
+    Green,
+}
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rehearsal {}
 
 #[pure_only]
@@ -215,6 +222,13 @@ pub fn store_cutover(store: StoreMode, cutover: Cutover) -> Result<(), StorageFa
 }
 
 #[pure_only]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Shared,
+    PerSlot(SlotColour),
+}
+
+#[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Storage {
     pub mounts: Vec<Mount>,
@@ -255,6 +269,14 @@ fn repeated<T: PartialEq + Clone>(items: &[T]) -> Option<T> {
         .enumerate()
         .find(|(index, item)| items[..*index].contains(item))
         .map(|(_, item)| item.clone())
+}
+
+#[pure_only]
+fn determine_placement(plan: (Cutover, SlotColour)) -> Placement {
+    match plan {
+        (Cutover::FenceTransfer, _) => Placement::PerSlot(plan.1),
+        _ => Placement::Shared,
+    }
 }
 
 #[pure_only]
@@ -321,10 +343,10 @@ impl Layout {
         self.root.child(Segment::from(Fixed::State))
     }
 
-    pub fn slot_home(&self, name: &GuestName, slot: Slot) -> Result<Dataset, StorageFault> {
+    pub fn slot_home(&self, name: &GuestName, slot: SlotColour) -> Result<Dataset, StorageFault> {
         let side = match slot {
-            Slot::Blue => Fixed::Blue { rehearsal: None },
-            Slot::Green => Fixed::Green { rehearsal: None },
+            SlotColour::Blue => Fixed::Blue { rehearsal: None },
+            SlotColour::Green => Fixed::Green { rehearsal: None },
         };
         Ok(self
             .state()
@@ -337,12 +359,26 @@ impl Layout {
         self.root.child(Segment::from(Fixed::Logs))
     }
 
-    pub fn storage(&self, name: &GuestName, wanted: &StorageSpec) -> Result<Storage, StorageFault> {
+    pub fn storage(
+        &self,
+        name: &GuestName,
+        wanted: &StorageSpec,
+        placement: Placement,
+    ) -> Result<Storage, StorageFault> {
         let workload = Segment::try_from(name.0.as_str())
             .map_err(|_| StorageFault::UnnamableWorkload(name.clone()))?;
         let labelled = labelled(&wanted.state)?;
         let owner = Owner::writer(wanted.privilege);
         let home = self.state().child(workload.clone());
+        #[pure_only]
+        enum StateHome {
+            Datasets(Dataset),
+            Directories(Dataset),
+        }
+        let state_home = match placement {
+            Placement::Shared => StateHome::Datasets(home.clone()),
+            Placement::PerSlot(colour) => StateHome::Directories(self.slot_home(name, colour)?),
+        };
         let logs = Mount {
             host: HostPath::within(&self.logs(), &[workload]),
             guest: journal(),
@@ -370,7 +406,13 @@ impl Layout {
             labelled
                 .iter()
                 .map(|(at, label)| Mount {
-                    host: home.child(label.0.clone()).mountpoint(),
+                    // host: home.child(label.0.clone()).mountpoint(),
+                    host: match &state_home {
+                        StateHome::Datasets(home) => home.child(label.0.clone()).mountpoint(),
+                        StateHome::Directories(slot_home) => {
+                            HostPath::within(slot_home, &[label.0.clone()])
+                        }
+                    },
                     guest: at.clone(),
                     mode: MountMode::ReadWrite,
                 })

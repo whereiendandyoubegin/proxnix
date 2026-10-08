@@ -171,6 +171,7 @@ fn cutover(protected: bool, choice: Option<crate::types::CutoverChoice>) -> Cuto
         (true, _) => Cutover::Protected,
         (false, None | Some(crate::types::CutoverChoice::Overlap)) => Cutover::Overlap,
         (false, Some(crate::types::CutoverChoice::StopStart)) => Cutover::StopStart,
+        (false, Some(crate::types::CutoverChoice::FenceTransfer)) => Cutover::FenceTransfer,
     }
 }
 

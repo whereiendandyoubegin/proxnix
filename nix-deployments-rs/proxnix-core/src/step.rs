@@ -7,6 +7,8 @@ use crate::desired::{Desired, Orphan};
 #[pure_only]
 use crate::effect::{Effect, EffectId, Event, GuestEffect, RouteEffect};
 #[pure_only]
+use crate::guest::{KindFacts, MountMode};
+#[pure_only]
 use crate::memo::{Action, Failure, Memo};
 #[pure_only]
 use crate::observation::{Anomaly, Observation, Occupant, SlotState};
@@ -14,8 +16,6 @@ use crate::observation::{Anomaly, Observation, Occupant, SlotState};
 use crate::pair::{Keep, Overlap, StopStart};
 #[pure_only]
 use crate::spec::{Cutover, GuestName, KindSpec, WorkloadSpec};
-#[pure_only]
-use crate::guest::{KindFacts, MountMode};
 #[pure_only]
 use crate::strategy::{Blocker, Context, Intent, Plan, Registry, Stage, drive};
 #[pure_only]
@@ -83,32 +83,42 @@ impl Registry for Builtin {
             Cutover::Overlap => drive::<Overlap>(ctx),
             Cutover::StopStart => drive::<StopStart>(ctx),
             Cutover::Protected => drive::<Keep>(ctx),
+            Cutover::FenceTransfer => todo!(),
         }
     }
 }
 
 #[pure_only]
 fn unsettled_in(observed: &Observation, spec: &WorkloadSpec) -> Option<Plan> {
-    spec.slots.both().into_iter().find_map(|slot| match observed.slot(slot.inner()) {
-        SlotState::Occupied(Occupant::Unsettled(id, why)) => Some(Plan::idle(Stage::Blocked(Blocker::Unsettled(id, why)))),
-        _ => None,
-    })
+    spec.slots
+        .both()
+        .into_iter()
+        .find_map(|slot| match observed.slot(slot.inner()) {
+            SlotState::Occupied(Occupant::Unsettled(id, why)) => {
+                Some(Plan::idle(Stage::Blocked(Blocker::Unsettled(id, why))))
+            }
+            _ => None,
+        })
 }
 
 #[pure_only]
 fn moved(spec: &WorkloadSpec, cohort: &Cohort, tick: &Tick) -> Option<Plan> {
-    let serving = cohort.highest().or_else(|| cohort.members().iter().find(|member| member.running()))?;
+    let serving = cohort
+        .highest()
+        .or_else(|| cohort.members().iter().find(|member| member.running()))?;
     tick.push()?;
     match (&spec.kind, serving.guest().facts()) {
         (KindSpec::Lxc { mounts: wanted, .. }, KindFacts::Lxc { mounts: seen, .. }) => wanted
             .iter()
             .filter(|want| want.mode == MountMode::ReadWrite)
             .find_map(|want| {
-                seen.iter().find(|had| had.guest == want.guest && had.host != want.host).map(|had| Blocker::StateMoved {
-                    at: want.guest.clone(),
-                    from: had.host.clone(),
-                    to: want.host.clone(),
-                })
+                seen.iter()
+                    .find(|had| had.guest == want.guest && had.host != want.host)
+                    .map(|had| Blocker::StateMoved {
+                        at: want.guest.clone(),
+                        from: had.host.clone(),
+                        to: want.host.clone(),
+                    })
             })
             .map(|blocker| Plan::idle(Stage::Blocked(blocker))),
         _ => None,
@@ -127,7 +137,15 @@ fn workload<R: Registry>(
     unsettled_in(observed, spec).unwrap_or_else(|| match Cohort::gather(observed, spec) {
         Err(fault) => Plan::idle(Stage::Conflict(fault)),
         Ok(cohort) => moved(spec, &cohort, tick).unwrap_or_else(|| {
-            R::plan(&Context::new(spec, &cohort, images.knowledge(&spec.image), tick.push(), observed, now, memo))
+            R::plan(&Context::new(
+                spec,
+                &cohort,
+                images.knowledge(&spec.image),
+                tick.push(),
+                observed,
+                now,
+                memo,
+            ))
         }),
     })
 }

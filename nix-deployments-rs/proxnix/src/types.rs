@@ -119,6 +119,7 @@ pub struct VMConfig {
 pub enum CutoverChoice {
     Overlap,
     StopStart,
+    FenceTransfer,
 }
 
 // Defaults for VMConfig

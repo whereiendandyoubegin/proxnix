@@ -30,6 +30,7 @@ pub enum Cutover {
     Overlap,
     StopStart,
     Protected,
+    FenceTransfer,
 }
 
 #[pure_only]

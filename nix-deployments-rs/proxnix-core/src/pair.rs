@@ -1,7 +1,9 @@
 #[pure_only]
 use crate::cohort::Member;
 #[pure_only]
-use crate::common::{Health, Rebuilds, abort, commit, dispose, health, point, serve, start, undeployed};
+use crate::common::{
+    Health, Rebuilds, abort, commit, dispose, health, point, serve, start, undeployed,
+};
 #[pure_only]
 use crate::effect::{Effect, Endpoint, GuestEffect};
 #[pure_only]
@@ -16,9 +18,18 @@ pub enum PairPhase {
     Absent,
     Legacy(Member),
     Serving(Member),
-    Deploying { serving: Option<Member>, fresh: Member },
-    Leftover { serving: Member, stale: Member },
-    Superseded { serving: Member, loser: Member },
+    Deploying {
+        serving: Option<Member>,
+        fresh: Member,
+    },
+    Leftover {
+        serving: Member,
+        stale: Member,
+    },
+    Superseded {
+        serving: Member,
+        loser: Member,
+    },
     Ambiguous,
 }
 
@@ -35,15 +46,27 @@ pub fn pair_phase(ctx: &Context<'_>) -> PairPhase {
     match ctx.cohort.highest() {
         None => match ctx.cohort.members() {
             [] => PairPhase::Absent,
-            [only] if only.pending() || ctx.in_flight(only) => PairPhase::Deploying { serving: None, fresh: only.clone() },
+            [only] if only.pending() || ctx.in_flight(only) => PairPhase::Deploying {
+                serving: None,
+                fresh: only.clone(),
+            },
             [only] => PairPhase::Legacy(only.clone()),
             _ => PairPhase::Ambiguous,
         },
         Some(top) => match ctx.cohort.others(top).as_slice() {
             [] => PairPhase::Serving(top.clone()),
-            [other] if other.generation().is_some() => PairPhase::Superseded { serving: top.clone(), loser: (*other).clone() },
-            [other] if ctx.in_flight(other) => PairPhase::Deploying { serving: Some(top.clone()), fresh: (*other).clone() },
-            [other] => PairPhase::Leftover { serving: top.clone(), stale: (*other).clone() },
+            [other] if other.generation().is_some() => PairPhase::Superseded {
+                serving: top.clone(),
+                loser: (*other).clone(),
+            },
+            [other] if ctx.in_flight(other) => PairPhase::Deploying {
+                serving: Some(top.clone()),
+                fresh: (*other).clone(),
+            },
+            [other] => PairPhase::Leftover {
+                serving: top.clone(),
+                stale: (*other).clone(),
+            },
             _ => PairPhase::Ambiguous,
         },
     }
@@ -51,10 +74,15 @@ pub fn pair_phase(ctx: &Context<'_>) -> PairPhase {
 
 #[pure_only]
 fn fence(ctx: &Context<'_>, serving: &Member, fresh: &Member) -> Option<Plan> {
-    serving.running().then(|| match refused(ctx, serving, &[Action::Stop]) {
-        Some(failure) => abort(ctx, fresh, failure),
-        None => Plan::act(Stage::Fencing, Effect::Guest(GuestEffect::Stop(serving.clone()))),
-    })
+    serving
+        .running()
+        .then(|| match refused(ctx, serving, &[Action::Stop]) {
+            Some(failure) => abort(ctx, fresh, failure),
+            None => Plan::act(
+                Stage::Fencing,
+                Effect::Guest(GuestEffect::Stop(serving.clone())),
+            ),
+        })
 }
 
 #[pure_only]
@@ -78,7 +106,8 @@ fn supersede(ctx: &Context<'_>, serving: &Member, loser: &Member) -> Plan {
     if !serving.running() {
         return start(ctx, serving);
     }
-    point(ctx, serving, Some(loser), Endpoint::Primary).unwrap_or_else(|| dispose(ctx, loser, Action::Retire))
+    point(ctx, serving, Some(loser), Endpoint::Primary)
+        .unwrap_or_else(|| dispose(ctx, loser, Action::Retire))
 }
 
 #[pure_only]
@@ -88,7 +117,9 @@ pub fn pair_plan(ctx: &Context<'_>, phase: PairPhase, fencing: Fence, rebuilds: 
         PairPhase::Absent => undeployed(ctx),
         PairPhase::Legacy(only) => commit(ctx, &only, Stage::Adopting),
         PairPhase::Serving(serving) => serve(ctx, &serving, rebuilds),
-        PairPhase::Deploying { serving, fresh } => deploying(ctx, serving.as_ref(), &fresh, fencing),
+        PairPhase::Deploying { serving, fresh } => {
+            deploying(ctx, serving.as_ref(), &fresh, fencing)
+        }
         PairPhase::Leftover { stale, .. } => dispose(ctx, &stale, Action::Reclaim),
         PairPhase::Superseded { serving, loser } => supersede(ctx, &serving, &loser),
         PairPhase::Ambiguous => Plan::idle(Stage::Blocked(Blocker::Ambiguous)),
