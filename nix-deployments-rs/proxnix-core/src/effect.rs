@@ -63,7 +63,13 @@ pub struct Fresh {
 #[pure_only]
 impl Fresh {
     #[must_use]
-    pub fn new(push: &Push, artifact: &Artifact, spec: &WorkloadSpec, target: Vacant, role: Option<RoleName>) -> Option<Fresh> {
+    pub fn new(
+        push: &Push,
+        artifact: &Artifact,
+        spec: &WorkloadSpec,
+        target: Vacant,
+        role: Option<RoleName>,
+    ) -> Option<Fresh> {
         spec.slots.slot_of(target.id()).map(|slot| Fresh {
             nix: artifact.nix().clone(),
             commit: push.commit().clone(),
@@ -115,7 +121,10 @@ impl Provisioned {
 
     pub(crate) fn attempted(request: &GuestEffect) -> Option<Provisioned> {
         match request {
-            GuestEffect::Create { target, spec, .. } => Some(Provisioned { id: target.id(), kind: spec.kind() }),
+            GuestEffect::Create { target, spec, .. } => Some(Provisioned {
+                id: target.id(),
+                kind: spec.kind(),
+            }),
             _ => None,
         }
     }
@@ -142,13 +151,27 @@ pub enum ResourceChange {
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestEffect {
-    Create { target: Vacant, artifact: Artifact, spec: Box<WorkloadSpec>, fresh: Fresh },
+    Create {
+        target: Vacant,
+        artifact: Artifact,
+        spec: Box<WorkloadSpec>,
+        fresh: Fresh,
+    },
     Start(Member),
     Stop(Member),
-    Record { guest: Member, address: Ipv4Addr },
-    Role { guest: Member, role: RoleName },
+    Record {
+        guest: Member,
+        address: Ipv4Addr,
+    },
+    Role {
+        guest: Member,
+        role: RoleName,
+    },
     Commit(Promotion),
-    Update { guest: Member, changes: Vec<ResourceChange> },
+    Update {
+        guest: Member,
+        changes: Vec<ResourceChange>,
+    },
     Undo(Provisioned),
     Reclaim(Expendable),
     Retire(Expendable),
@@ -174,7 +197,12 @@ impl GuestEffect {
     #[must_use]
     pub fn instance(&self) -> Option<Instance> {
         match self {
-            GuestEffect::Create { target, artifact, .. } => Some(Instance { id: target.id(), nix: artifact.nix().clone() }),
+            GuestEffect::Create {
+                target, artifact, ..
+            } => Some(Instance {
+                id: target.id(),
+                nix: artifact.nix().clone(),
+            }),
             GuestEffect::Start(guest)
             | GuestEffect::Stop(guest)
             | GuestEffect::Record { guest, .. }
@@ -199,7 +227,11 @@ pub enum Check {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeEffect {
     ReadAddress(Member),
-    PortOpen { guest: Member, address: Ipv4Addr, port: Port },
+    PortOpen {
+        guest: Member,
+        address: Ipv4Addr,
+        port: Port,
+    },
     GuestCheck(Member),
 }
 
@@ -217,7 +249,9 @@ impl ProbeEffect {
     #[must_use]
     pub fn guest(&self) -> &Member {
         match self {
-            ProbeEffect::ReadAddress(guest) | ProbeEffect::PortOpen { guest, .. } | ProbeEffect::GuestCheck(guest) => guest,
+            ProbeEffect::ReadAddress(guest)
+            | ProbeEffect::PortOpen { guest, .. }
+            | ProbeEffect::GuestCheck(guest) => guest,
         }
     }
 }
@@ -242,12 +276,15 @@ pub struct Backend {
 impl Backend {
     #[must_use]
     pub fn of(member: &Member, endpoint: Endpoint) -> Option<Backend> {
-        member.generation().zip(member.tags().service_ip).map(|(generation, address)| Backend {
-            endpoint,
-            generation,
-            nix: member.nix().clone(),
-            address,
-        })
+        member
+            .generation()
+            .zip(member.tags().service_ip)
+            .map(|(generation, address)| Backend {
+                endpoint,
+                generation,
+                nix: member.nix().clone(),
+                address,
+            })
     }
 
     #[must_use]
@@ -274,8 +311,17 @@ impl Backend {
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteEffect {
-    Point { name: GuestName, proxy: ProxySpec, to: Backend, from: Option<Backend> },
-    Restore { name: GuestName, proxy: ProxySpec, to: Backend },
+    Point {
+        name: GuestName,
+        proxy: ProxySpec,
+        to: Backend,
+        from: Option<Backend>,
+    },
+    Restore {
+        name: GuestName,
+        proxy: ProxySpec,
+        to: Backend,
+    },
     RemoveCluster(GuestName),
 }
 

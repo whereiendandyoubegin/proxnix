@@ -1,7 +1,10 @@
 #[pure_only]
 use crate::cohort::Instance;
 #[pure_only]
-use crate::effect::{Backend, Check, Effect, EffectError, EffectId, Event, GuestEffect, Outcome, ProbeEffect, Provisioned, RouteEffect};
+use crate::effect::{
+    Backend, Check, Effect, EffectError, EffectId, Event, GuestEffect, Outcome, ProbeEffect,
+    Provisioned, RouteEffect,
+};
 #[pure_only]
 use crate::guest::{Attempt, DurationMs};
 #[pure_only]
@@ -57,11 +60,20 @@ impl Action {
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    Expired { check: Check, attempts: Attempt, last: Option<EffectError> },
-    Refused { action: Action, error: EffectError },
+    Expired {
+        check: Check,
+        attempts: Attempt,
+        last: Option<EffectError>,
+    },
+    Refused {
+        action: Action,
+        error: EffectError,
+    },
     Route(EffectError),
     NoAddress,
-    Crashed { starts: Attempt },
+    Crashed {
+        starts: Attempt,
+    },
 }
 
 #[pure_only]
@@ -84,7 +96,12 @@ pub enum Progress {
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Trial {
-    Trying { deadline: Moment, retry_at: Moment, attempts: Attempt, last: Option<EffectError> },
+    Trying {
+        deadline: Moment,
+        retry_at: Moment,
+        attempts: Attempt,
+        last: Option<EffectError>,
+    },
     Passed(Option<Ipv4Addr>),
 }
 
@@ -115,7 +132,10 @@ pub struct Memo {
 
 #[pure_only]
 fn put<K: Ord, V>(map: BTreeMap<K, V>, key: K, value: V) -> BTreeMap<K, V> {
-    let kept: Vec<(K, V)> = map.into_iter().filter(|(existing, _)| *existing != key).collect();
+    let kept: Vec<(K, V)> = map
+        .into_iter()
+        .filter(|(existing, _)| *existing != key)
+        .collect();
     kept.into_iter().chain(once((key, value))).collect()
 }
 
@@ -141,8 +161,12 @@ fn usable(address: Ipv4Addr) -> bool {
 #[pure_only]
 fn verdict(check: Check, outcome: &Outcome) -> Option<Trial> {
     match (check, outcome) {
-        (Check::Address, Outcome::Address(address)) if usable(*address) => Some(Trial::Passed(Some(*address))),
-        (Check::Port | Check::Guest, Outcome::Done | Outcome::AlreadyApplied) => Some(Trial::Passed(None)),
+        (Check::Address, Outcome::Address(address)) if usable(*address) => {
+            Some(Trial::Passed(Some(*address)))
+        }
+        (Check::Port | Check::Guest, Outcome::Done | Outcome::AlreadyApplied) => {
+            Some(Trial::Passed(None))
+        }
         _ => None,
     }
 }
@@ -164,20 +188,36 @@ fn failure_of(outcome: Outcome) -> Option<EffectError> {
 #[pure_only]
 impl Memo {
     pub(crate) fn absorb(self, events: Vec<Event>, now: Moment, pacing: &Pacing) -> Memo {
-        let absorbed = events.into_iter().fold(self, |memo, event| memo.absorb_one(event, now, pacing));
-        Memo { issued: BTreeMap::new(), ..absorbed }
+        let absorbed = events
+            .into_iter()
+            .fold(self, |memo, event| memo.absorb_one(event, now, pacing));
+        Memo {
+            issued: BTreeMap::new(),
+            ..absorbed
+        }
     }
 
     fn absorb_one(self, event: Event, now: Moment, pacing: &Pacing) -> Memo {
         match self.issued.get(&event.effect).cloned() {
             None => self,
-            Some((name, Effect::Guest(effect))) => self.guest_outcome(name, &effect, event.outcome, now, pacing),
-            Some((_, Effect::Probe(probe))) => self.probe_outcome(&probe, event.outcome, now, pacing),
+            Some((name, Effect::Guest(effect))) => {
+                self.guest_outcome(name, &effect, event.outcome, now, pacing)
+            }
+            Some((_, Effect::Probe(probe))) => {
+                self.probe_outcome(&probe, event.outcome, now, pacing)
+            }
             Some((name, Effect::Route(route))) => self.route_outcome(name, route, event.outcome),
         }
     }
 
-    fn guest_outcome(self, name: GuestName, effect: &GuestEffect, outcome: Outcome, now: Moment, pacing: &Pacing) -> Memo {
+    fn guest_outcome(
+        self,
+        name: GuestName,
+        effect: &GuestEffect,
+        outcome: Outcome,
+        now: Moment,
+        pacing: &Pacing,
+    ) -> Memo {
         match (effect, outcome) {
             (GuestEffect::Create { artifact, .. }, Outcome::Failed(error)) => {
                 let nix = artifact.nix().clone();
@@ -187,83 +227,160 @@ impl Memo {
                 };
                 Memo {
                     failures: put(self.failures, (effect.id(), Action::Create), error.clone()),
-                    given_up: put(self.given_up, (name, nix), Failure::Refused { action: Action::Create, error }),
+                    given_up: put(
+                        self.given_up,
+                        (name, nix),
+                        Failure::Refused {
+                            action: Action::Create,
+                            error,
+                        },
+                    ),
                     provisioned,
                     ..self
                 }
             }
-            (GuestEffect::Create { .. }, outcome) => match (Provisioned::confirmed(effect, &outcome), effect.instance()) {
-                (Some(provisioned), Some(instance)) => Memo { provisioned: put(self.provisioned, instance, provisioned), ..self },
-                _ => self,
-            },
-            (GuestEffect::Start(member), Outcome::Done | Outcome::AlreadyApplied) => {
-                let instance = member.instance();
-                let attempts = self.starts.get(&instance).map_or(Attempt(0), |(attempts, _)| *attempts).next();
-                Memo { starts: put(self.starts, instance, (attempts, now.after(pacing.guest))), ..self }
-            }
-            (GuestEffect::Update { guest, .. }, Outcome::Done | Outcome::AlreadyApplied) => {
-                Memo { updated: add(self.updated, guest.instance()), ..self }
-            }
-            (_, Outcome::Failed(error @ EffectError::Unreachable(_))) => {
-                let key = (effect.id(), Action::of(effect));
-                let attempts = self.transient.get(&key).copied().unwrap_or(Attempt(0)).next();
-                if attempts < TRANSIENT_ATTEMPTS {
-                    Memo { transient: put(self.transient, key, attempts), ..self }
-                } else {
-                    Memo { failures: put(self.failures, key, error), ..self }
+            (GuestEffect::Create { .. }, outcome) => {
+                match (Provisioned::confirmed(effect, &outcome), effect.instance()) {
+                    (Some(provisioned), Some(instance)) => Memo {
+                        provisioned: put(self.provisioned, instance, provisioned),
+                        ..self
+                    },
+                    _ => self,
                 }
             }
-            (_, Outcome::Failed(error)) => Memo { failures: put(self.failures, (effect.id(), Action::of(effect)), error), ..self },
+            (GuestEffect::Start(member), Outcome::Done | Outcome::AlreadyApplied) => {
+                let instance = member.instance();
+                let attempts = self
+                    .starts
+                    .get(&instance)
+                    .map_or(Attempt(0), |(attempts, _)| *attempts)
+                    .next();
+                Memo {
+                    starts: put(self.starts, instance, (attempts, now.after(pacing.guest))),
+                    ..self
+                }
+            }
+            (GuestEffect::Update { guest, .. }, Outcome::Done | Outcome::AlreadyApplied) => Memo {
+                updated: add(self.updated, guest.instance()),
+                ..self
+            },
+            (_, Outcome::Failed(error @ EffectError::Unreachable(_))) => {
+                let key = (effect.id(), Action::of(effect));
+                let attempts = self
+                    .transient
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(Attempt(0))
+                    .next();
+                if attempts < TRANSIENT_ATTEMPTS {
+                    Memo {
+                        transient: put(self.transient, key, attempts),
+                        ..self
+                    }
+                } else {
+                    Memo {
+                        failures: put(self.failures, key, error),
+                        ..self
+                    }
+                }
+            }
+            (_, Outcome::Failed(error)) => Memo {
+                failures: put(self.failures, (effect.id(), Action::of(effect)), error),
+                ..self
+            },
             _ => self,
         }
     }
 
-    fn probe_outcome(self, probe: &ProbeEffect, outcome: Outcome, now: Moment, pacing: &Pacing) -> Memo {
+    fn probe_outcome(
+        self,
+        probe: &ProbeEffect,
+        outcome: Outcome,
+        now: Moment,
+        pacing: &Pacing,
+    ) -> Memo {
         let check = probe.check();
         let key = (probe.guest().instance(), check);
         let passed = verdict(check, &outcome);
         let trial = match (passed, self.trials.get(&key)) {
             (Some(passed), _) => passed,
-            (None, Some(Trial::Trying { deadline, attempts, .. })) => Trial::Trying {
+            (
+                None,
+                Some(Trial::Trying {
+                    deadline, attempts, ..
+                }),
+            ) => Trial::Trying {
                 deadline: *deadline,
                 retry_at: now.after(pace(pacing, check)),
                 attempts: attempts.next(),
                 last: failure_of(outcome),
             },
-            (None, _) => Trial::Trying { deadline: now, retry_at: now, attempts: Attempt(1), last: failure_of(outcome) },
+            (None, _) => Trial::Trying {
+                deadline: now,
+                retry_at: now,
+                attempts: Attempt(1),
+                last: failure_of(outcome),
+            },
         };
-        Memo { trials: put(self.trials, key, trial), ..self }
+        Memo {
+            trials: put(self.trials, key, trial),
+            ..self
+        }
     }
 
     fn route_outcome(self, name: GuestName, route: RouteEffect, outcome: Outcome) -> Memo {
         match (route, outcome) {
-            (RouteEffect::RemoveCluster(name), _) => Memo { cleared: add(self.cleared, name), ..self },
-            (RouteEffect::Point { to, .. } | RouteEffect::Restore { to, .. }, Outcome::Failed(error)) => {
-                Memo { route_failures: put(self.route_failures, RouteKey { name, backend: to }, error), ..self }
-            }
-            (RouteEffect::Point { to, .. } | RouteEffect::Restore { to, .. }, _) => {
-                Memo { routed: add(self.routed, RouteKey { name, backend: to }), ..self }
-            }
+            (RouteEffect::RemoveCluster(name), _) => Memo {
+                cleared: add(self.cleared, name),
+                ..self
+            },
+            (
+                RouteEffect::Point { to, .. } | RouteEffect::Restore { to, .. },
+                Outcome::Failed(error),
+            ) => Memo {
+                route_failures: put(self.route_failures, RouteKey { name, backend: to }, error),
+                ..self
+            },
+            (RouteEffect::Point { to, .. } | RouteEffect::Restore { to, .. }, _) => Memo {
+                routed: add(self.routed, RouteKey { name, backend: to }),
+                ..self
+            },
         }
     }
 
-    pub(crate) fn issue(self, name: &GuestName, effect: Effect, within: Option<DurationMs>, now: Moment) -> (Memo, EffectId) {
+    pub(crate) fn issue(
+        self,
+        name: &GuestName,
+        effect: Effect,
+        within: Option<DurationMs>,
+        now: Moment,
+    ) -> (Memo, EffectId) {
         let id = EffectId(self.next);
         let deploys = match &effect {
-            Effect::Guest(create @ GuestEffect::Create { .. }) => create.instance().map_or(self.deploys.clone(), |instance| add(self.deploys.clone(), instance)),
+            Effect::Guest(create @ GuestEffect::Create { .. }) => {
+                create.instance().map_or(self.deploys.clone(), |instance| {
+                    add(self.deploys.clone(), instance)
+                })
+            }
             _ => self.deploys.clone(),
         };
         let trials = match &effect {
-            Effect::Probe(probe) if !self.trials.contains_key(&(probe.guest().instance(), probe.check())) => put(
-                self.trials.clone(),
-                (probe.guest().instance(), probe.check()),
-                Trial::Trying {
-                    deadline: now.after(within.unwrap_or(DurationMs(0))),
-                    retry_at: now,
-                    attempts: Attempt(0),
-                    last: None,
-                },
-            ),
+            Effect::Probe(probe)
+                if !self
+                    .trials
+                    .contains_key(&(probe.guest().instance(), probe.check())) =>
+            {
+                put(
+                    self.trials.clone(),
+                    (probe.guest().instance(), probe.check()),
+                    Trial::Trying {
+                        deadline: now.after(within.unwrap_or(DurationMs(0))),
+                        retry_at: now,
+                        attempts: Attempt(0),
+                        last: None,
+                    },
+                )
+            }
             _ => self.trials.clone(),
         };
         (
@@ -279,7 +396,10 @@ impl Memo {
     }
 
     pub(crate) fn give_up(self, name: &GuestName, nix: NixHash, failure: Failure) -> Memo {
-        Memo { given_up: put(self.given_up, (name.clone(), nix), failure), ..self }
+        Memo {
+            given_up: put(self.given_up, (name.clone(), nix), failure),
+            ..self
+        }
     }
 
     pub(crate) fn aborted(&self, effect: &Effect) -> Option<Instance> {
@@ -298,9 +418,16 @@ impl Memo {
         match self.trials.get(&(instance.clone(), check)) {
             None => Progress::Due,
             Some(Trial::Passed(found)) => Progress::Passed(*found),
-            Some(Trial::Trying { deadline, attempts, last, .. }) if now >= *deadline => Progress::Expired(*attempts, last.clone()),
+            Some(Trial::Trying {
+                deadline,
+                attempts,
+                last,
+                ..
+            }) if now >= *deadline => Progress::Expired(*attempts, last.clone()),
             Some(Trial::Trying { retry_at, .. }) if now >= *retry_at => Progress::Due,
-            Some(Trial::Trying { retry_at, deadline, .. }) => Progress::Waiting((*retry_at).min(*deadline)),
+            Some(Trial::Trying {
+                retry_at, deadline, ..
+            }) => Progress::Waiting((*retry_at).min(*deadline)),
         }
     }
 
@@ -330,11 +457,17 @@ impl Memo {
     }
 
     pub(crate) fn routed(&self, name: &GuestName, backend: &Backend) -> bool {
-        self.routed.contains(&RouteKey { name: name.clone(), backend: backend.clone() })
+        self.routed.contains(&RouteKey {
+            name: name.clone(),
+            backend: backend.clone(),
+        })
     }
 
     pub(crate) fn route_failed(&self, name: &GuestName, backend: &Backend) -> Option<&EffectError> {
-        self.route_failures.get(&RouteKey { name: name.clone(), backend: backend.clone() })
+        self.route_failures.get(&RouteKey {
+            name: name.clone(),
+            backend: backend.clone(),
+        })
     }
 
     pub(crate) fn cleared(&self, name: &GuestName) -> bool {

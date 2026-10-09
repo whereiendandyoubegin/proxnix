@@ -67,7 +67,10 @@ impl Member {
 
     #[must_use]
     pub fn instance(&self) -> Instance {
-        Instance { id: self.id(), nix: self.nix().clone() }
+        Instance {
+            id: self.id(),
+            nix: self.nix().clone(),
+        }
     }
 }
 
@@ -90,7 +93,9 @@ pub struct Cohort {
 #[pure_only]
 fn malformed_in(observed: &Observation, id: Vmid) -> Option<CohortFault> {
     match observed.slot(id) {
-        SlotState::Occupied(Occupant::Malformed(at, fault)) => Some(CohortFault::Malformed(at, fault)),
+        SlotState::Occupied(Occupant::Malformed(at, fault)) => {
+            Some(CohortFault::Malformed(at, fault))
+        }
         _ => None,
     }
 }
@@ -98,22 +103,37 @@ fn malformed_in(observed: &Observation, id: Vmid) -> Option<CohortFault> {
 #[pure_only]
 impl Cohort {
     pub fn gather(observed: &Observation, spec: &WorkloadSpec) -> Result<Cohort, CohortFault> {
-        let members: Vec<Member> =
-            observed.managed_named(&spec.name).into_iter().map(|managed| Member { managed }).collect();
+        let members: Vec<Member> = observed
+            .managed_named(&spec.name)
+            .into_iter()
+            .map(|managed| Member { managed })
+            .collect();
         let stray = members
             .iter()
             .find(|member| !spec.slots.both().map(SlotId::inner).contains(&member.id()))
             .map(|member| CohortFault::Stray(member.id()));
-        let malformed = spec.slots.both().into_iter().find_map(|slot| malformed_in(observed, slot.inner()));
+        let malformed = spec
+            .slots
+            .both()
+            .into_iter()
+            .find_map(|slot| malformed_in(observed, slot.inner()));
         let repeated = members.iter().enumerate().find_map(|(index, member)| {
             member
                 .generation()
-                .filter(|generation| members[..index].iter().any(|earlier| earlier.generation() == Some(*generation)))
+                .filter(|generation| {
+                    members[..index]
+                        .iter()
+                        .any(|earlier| earlier.generation() == Some(*generation))
+                })
                 .map(CohortFault::SameGeneration)
         });
         match stray.or(malformed).or(repeated) {
             Some(fault) => Err(fault),
-            None => Ok(Cohort { name: spec.name.clone(), slots: spec.slots, members }),
+            None => Ok(Cohort {
+                name: spec.name.clone(),
+                slots: spec.slots,
+                members,
+            }),
         }
     }
 
@@ -142,7 +162,10 @@ impl Cohort {
 
     #[must_use]
     pub fn others(&self, member: &Member) -> Vec<&Member> {
-        self.members.iter().filter(|other| other.id() != member.id()).collect()
+        self.members
+            .iter()
+            .filter(|other| other.id() != member.id())
+            .collect()
     }
 
     #[must_use]
@@ -152,7 +175,8 @@ impl Cohort {
 
     #[must_use]
     pub fn beside(&self, member: &Member) -> Option<Vmid> {
-        self.slot_of(member).map(|slot| self.slots.id(slot.switch_slot()).inner())
+        self.slot_of(member)
+            .map(|slot| self.slots.id(slot.switch_slot()).inner())
     }
 
     fn holds(&self, member: &Member) -> bool {
@@ -175,7 +199,9 @@ impl Promotion {
         let already_highest = top.is_some_and(|top| top.id() == member.id());
         (cohort.holds(member) && !already_highest).then(|| Promotion {
             guest: member.clone(),
-            generation: top.and_then(Member::generation).map_or(Generation::FIRST, Generation::after),
+            generation: top
+                .and_then(Member::generation)
+                .map_or(Generation::FIRST, Generation::after),
         })
     }
 
@@ -207,20 +233,28 @@ pub struct Expendable {
 impl Expendable {
     #[must_use]
     pub fn outranked(cohort: &Cohort, member: &Member) -> Option<Expendable> {
-        let outranked = cohort.others(member).into_iter().any(|other| {
-            other.generation().is_some() && other.generation() > member.generation()
-        });
-        (cohort.holds(member) && outranked).then(|| Expendable { doom: Doom::Outranked(member.clone()) })
+        let outranked = cohort
+            .others(member)
+            .into_iter()
+            .any(|other| other.generation().is_some() && other.generation() > member.generation());
+        (cohort.holds(member) && outranked).then(|| Expendable {
+            doom: Doom::Outranked(member.clone()),
+        })
     }
 
     #[must_use]
     pub fn unproven(cohort: &Cohort, member: &Member) -> Option<Expendable> {
-        (cohort.holds(member) && member.pending() && member.generation().is_none())
-            .then(|| Expendable { doom: Doom::Outranked(member.clone()) })
+        (cohort.holds(member) && member.pending() && member.generation().is_none()).then(|| {
+            Expendable {
+                doom: Doom::Outranked(member.clone()),
+            }
+        })
     }
 
     pub(crate) fn orphaned(managed: Managed) -> Expendable {
-        Expendable { doom: Doom::Orphaned(managed) }
+        Expendable {
+            doom: Doom::Orphaned(managed),
+        }
     }
 
     #[must_use]
@@ -235,7 +269,10 @@ impl Expendable {
     pub fn instance(&self) -> Instance {
         match &self.doom {
             Doom::Outranked(member) => member.instance(),
-            Doom::Orphaned(managed) => Instance { id: managed.id(), nix: managed.tags().nix.clone() },
+            Doom::Orphaned(managed) => Instance {
+                id: managed.id(),
+                nix: managed.tags().nix.clone(),
+            },
         }
     }
 
@@ -253,7 +290,9 @@ mod tests {
     use super::*;
     use crate::guest::{Cores, DiskGib, DurationMs, KindFacts, MemoryMb, Port, Resources, Sockets};
     use crate::observation::{Audited, Grant, Permissions, Settled, Sighting};
-    use crate::spec::{BridgeName, Cutover, Hostname, ImageType, KindSpec, ProxySpec, Purity, Timeouts};
+    use crate::spec::{
+        BridgeName, Cutover, Hostname, ImageType, KindSpec, ProxySpec, Purity, Timeouts,
+    };
     use crate::tags::RawTags;
 
     const NIX: &str = "78s0iadvjz6s48aqvx4rw78lwrzkjzlw";
@@ -264,7 +303,11 @@ mod tests {
             name: GuestName(String::from("forgejo")),
             slots: SlotPair::new(Vmid::new(844), Vmid::new(944)).unwrap(),
             image: ImageType(String::from("build-lxc-forgejo")),
-            resources: Resources { memory: MemoryMb(2048), disk: DiskGib(16), cores: Cores(2) },
+            resources: Resources {
+                memory: MemoryMb(2048),
+                disk: DiskGib(16),
+                cores: Cores(2),
+            },
             cutover: Cutover::Overlap,
             purity: Purity::Pure,
             proxy: ProxySpec {
@@ -274,8 +317,13 @@ mod tests {
                 tcp_ports: vec![],
                 bridge: BridgeName(String::from("vmbr0")),
             },
-            timeouts: Timeouts { dhcp: DurationMs(1), health_check: DurationMs(1) },
-            kind: KindSpec::Qemu { sockets: Sockets(1) },
+            timeouts: Timeouts {
+                dhcp: DurationMs(1),
+                health_check: DurationMs(1),
+            },
+            kind: KindSpec::Qemu {
+                sockets: Sockets(1),
+            },
         }
     }
 
@@ -285,8 +333,14 @@ mod tests {
             name: GuestName(String::from(name)),
             status: GuestStatus::Running,
             tags: RawTags::from(String::from(tags)),
-            resources: Resources { memory: MemoryMb(2048), disk: DiskGib(16), cores: Cores(2) },
-            facts: KindFacts::Qemu { sockets: Sockets(1) },
+            resources: Resources {
+                memory: MemoryMb(2048),
+                disk: DiskGib(16),
+                cores: Cores(2),
+            },
+            facts: KindFacts::Qemu {
+                sockets: Sockets(1),
+            },
         })
     }
 
@@ -296,32 +350,71 @@ mod tests {
     }
 
     fn cohort(sightings: Vec<Sighting>) -> Result<Cohort, CohortFault> {
-        let observed = Observation::new(Audited::try_from(Permissions { vm_audit: Grant::Granted }).unwrap(), sightings);
+        let observed = Observation::new(
+            Audited::try_from(Permissions {
+                vm_audit: Grant::Granted,
+            })
+            .unwrap(),
+            sightings,
+        );
         Cohort::gather(&observed, &spec())
     }
 
     fn member(cohort: &Cohort, id: u32) -> Member {
-        cohort.members().iter().find(|member| member.id() == Vmid::new(id)).unwrap().clone()
+        cohort
+            .members()
+            .iter()
+            .find(|member| member.id() == Vmid::new(id))
+            .unwrap()
+            .clone()
     }
 
     #[test]
     fn only_a_guest_outranked_by_a_committed_generation_is_expendable() {
-        let pair = cohort(vec![sighting(844, "forgejo", &managed("blue", Some(3))), sighting(944, "forgejo", &managed("green", Some(2)))]).unwrap();
-        assert!(Expendable::outranked(&pair, &member(&pair, 844)).is_none(), "the serving guest must never be expendable");
-        assert_eq!(Expendable::outranked(&pair, &member(&pair, 944)).map(|doomed| doomed.id()), Some(Vmid::new(944)));
+        let pair = cohort(vec![
+            sighting(844, "forgejo", &managed("blue", Some(3))),
+            sighting(944, "forgejo", &managed("green", Some(2))),
+        ])
+        .unwrap();
+        assert!(
+            Expendable::outranked(&pair, &member(&pair, 844)).is_none(),
+            "the serving guest must never be expendable"
+        );
+        assert_eq!(
+            Expendable::outranked(&pair, &member(&pair, 944)).map(|doomed| doomed.id()),
+            Some(Vmid::new(944))
+        );
 
-        let fresh = cohort(vec![sighting(844, "forgejo", &managed("blue", Some(1))), sighting(944, "forgejo", &managed("green", None))]).unwrap();
+        let fresh = cohort(vec![
+            sighting(844, "forgejo", &managed("blue", Some(1))),
+            sighting(944, "forgejo", &managed("green", None)),
+        ])
+        .unwrap();
         assert!(Expendable::outranked(&fresh, &member(&fresh, 844)).is_none());
         assert!(Expendable::outranked(&fresh, &member(&fresh, 944)).is_some());
 
-        let legacy = cohort(vec![sighting(844, "forgejo", &managed("blue", None)), sighting(944, "forgejo", &managed("green", None))]).unwrap();
-        assert!(legacy.members().iter().all(|member| Expendable::outranked(&legacy, member).is_none()), "no gen outranks no gen");
+        let legacy = cohort(vec![
+            sighting(844, "forgejo", &managed("blue", None)),
+            sighting(944, "forgejo", &managed("green", None)),
+        ])
+        .unwrap();
+        assert!(
+            legacy
+                .members()
+                .iter()
+                .all(|member| Expendable::outranked(&legacy, member).is_none()),
+            "no gen outranks no gen"
+        );
     }
 
     #[test]
     fn a_member_of_another_cohort_is_never_expendable_or_promotable_here() {
         let here = cohort(vec![sighting(844, "forgejo", &managed("blue", Some(2)))]).unwrap();
-        let elsewhere = cohort(vec![sighting(844, "forgejo", &managed("blue", Some(2))), sighting(944, "forgejo", &managed("green", None))]).unwrap();
+        let elsewhere = cohort(vec![
+            sighting(844, "forgejo", &managed("blue", Some(2))),
+            sighting(944, "forgejo", &managed("green", None)),
+        ])
+        .unwrap();
         let outsider = member(&elsewhere, 944);
         assert!(Expendable::outranked(&here, &outsider).is_none());
         assert!(Promotion::over(&here, &outsider).is_none());
@@ -330,29 +423,49 @@ mod tests {
     #[test]
     fn a_promotion_always_takes_the_next_generation_and_never_re_promotes_the_top() {
         let legacy = cohort(vec![sighting(844, "forgejo", &managed("blue", None))]).unwrap();
-        assert_eq!(Promotion::over(&legacy, &member(&legacy, 844)).map(|p| p.generation()), Some(Generation::FIRST));
+        assert_eq!(
+            Promotion::over(&legacy, &member(&legacy, 844)).map(|p| p.generation()),
+            Some(Generation::FIRST)
+        );
 
-        let pair = cohort(vec![sighting(844, "forgejo", &managed("blue", Some(7))), sighting(944, "forgejo", &managed("green", Some(3)))]).unwrap();
+        let pair = cohort(vec![
+            sighting(844, "forgejo", &managed("blue", Some(7))),
+            sighting(944, "forgejo", &managed("green", Some(3))),
+        ])
+        .unwrap();
         assert!(Promotion::over(&pair, &member(&pair, 844)).is_none());
-        assert_eq!(Promotion::over(&pair, &member(&pair, 944)).map(|p| p.generation().get()), Some(8));
+        assert_eq!(
+            Promotion::over(&pair, &member(&pair, 944)).map(|p| p.generation().get()),
+            Some(8)
+        );
     }
 
     #[test]
     fn a_cohort_refuses_strays_malformed_slots_and_repeated_generations() {
-        assert_eq!(cohort(vec![sighting(845, "forgejo", &managed("blue", Some(1)))]), Err(CohortFault::Stray(Vmid::new(845))));
+        assert_eq!(
+            cohort(vec![sighting(845, "forgejo", &managed("blue", Some(1)))]),
+            Err(CohortFault::Stray(Vmid::new(845)))
+        );
         assert_eq!(
             cohort(vec![sighting(944, "whatever", "proxnix;slot-green")]),
             Err(CohortFault::Malformed(Vmid::new(944), TagFault::NoNixHash))
         );
         assert_eq!(
-            cohort(vec![sighting(844, "forgejo", &managed("blue", Some(2))), sighting(944, "forgejo", &managed("green", Some(2)))]),
+            cohort(vec![
+                sighting(844, "forgejo", &managed("blue", Some(2))),
+                sighting(944, "forgejo", &managed("green", Some(2)))
+            ]),
             Err(CohortFault::SameGeneration("2".parse().unwrap()))
         );
     }
 
     #[test]
     fn unmanaged_guests_and_other_names_are_not_members() {
-        let found = cohort(vec![sighting(844, "forgejo", "k3s"), sighting(944, "postgres", &managed("green", Some(1)))]).unwrap();
+        let found = cohort(vec![
+            sighting(844, "forgejo", "k3s"),
+            sighting(944, "postgres", &managed("green", Some(1))),
+        ])
+        .unwrap();
         assert!(found.members().is_empty());
     }
 }

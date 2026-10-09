@@ -12,7 +12,7 @@ use crate::types::{AppError, IdRange, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct Dataset(pub (String));
+pub struct Dataset(String);
 
 impl Dataset {
     pub fn as_str(&self) -> &str {

@@ -276,9 +276,13 @@ impl Materialise for Placed {
         target: SlotId,
     ) -> Result<()> {
         let config = &self.config;
-        let storage = self.storage.as_ref().map_err(|fault| {
-            AppError::CmdError(format!("{} has no usable storage: {fault:?}", config.name))
-        })?;
+        let storage = self
+            .storage
+            .as_ref()
+            .map_err(|fault| {
+                AppError::CmdError(format!("{} has no usable storage: {fault:?}", config.name))
+            })?
+            .of(target.slot());
         if config.store != StoreChoice::Image {
             return create_on_store(config, storage, artifact, tags, image_store, target);
         }
@@ -467,8 +471,13 @@ mod tests {
             };
             (
                 layout
-                    .storage(&proxnix_core::GuestName(String::from("hydra")), &wanted)
-                    .unwrap(),
+                    .storage_for(
+                        &proxnix_core::GuestName(String::from("hydra")),
+                        &wanted,
+                        proxnix_core::Cutover::StopStart,
+                    )
+                    .unwrap()
+                    .blue,
                 config,
             )
         };

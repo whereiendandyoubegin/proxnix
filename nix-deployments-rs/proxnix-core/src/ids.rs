@@ -1,7 +1,9 @@
 use proxnix_pure::pure_only;
 
 #[pure_only]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub enum Slot {
     Blue,
     Green,
@@ -15,6 +17,37 @@ impl Slot {
             Slot::Blue => Slot::Green,
             Slot::Green => Slot::Blue,
         }
+    }
+}
+
+#[pure_only]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BySlot<T> {
+    pub blue: T,
+    pub green: T,
+}
+
+#[pure_only]
+impl<T> BySlot<T> {
+    pub fn of(&self, slot: Slot) -> &T {
+        match slot {
+            Slot::Blue => &self.blue,
+            Slot::Green => &self.green,
+        }
+    }
+
+    pub fn map<U>(&self, f: impl Fn(&T) -> U) -> BySlot<U> {
+        BySlot {
+            blue: f(&self.blue),
+            green: f(&self.green),
+        }
+    }
+
+    pub fn try_new<E>(f: impl Fn(Slot) -> Result<T, E>) -> Result<BySlot<T>, E> {
+        Ok(BySlot {
+            blue: f(Slot::Blue)?,
+            green: f(Slot::Green)?,
+        })
     }
 }
 
@@ -36,7 +69,9 @@ impl TryFrom<&str> for Slot {
 }
 
 #[pure_only]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
 #[serde(transparent)]
 pub struct Vmid(u32);
 
@@ -181,7 +216,22 @@ mod tests {
 
     #[test]
     fn a_slot_pair_rejects_one_id_in_both_slots() {
-        assert_eq!(SlotPair::new(Vmid::new(844), Vmid::new(844)), Err(SameIdInBothSlots(Vmid::new(844))));
+        assert_eq!(
+            SlotPair::new(Vmid::new(844), Vmid::new(844)),
+            Err(SameIdInBothSlots(Vmid::new(844)))
+        );
+    }
+
+    #[test]
+    fn by_slot_picks_and_maps_each_slot() {
+        let sizes = BySlot {
+            blue: "blue",
+            green: "green!",
+        };
+        assert_eq!(*sizes.of(Slot::Blue), "blue");
+        assert_eq!(*sizes.of(Slot::Green), "green!");
+        assert_eq!(sizes.map(|name| name.len()), BySlot { blue: 4, green: 6 });
+        assert_eq!(BySlot::try_new(Err::<u8, Slot>), Err(Slot::Blue));
     }
 
     #[test]

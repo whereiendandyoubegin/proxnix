@@ -50,22 +50,43 @@ fn ids(spec: &WorkloadSpec) -> [Vmid; 2] {
 
 #[pure_only]
 fn faults(index: usize, spec: &WorkloadSpec, all: &[WorkloadSpec]) -> Vec<ConfigFault> {
-    let others = || all.iter().enumerate().filter(move |(other, _)| *other != index).map(|(_, other)| other);
-    let duplicate = others().any(|other| other.name == spec.name).then_some(ConfigFault::DuplicateName);
-    let shared_ids = others().filter(|other| other.name != spec.name).flat_map(|other| {
-        ids(spec)
-            .into_iter()
-            .filter(|id| ids(other).contains(id))
-            .map(|id| ConfigFault::SharedVmid { id, with: other.name.clone() })
-            .collect::<Vec<_>>()
-    });
-    let shared_address = others().filter(|other| other.name != spec.name).filter_map(|other| {
-        spec.proxy
-            .service_address
-            .filter(|address| other.proxy.service_address == Some(*address))
-            .map(|address| ConfigFault::SharedServiceAddress { address, with: other.name.clone() })
-    });
-    duplicate.into_iter().chain(shared_ids).chain(shared_address).collect()
+    let others = || {
+        all.iter()
+            .enumerate()
+            .filter(move |(other, _)| *other != index)
+            .map(|(_, other)| other)
+    };
+    let duplicate = others()
+        .any(|other| other.name == spec.name)
+        .then_some(ConfigFault::DuplicateName);
+    let shared_ids = others()
+        .filter(|other| other.name != spec.name)
+        .flat_map(|other| {
+            ids(spec)
+                .into_iter()
+                .filter(|id| ids(other).contains(id))
+                .map(|id| ConfigFault::SharedVmid {
+                    id,
+                    with: other.name.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+    let shared_address = others()
+        .filter(|other| other.name != spec.name)
+        .filter_map(|other| {
+            spec.proxy
+                .service_address
+                .filter(|address| other.proxy.service_address == Some(*address))
+                .map(|address| ConfigFault::SharedServiceAddress {
+                    address,
+                    with: other.name.clone(),
+                })
+        });
+    duplicate
+        .into_iter()
+        .chain(shared_ids)
+        .chain(shared_address)
+        .collect()
 }
 
 #[pure_only]
@@ -76,14 +97,25 @@ impl Desired {
     }
 
     #[must_use]
-    pub fn validate_with(specs: Vec<WorkloadSpec>, rejected: Vec<(GuestName, ConfigFault)>) -> Desired {
-        let found: Vec<Vec<ConfigFault>> = specs.iter().enumerate().map(|(index, spec)| faults(index, spec, &specs)).collect();
+    pub fn validate_with(
+        specs: Vec<WorkloadSpec>,
+        rejected: Vec<(GuestName, ConfigFault)>,
+    ) -> Desired {
+        let found: Vec<Vec<ConfigFault>> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| faults(index, spec, &specs))
+            .collect();
         let checked: Vec<(WorkloadSpec, Vec<ConfigFault>)> = specs.into_iter().zip(found).collect();
         let invalid: BTreeMap<GuestName, Vec<ConfigFault>> = checked
             .iter()
             .filter(|(_, found)| !found.is_empty())
             .map(|(spec, found)| (spec.name.clone(), found.clone()))
-            .chain(rejected.into_iter().map(|(name, fault)| (name, vec![fault])))
+            .chain(
+                rejected
+                    .into_iter()
+                    .map(|(name, fault)| (name, vec![fault])),
+            )
             .collect();
         Desired {
             valid: checked
@@ -98,12 +130,18 @@ impl Desired {
 
     #[must_use]
     pub fn workload(&self, name: &GuestName) -> Desired {
-        Desired { scope: Scope::Only(name.clone()), ..self.clone() }
+        Desired {
+            scope: Scope::Only(name.clone()),
+            ..self.clone()
+        }
     }
 
     #[must_use]
     pub fn teardown(&self) -> Desired {
-        Desired { scope: Scope::Teardown, ..self.clone() }
+        Desired {
+            scope: Scope::Teardown,
+            ..self.clone()
+        }
     }
 
     #[must_use]
@@ -120,7 +158,9 @@ impl Desired {
     }
 
     pub fn reported(&self) -> impl Iterator<Item = (&GuestName, &Vec<ConfigFault>)> {
-        self.invalid.iter().filter(|_| !matches!(self.scope, Scope::Only(_)))
+        self.invalid
+            .iter()
+            .filter(|_| !matches!(self.scope, Scope::Only(_)))
     }
 
     #[must_use]
@@ -146,7 +186,10 @@ impl Desired {
             .collect();
         names
             .into_iter()
-            .map(|name| Orphan { guests: observed.managed_named(&name), name })
+            .map(|name| Orphan {
+                guests: observed.managed_named(&name),
+                name,
+            })
             .collect()
     }
 }
@@ -167,7 +210,11 @@ impl Orphan {
 
     #[must_use]
     pub fn expendable(&self) -> Vec<Expendable> {
-        self.guests.iter().cloned().map(Expendable::orphaned).collect()
+        self.guests
+            .iter()
+            .cloned()
+            .map(Expendable::orphaned)
+            .collect()
     }
 }
 
@@ -176,14 +223,20 @@ mod tests {
     use super::*;
     use crate::guest::{Cores, DiskGib, DurationMs, MemoryMb, Port, Resources, Sockets};
     use crate::ids::SlotPair;
-    use crate::spec::{BridgeName, Cutover, Hostname, ImageType, KindSpec, ProxySpec, Purity, Timeouts};
+    use crate::spec::{
+        BridgeName, Cutover, Hostname, ImageType, KindSpec, ProxySpec, Purity, Timeouts,
+    };
 
     fn spec(name: &str, blue: u32, green: u32, address: Option<Ipv4Addr>) -> WorkloadSpec {
         WorkloadSpec {
             name: GuestName(String::from(name)),
             slots: SlotPair::new(Vmid::new(blue), Vmid::new(green)).unwrap(),
             image: ImageType(String::from(name)),
-            resources: Resources { memory: MemoryMb(1), disk: DiskGib(1), cores: Cores(1) },
+            resources: Resources {
+                memory: MemoryMb(1),
+                disk: DiskGib(1),
+                cores: Cores(1),
+            },
             cutover: Cutover::Overlap,
             purity: Purity::Pure,
             proxy: ProxySpec {
@@ -193,8 +246,13 @@ mod tests {
                 tcp_ports: vec![],
                 bridge: BridgeName(String::from("vmbr0")),
             },
-            timeouts: Timeouts { dhcp: DurationMs(1), health_check: DurationMs(1) },
-            kind: KindSpec::Qemu { sockets: Sockets(1) },
+            timeouts: Timeouts {
+                dhcp: DurationMs(1),
+                health_check: DurationMs(1),
+            },
+            kind: KindSpec::Qemu {
+                sockets: Sockets(1),
+            },
         }
     }
 
@@ -206,10 +264,19 @@ mod tests {
             spec("copycat", 700, 701, Some(Ipv4Addr::new(192, 168, 1, 23))),
             spec("fine", 850, 950, None),
         ]);
-        assert_eq!(desired.valid().map(|spec| spec.name.0.as_str()).collect::<Vec<_>>(), vec!["fine"]);
+        assert_eq!(
+            desired
+                .valid()
+                .map(|spec| spec.name.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fine"]
+        );
         assert_eq!(
             desired.invalid()[&GuestName(String::from("clash"))],
-            vec![ConfigFault::SharedVmid { id: Vmid::new(923), with: GuestName(String::from("website")) }]
+            vec![ConfigFault::SharedVmid {
+                id: Vmid::new(923),
+                with: GuestName(String::from("website"))
+            }]
         );
         for name in ["website", "clash", "copycat", "fine"] {
             assert!(desired.declares(&GuestName(String::from(name))));
@@ -218,8 +285,14 @@ mod tests {
 
     #[test]
     fn a_name_declared_twice_is_invalid() {
-        let desired = Desired::validate(vec![spec("website", 823, 923, None), spec("website", 824, 924, None)]);
+        let desired = Desired::validate(vec![
+            spec("website", 823, 923, None),
+            spec("website", 824, 924, None),
+        ]);
         assert_eq!(desired.valid().count(), 0);
-        assert!(desired.invalid()[&GuestName(String::from("website"))].contains(&ConfigFault::DuplicateName));
+        assert!(
+            desired.invalid()[&GuestName(String::from("website"))]
+                .contains(&ConfigFault::DuplicateName)
+        );
     }
 }

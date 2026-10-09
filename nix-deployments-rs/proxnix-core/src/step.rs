@@ -81,9 +81,8 @@ impl Registry for Builtin {
     fn plan(ctx: &Context<'_>) -> Plan {
         match ctx.spec.cutover {
             Cutover::Overlap => drive::<Overlap>(ctx),
-            Cutover::StopStart => drive::<StopStart>(ctx),
+            Cutover::StopStart | Cutover::FenceTransfer => drive::<StopStart>(ctx),
             Cutover::Protected => drive::<Keep>(ctx),
-            Cutover::FenceTransfer => todo!(),
         }
     }
 }
@@ -107,8 +106,10 @@ fn moved(spec: &WorkloadSpec, cohort: &Cohort, tick: &Tick) -> Option<Plan> {
         .highest()
         .or_else(|| cohort.members().iter().find(|member| member.running()))?;
     tick.push()?;
+    let slot = spec.slots.slot_of(serving.id())?;
     match (&spec.kind, serving.guest().facts()) {
         (KindSpec::Lxc { mounts: wanted, .. }, KindFacts::Lxc { mounts: seen, .. }) => wanted
+            .of(slot)
             .iter()
             .filter(|want| want.mode == MountMode::ReadWrite)
             .find_map(|want| {

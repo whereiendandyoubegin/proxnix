@@ -23,15 +23,31 @@ impl std::str::FromStr for Upid {
     fn from_str(text: &str) -> Result<Self, UpidFault> {
         let node_name = |candidate: &str| {
             !candidate.is_empty()
-                && candidate.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                && candidate.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-                && candidate.chars().last().is_some_and(|c| c.is_ascii_alphanumeric())
+                && candidate
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && candidate
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+                && candidate
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
         };
-        let hex = |candidate: &str, lengths: &[usize]| lengths.contains(&candidate.len()) && candidate.chars().all(|c| c.is_ascii_hexdigit());
+        let hex = |candidate: &str, lengths: &[usize]| {
+            lengths.contains(&candidate.len()) && candidate.chars().all(|c| c.is_ascii_hexdigit())
+        };
         let word = |candidate: &str, may_be_empty: bool| {
-            (may_be_empty || !candidate.is_empty()) && candidate.chars().all(|c| c != ':' && c != '/' && !c.is_whitespace())
+            (may_be_empty || !candidate.is_empty())
+                && candidate
+                    .chars()
+                    .all(|c| c != ':' && c != '/' && !c.is_whitespace())
         };
-        let body = text.strip_prefix("UPID:").and_then(|rest| rest.strip_suffix(':')).ok_or(UpidFault::Prefix)?;
+        let body = text
+            .strip_prefix("UPID:")
+            .and_then(|rest| rest.strip_suffix(':'))
+            .ok_or(UpidFault::Prefix)?;
         let fields: Vec<&str> = body.split(':').collect();
         match fields.as_slice() {
             [node, pid, pstart, starttime, kind, id, user] => {
@@ -109,30 +125,58 @@ mod tests {
     #[test]
     fn every_upid_pve01_returned_parses() {
         for text in CAPTURED {
-            assert_eq!(text.parse::<Upid>().map(|upid| String::from(upid.as_ref())), Ok(String::from(text)));
+            assert_eq!(
+                text.parse::<Upid>().map(|upid| String::from(upid.as_ref())),
+                Ok(String::from(text))
+            );
         }
     }
 
     #[test]
     fn a_token_upid_with_a_nine_digit_pstart_and_empty_id_parses() {
-        assert!("UPID:pve01:000EA7DB:15CAA0DF7:6AB95060:vzdump::root@pam!proxnix:".parse::<Upid>().is_ok());
+        assert!(
+            "UPID:pve01:000EA7DB:15CAA0DF7:6AB95060:vzdump::root@pam!proxnix:"
+                .parse::<Upid>()
+                .is_ok()
+        );
     }
 
     #[test]
     fn anything_else_is_not_a_upid() {
         assert_eq!("".parse::<Upid>(), Err(UpidFault::Prefix));
-        assert_eq!("UPID:pve01:000EA7DB:5CAA0DF7:6AB95060:vzdestroy:830:root@pam".parse::<Upid>(), Err(UpidFault::Prefix));
-        assert_eq!("UPID:pve01:000EA7DB:5CAA0DF7:vzdestroy:830:root@pam:".parse::<Upid>(), Err(UpidFault::Fields));
-        assert_eq!("UPID:-pve01:000EA7DB:5CAA0DF7:6AB95060:vzdestroy:830:root@pam:".parse::<Upid>(), Err(UpidFault::Node));
-        assert_eq!("UPID:pve01:000EA7D:5CAA0DF7:6AB95060:vzdestroy:830:root@pam:".parse::<Upid>(), Err(UpidFault::Hex));
-        assert_eq!("UPID:pve01:000EA7DB:5CAA0DF7:6AB95060::830:root@pam:".parse::<Upid>(), Err(UpidFault::Word));
-        assert_eq!("UPID:pve01:000EA7DB:5CAA0DF7:6AB95060:vz destroy:830:root@pam:".parse::<Upid>(), Err(UpidFault::Word));
+        assert_eq!(
+            "UPID:pve01:000EA7DB:5CAA0DF7:6AB95060:vzdestroy:830:root@pam".parse::<Upid>(),
+            Err(UpidFault::Prefix)
+        );
+        assert_eq!(
+            "UPID:pve01:000EA7DB:5CAA0DF7:vzdestroy:830:root@pam:".parse::<Upid>(),
+            Err(UpidFault::Fields)
+        );
+        assert_eq!(
+            "UPID:-pve01:000EA7DB:5CAA0DF7:6AB95060:vzdestroy:830:root@pam:".parse::<Upid>(),
+            Err(UpidFault::Node)
+        );
+        assert_eq!(
+            "UPID:pve01:000EA7D:5CAA0DF7:6AB95060:vzdestroy:830:root@pam:".parse::<Upid>(),
+            Err(UpidFault::Hex)
+        );
+        assert_eq!(
+            "UPID:pve01:000EA7DB:5CAA0DF7:6AB95060::830:root@pam:".parse::<Upid>(),
+            Err(UpidFault::Word)
+        );
+        assert_eq!(
+            "UPID:pve01:000EA7DB:5CAA0DF7:6AB95060:vz destroy:830:root@pam:".parse::<Upid>(),
+            Err(UpidFault::Word)
+        );
     }
 
     #[test]
     fn exit_statuses_follow_proxmox_status_is_error() {
         assert_eq!(TaskExit::from(Some(String::from("OK"))), TaskExit::Ok);
-        assert_eq!(TaskExit::from(Some(String::from("WARNINGS: 3"))), TaskExit::Warnings(3));
+        assert_eq!(
+            TaskExit::from(Some(String::from("WARNINGS: 3"))),
+            TaskExit::Warnings(3)
+        );
         assert_eq!(
             TaskExit::from(Some(String::from("WARNINGS: many"))),
             TaskExit::Failed(Detail(String::from("WARNINGS: many")))
@@ -141,9 +185,14 @@ mod tests {
             TaskExit::from(Some(String::from("CT 946 already running"))),
             TaskExit::Failed(Detail(String::from("CT 946 already running")))
         );
-        assert_eq!(TaskExit::from(Some(String::from("unexpected status"))), TaskExit::Unknown);
+        assert_eq!(
+            TaskExit::from(Some(String::from("unexpected status"))),
+            TaskExit::Unknown
+        );
         assert_eq!(TaskExit::from(None), TaskExit::Unknown);
         assert!(TaskExit::Ok.succeeded() && TaskExit::Warnings(1).succeeded());
-        assert!(!TaskExit::Unknown.succeeded() && !TaskExit::Failed(Detail(String::new())).succeeded());
+        assert!(
+            !TaskExit::Unknown.succeeded() && !TaskExit::Failed(Detail(String::new())).succeeded()
+        );
     }
 }

@@ -48,11 +48,11 @@ pub use guest::{
     MemoryMb, Mount, MountMode, PathFault, PathPart, Port, Privilege, Resources, Sockets,
 };
 #[pure_only]
-pub use ids::{SameIdInBothSlots, Slot, SlotId, SlotPair, UnknownSlot, Vmid};
+pub use ids::{BySlot, SameIdInBothSlots, Slot, SlotId, SlotPair, UnknownSlot, Vmid};
 #[pure_only]
 pub use layout::{
     BadSegment, DataSnapshot, DataTag, Dataset, HostEffect, Layout, Owner, Segment, StateLabel,
-    Storage, StorageFault, StorageSpec, StoreMode, store_cutover,
+    Storage, StorageFault, StorageSpec, StoreMode, host_prepare, store_cutover,
 };
 #[pure_only]
 pub use memo::{Action, Failure, Memo, Progress};

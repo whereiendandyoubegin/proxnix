@@ -1,9 +1,10 @@
 #[pure_only]
 use crate::guest::{
-    Cores, DiskGib, DurationMs, GuestKind, MemoryMb, Mount, Port, Privilege, Resources, Sockets,
+    Cores, DiskGib, DurationMs, GuestKind, KindFacts, MemoryMb, Mount, Port, Privilege, Resources,
+    Sockets,
 };
 #[pure_only]
-use crate::ids::SlotPair;
+use crate::ids::{BySlot, Slot, SlotPair};
 use proxnix_pure::pure_only;
 #[pure_only]
 use std::net::Ipv4Addr;
@@ -65,8 +66,22 @@ pub enum KindSpec {
     },
     Lxc {
         privilege: Privilege,
-        mounts: Vec<Mount>,
+        mounts: BySlot<Vec<Mount>>,
     },
+}
+
+#[pure_only]
+impl KindSpec {
+    #[must_use]
+    pub fn facts(&self, slot: Slot) -> KindFacts {
+        match self {
+            KindSpec::Qemu { sockets } => KindFacts::Qemu { sockets: *sockets },
+            KindSpec::Lxc { privilege, mounts } => KindFacts::Lxc {
+                privilege: *privilege,
+                mounts: mounts.of(slot).clone(),
+            },
+        }
+    }
 }
 
 #[pure_only]

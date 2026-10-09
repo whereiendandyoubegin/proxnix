@@ -74,7 +74,10 @@ impl<F: HashFormat> std::str::FromStr for Digest<F> {
         match (text.len() == F::LENGTH, text.chars().all(F::digit)) {
             (false, _) => Err(HashFault::Length),
             (true, false) => Err(HashFault::Character),
-            (true, true) => Ok(Digest { text: String::from(text), format: PhantomData }),
+            (true, true) => Ok(Digest {
+                text: String::from(text),
+                format: PhantomData,
+            }),
         }
     }
 }
@@ -139,7 +142,11 @@ impl std::str::FromStr for RoleName {
     type Err = BadRole;
 
     fn from_str(text: &str) -> Result<Self, BadRole> {
-        match (text.is_empty(), text.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())) {
+        match (
+            text.is_empty(),
+            text.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+        ) {
             (false, true) => Ok(RoleName(String::from(text))),
             _ => Err(BadRole),
         }
@@ -182,7 +189,12 @@ impl TryFrom<&RawTags> for ManagedTags {
 
     fn try_from(raw: &RawTags) -> Result<ManagedTags, TagFault> {
         let pending = raw.0.split(';').map(str::trim).any(|tag| tag == "pending");
-        let tag = |prefix| raw.0.split(';').map(str::trim).find_map(|tag| tag.strip_prefix(prefix));
+        let tag = |prefix| {
+            raw.0
+                .split(';')
+                .map(str::trim)
+                .find_map(|tag| tag.strip_prefix(prefix))
+        };
         Ok(ManagedTags {
             nix: tag("nix-")
                 .filter(|text| !text.is_empty())
@@ -201,7 +213,11 @@ impl TryFrom<&RawTags> for ManagedTags {
             generation: match (tag("gen-"), pending) {
                 (Some(_), true) => return Err(TagFault::PendingAndCommitted),
                 (found, _) => found
-                    .map(|generation| generation.parse().map_err(|BadGeneration| TagFault::BadGeneration))
+                    .map(|generation| {
+                        generation
+                            .parse()
+                            .map_err(|BadGeneration| TagFault::BadGeneration)
+                    })
                     .transpose()?,
             },
             pending,
@@ -249,10 +265,19 @@ mod tests {
 
     #[test]
     fn a_nix_hash_is_32_characters_of_nix_base32() {
-        assert_eq!(NIX.parse::<NixHash>().map(|h| String::from(h.as_ref())), Ok(String::from(NIX)));
+        assert_eq!(
+            NIX.parse::<NixHash>().map(|h| String::from(h.as_ref())),
+            Ok(String::from(NIX))
+        );
         assert_eq!("78s0iadv".parse::<NixHash>(), Err(HashFault::Length));
-        assert_eq!("e8s0iadvjz6s48aqvx4rw78lwrzkjzlw".parse::<NixHash>(), Err(HashFault::Character));
-        assert_eq!("78s0iadvjz6s48aqvx4rw78lwrzkjzlu".parse::<NixHash>(), Err(HashFault::Character));
+        assert_eq!(
+            "e8s0iadvjz6s48aqvx4rw78lwrzkjzlw".parse::<NixHash>(),
+            Err(HashFault::Character)
+        );
+        assert_eq!(
+            "78s0iadvjz6s48aqvx4rw78lwrzkjzlu".parse::<NixHash>(),
+            Err(HashFault::Character)
+        );
     }
 
     #[test]
@@ -284,16 +309,31 @@ mod tests {
     #[test]
     fn a_guest_without_the_proxnix_tag_is_unmanaged() {
         assert_eq!(ownership(""), Ownership::Unmanaged);
-        assert_eq!(ownership(&managed("blue").replace("proxnix;", "")), Ownership::Unmanaged);
+        assert_eq!(
+            ownership(&managed("blue").replace("proxnix;", "")),
+            Ownership::Unmanaged
+        );
         assert_eq!(ownership("proxnixish;k3s"), Ownership::Unmanaged);
     }
 
     #[test]
     fn a_managed_guest_missing_a_tag_is_malformed_not_defaulted() {
-        assert_eq!(ownership(&format!("proxnix;commit-{COMMIT};slot-blue")), Ownership::Malformed(TagFault::NoNixHash));
-        assert_eq!(ownership(&format!("proxnix;nix-{NIX};slot-blue")), Ownership::Malformed(TagFault::NoCommit));
-        assert_eq!(ownership(&format!("proxnix;nix-{NIX};commit-{COMMIT}")), Ownership::Malformed(TagFault::NoSlot));
-        assert_eq!(ownership(&managed("purple")), Ownership::Malformed(TagFault::NoSlot));
+        assert_eq!(
+            ownership(&format!("proxnix;commit-{COMMIT};slot-blue")),
+            Ownership::Malformed(TagFault::NoNixHash)
+        );
+        assert_eq!(
+            ownership(&format!("proxnix;nix-{NIX};slot-blue")),
+            Ownership::Malformed(TagFault::NoCommit)
+        );
+        assert_eq!(
+            ownership(&format!("proxnix;nix-{NIX};commit-{COMMIT}")),
+            Ownership::Malformed(TagFault::NoSlot)
+        );
+        assert_eq!(
+            ownership(&managed("purple")),
+            Ownership::Malformed(TagFault::NoSlot)
+        );
         assert_eq!(
             ownership(&format!("{};ip-999.1.1.1", managed("green"))),
             Ownership::Malformed(TagFault::BadServiceIp)
@@ -314,7 +354,10 @@ mod tests {
 
     #[test]
     fn an_empty_value_after_a_prefix_is_missing() {
-        assert_eq!(ownership(&format!("proxnix;nix-;commit-{COMMIT};slot-blue")), Ownership::Malformed(TagFault::NoNixHash));
+        assert_eq!(
+            ownership(&format!("proxnix;nix-;commit-{COMMIT};slot-blue")),
+            Ownership::Malformed(TagFault::NoNixHash)
+        );
     }
 
     #[test]
@@ -326,25 +369,54 @@ mod tests {
             }
             other => panic!("expected managed, got {other:?}"),
         }
-        assert!(matches!(ownership(&managed("blue")), Ownership::Managed(ManagedTags { generation: None, role: None, .. })));
+        assert!(matches!(
+            ownership(&managed("blue")),
+            Ownership::Managed(ManagedTags {
+                generation: None,
+                role: None,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn a_generation_or_role_that_does_not_parse_is_malformed() {
-        for generation in ["gen-", "gen-x", "gen--1", "gen-+1", "gen-99999999999999999999"] {
+        for generation in [
+            "gen-",
+            "gen-x",
+            "gen--1",
+            "gen-+1",
+            "gen-99999999999999999999",
+        ] {
             assert_eq!(
                 ownership(&format!("{};{generation}", managed("blue"))),
                 Ownership::Malformed(TagFault::BadGeneration)
             );
         }
-        assert_eq!(ownership(&format!("{};role-Writer", managed("blue"))), Ownership::Malformed(TagFault::BadRole));
-        assert_eq!(ownership(&format!("{};role-", managed("blue"))), Ownership::Malformed(TagFault::BadRole));
+        assert_eq!(
+            ownership(&format!("{};role-Writer", managed("blue"))),
+            Ownership::Malformed(TagFault::BadRole)
+        );
+        assert_eq!(
+            ownership(&format!("{};role-", managed("blue"))),
+            Ownership::Malformed(TagFault::BadRole)
+        );
     }
 
     #[test]
     fn a_pending_guest_is_uncommitted_and_cannot_also_claim_a_generation() {
-        assert!(matches!(ownership(&format!("{};pending", managed("blue"))), Ownership::Managed(ManagedTags { pending: true, generation: None, .. })));
-        assert_eq!(ownership(&format!("{};pending;gen-2", managed("blue"))), Ownership::Malformed(TagFault::PendingAndCommitted));
+        assert!(matches!(
+            ownership(&format!("{};pending", managed("blue"))),
+            Ownership::Managed(ManagedTags {
+                pending: true,
+                generation: None,
+                ..
+            })
+        ));
+        assert_eq!(
+            ownership(&format!("{};pending;gen-2", managed("blue"))),
+            Ownership::Malformed(TagFault::PendingAndCommitted)
+        );
     }
 
     #[test]
@@ -356,7 +428,9 @@ mod tests {
     #[test]
     fn tag_order_and_whitespace_do_not_matter() {
         assert_eq!(
-            ownership(&format!(" slot-green ; proxnix ;nix-{NIX}; commit-{COMMIT}")),
+            ownership(&format!(
+                " slot-green ; proxnix ;nix-{NIX}; commit-{COMMIT}"
+            )),
             Ownership::Managed(ManagedTags {
                 nix: NIX.parse().unwrap(),
                 commit: COMMIT.parse().unwrap(),

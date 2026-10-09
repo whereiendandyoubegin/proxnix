@@ -121,9 +121,11 @@ pub fn layout(settings: &AppConfig) -> Option<Layout> {
 
 fn placed(config: ContainerConfig, layout: Option<&Layout>) -> Placed {
     let name = GuestName(config.name.clone());
-    let storage = layout
-        .ok_or(StorageFault::NoLayout)
-        .and_then(|layout| storage_spec(&config).and_then(|wanted| layout.storage(&name, &wanted)));
+    let storage = layout.ok_or(StorageFault::NoLayout).and_then(|layout| {
+        storage_spec(&config).and_then(|wanted| {
+            layout.storage_for(&name, &wanted, cutover(config.protected, config.cutover))
+        })
+    });
     Placed { config, storage }
 }
 
@@ -243,7 +245,7 @@ fn container_spec(placed: &Placed) -> std::result::Result<WorkloadSpec, ConfigFa
         },
         kind: KindSpec::Lxc {
             privilege: privilege(config.privileged),
-            mounts: storage.mounts.clone(),
+            mounts: storage.map(|storage| storage.mounts.clone()),
         },
     })
 }
@@ -715,24 +717,10 @@ pub fn prepare(settings: &AppConfig, repo: &str) -> Result<Prepared> {
 }
 
 pub fn host_effects(declared: &BTreeMap<GuestName, Declared>) -> Vec<proxnix_core::HostEffect> {
-    declared
-        .values()
-        .filter_map(|declared| match declared {
-            Declared::Container(placed) => placed
-                .storage
-                .as_ref()
-                .ok()
-                .map(|storage| storage.prepare.clone()),
-            Declared::Vm(_) => None,
-        })
-        .flatten()
-        .fold(Vec::new(), |seen, effect| {
-            if seen.contains(&effect) {
-                seen
-            } else {
-                seen.into_iter().chain([effect]).collect()
-            }
-        })
+    proxnix_core::host_prepare(declared.values().filter_map(|declared| match declared {
+        Declared::Container(placed) => placed.storage.as_ref().ok(),
+        Declared::Vm(_) => None,
+    }))
 }
 
 fn prepare_host(declared: &BTreeMap<GuestName, Declared>, idmap: crate::types::IdRange) {
@@ -1054,28 +1042,30 @@ mod tests {
         let postgres = &specs[&named("postgres")];
         assert_eq!(postgres.cutover, Cutover::Protected);
         assert_eq!(postgres.proxy.tcp_ports, vec![Port(5432)]);
+        let KindSpec::Lxc { privilege, mounts } = &postgres.kind else {
+            panic!("a container")
+        };
+        assert_eq!(*privilege, Privilege::Unprivileged);
+        assert_eq!(mounts.blue, mounts.green);
         assert_eq!(
-            postgres.kind,
-            KindSpec::Lxc {
-                privilege: Privilege::Unprivileged,
-                mounts: vec![
-                    Mount {
-                        host: host("/ZFS/proxnix/state/postgres/postgresql"),
-                        guest: at("/var/lib/postgresql"),
-                        mode: MountMode::ReadWrite
-                    },
-                    Mount {
-                        host: host("/ZFS/proxnix/logs/postgres"),
-                        guest: at("/var/log/journal"),
-                        mode: MountMode::ReadWrite
-                    },
-                    Mount {
-                        host: host("/var/lib/proxnix/sops"),
-                        guest: at("/var/lib/sops-key"),
-                        mode: MountMode::ReadOnly
-                    },
-                ],
-            }
+            mounts.blue,
+            vec![
+                Mount {
+                    host: host("/ZFS/proxnix/state/postgres/postgresql"),
+                    guest: at("/var/lib/postgresql"),
+                    mode: MountMode::ReadWrite
+                },
+                Mount {
+                    host: host("/ZFS/proxnix/logs/postgres"),
+                    guest: at("/var/log/journal"),
+                    mode: MountMode::ReadWrite
+                },
+                Mount {
+                    host: host("/var/lib/proxnix/sops"),
+                    guest: at("/var/lib/sops-key"),
+                    mode: MountMode::ReadOnly
+                },
+            ]
         );
     }
 
@@ -1196,8 +1186,9 @@ mod tests {
         else {
             panic!("a container")
         };
+        assert_eq!(mounts.blue, mounts.green);
         assert_eq!(
-            mounts,
+            mounts.blue,
             vec![
                 Mount {
                     host: host("/ZFS/proxnix/state/nixflix/state"),

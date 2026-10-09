@@ -1,5 +1,5 @@
 use proxnix_core::{
-    Audited, BridgeName, Cohort, Cores, Cutover, DiskGib, DurationMs, Expendable, GuestEffect, GuestName, GuestStatus,
+    Audited, BridgeName, BySlot, Cohort, Cores, Cutover, DiskGib, DurationMs, Expendable, GuestEffect, GuestName, GuestStatus,
     Grant, Hostname, ImageType, KindFacts, KindSpec, MemoryMb, Observation, Permissions, Port, Privilege, Promotion,
     ProxySpec, Purity, RawTags, Resources, Settled, Sighting, SlotPair, SlotState, Timeouts, Vmid, WorkloadSpec,
 };
@@ -31,7 +31,7 @@ fn main() {
             bridge: BridgeName(String::from("vmbr0")),
         },
         timeouts: Timeouts { dhcp: DurationMs(1), health_check: DurationMs(1) },
-        kind: KindSpec::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] },
+        kind: KindSpec::Lxc { privilege: Privilege::Unprivileged, mounts: BySlot::default() },
     };
     let observed = Observation::new(
         Audited::try_from(Permissions { vm_audit: Grant::Granted }).unwrap(),

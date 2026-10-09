@@ -148,11 +148,26 @@ impl Guest {
     }
 
     pub(crate) fn projected(sighting: Settled, ownership: Ownership) -> Guest {
-        Guest { sighting, ownership }
+        Guest {
+            sighting,
+            ownership,
+        }
     }
 
-    pub(crate) fn revised(&self, status: GuestStatus, resources: Resources, ownership: Ownership) -> Guest {
-        Guest { sighting: Settled { status, resources, ..self.sighting.clone() }, ownership }
+    pub(crate) fn revised(
+        &self,
+        status: GuestStatus,
+        resources: Resources,
+        ownership: Ownership,
+    ) -> Guest {
+        Guest {
+            sighting: Settled {
+                status,
+                resources,
+                ..self.sighting.clone()
+            },
+            ownership,
+        }
     }
 }
 
@@ -239,7 +254,10 @@ pub struct Observation {
 #[pure_only]
 fn occupant(guest: &Guest) -> Occupant {
     match guest.ownership() {
-        Ownership::Managed(tags) => Occupant::Managed(Managed { guest: Box::new(guest.clone()), tags: tags.clone() }),
+        Ownership::Managed(tags) => Occupant::Managed(Managed {
+            guest: Box::new(guest.clone()),
+            tags: tags.clone(),
+        }),
         Ownership::Unmanaged => Occupant::Unmanaged(guest.id()),
         Ownership::Malformed(fault) => Occupant::Malformed(guest.id(), *fault),
     }
@@ -252,11 +270,16 @@ impl Observation {
         let duplicates: Vec<Anomaly> = sightings
             .iter()
             .enumerate()
-            .filter(|(index, seen)| sightings[..*index].iter().any(|earlier| earlier.id() == seen.id()))
+            .filter(|(index, seen)| {
+                sightings[..*index]
+                    .iter()
+                    .any(|earlier| earlier.id() == seen.id())
+            })
             .map(|(_, seen)| Anomaly::DuplicateVmid(seen.id()))
             .collect();
-        let (settled, unsettled): (Vec<Sighting>, Vec<Sighting>) =
-            sightings.into_iter().partition(|seen| matches!(seen, Sighting::Settled(_)));
+        let (settled, unsettled): (Vec<Sighting>, Vec<Sighting>) = sightings
+            .into_iter()
+            .partition(|seen| matches!(seen, Sighting::Settled(_)));
         let guests: Vec<Guest> = settled
             .into_iter()
             .filter_map(|seen| match seen {
@@ -277,7 +300,10 @@ impl Observation {
         });
         let anomalies = duplicates.into_iter().chain(malformed).collect();
         Observation {
-            guests: guests.into_iter().map(|guest| (guest.id(), guest)).collect(),
+            guests: guests
+                .into_iter()
+                .map(|guest| (guest.id(), guest))
+                .collect(),
             unsettled,
             anomalies,
         }
@@ -305,7 +331,10 @@ impl Observation {
 
     #[must_use]
     pub fn managed_named(&self, name: &GuestName) -> Vec<Managed> {
-        self.managed().into_iter().filter(|managed| managed.guest().name() == name).collect()
+        self.managed()
+            .into_iter()
+            .filter(|managed| managed.guest().name() == name)
+            .collect()
     }
 
     #[must_use]
@@ -326,7 +355,12 @@ impl Observation {
                 .map(|(existing, kept)| (*existing, kept.clone()))
                 .chain(guest.map(|guest| (id, guest)))
                 .collect(),
-            unsettled: self.unsettled.iter().filter(|(held, _)| **held != id).map(|(held, why)| (*held, *why)).collect(),
+            unsettled: self
+                .unsettled
+                .iter()
+                .filter(|(held, _)| **held != id)
+                .map(|(held, why)| (*held, *why))
+                .collect(),
             anomalies: self.anomalies.clone(),
         }
     }
@@ -339,7 +373,10 @@ mod tests {
     use crate::ids::Slot;
 
     fn audited() -> Audited {
-        Audited::try_from(Permissions { vm_audit: Grant::Granted }).unwrap()
+        Audited::try_from(Permissions {
+            vm_audit: Grant::Granted,
+        })
+        .unwrap()
     }
 
     fn sighting(id: u32, name: &str, tags: &str) -> Sighting {
@@ -348,8 +385,15 @@ mod tests {
             name: GuestName(String::from(name)),
             status: GuestStatus::Running,
             tags: RawTags::from(String::from(tags)),
-            resources: Resources { memory: MemoryMb(1024), disk: DiskGib(8), cores: Cores(2) },
-            facts: KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] },
+            resources: Resources {
+                memory: MemoryMb(1024),
+                disk: DiskGib(8),
+                cores: Cores(2),
+            },
+            facts: KindFacts::Lxc {
+                privilege: Privilege::Unprivileged,
+                mounts: vec![],
+            },
         })
     }
 
@@ -358,7 +402,9 @@ mod tests {
     #[test]
     fn a_denied_audit_permission_cannot_become_an_observation() {
         assert_eq!(
-            Audited::try_from(Permissions { vm_audit: Grant::Denied }),
+            Audited::try_from(Permissions {
+                vm_audit: Grant::Denied
+            }),
             Err(VisibilityFault::NoVmAudit)
         );
     }
@@ -366,7 +412,9 @@ mod tests {
     #[test]
     fn an_id_nobody_holds_is_vacant() {
         let observed = Observation::new(audited(), vec![sighting(844, "forgejo", FORGEJO)]);
-        assert!(matches!(observed.slot(Vmid::new(944)), SlotState::Vacant(v) if v.id() == Vmid::new(944)));
+        assert!(
+            matches!(observed.slot(Vmid::new(944)), SlotState::Vacant(v) if v.id() == Vmid::new(944))
+        );
     }
 
     #[test]
@@ -384,27 +432,42 @@ mod tests {
     #[test]
     fn an_unmanaged_guest_still_occupies_its_slot() {
         let observed = Observation::new(audited(), vec![sighting(844, "someone-elses", "k3s")]);
-        assert_eq!(observed.slot(Vmid::new(844)), SlotState::Occupied(Occupant::Unmanaged(Vmid::new(844))));
+        assert_eq!(
+            observed.slot(Vmid::new(844)),
+            SlotState::Occupied(Occupant::Unmanaged(Vmid::new(844)))
+        );
         assert!(observed.managed().is_empty());
     }
 
     #[test]
     fn a_malformed_guest_occupies_its_slot_and_is_reported() {
-        let observed = Observation::new(audited(), vec![sighting(841, "flake-updater", "proxnix;slot-blue")]);
+        let observed = Observation::new(
+            audited(),
+            vec![sighting(841, "flake-updater", "proxnix;slot-blue")],
+        );
         assert_eq!(
             observed.slot(Vmid::new(841)),
             SlotState::Occupied(Occupant::Malformed(Vmid::new(841), TagFault::NoNixHash))
         );
-        assert_eq!(observed.anomalies(), &[Anomaly::Malformed(Vmid::new(841), TagFault::NoNixHash)]);
+        assert_eq!(
+            observed.anomalies(),
+            &[Anomaly::Malformed(Vmid::new(841), TagFault::NoNixHash)]
+        );
     }
 
     #[test]
     fn a_vmid_seen_twice_is_reported() {
         let observed = Observation::new(
             audited(),
-            vec![sighting(844, "forgejo", FORGEJO), sighting(844, "forgejo", FORGEJO)],
+            vec![
+                sighting(844, "forgejo", FORGEJO),
+                sighting(844, "forgejo", FORGEJO),
+            ],
         );
-        assert_eq!(observed.anomalies(), &[Anomaly::DuplicateVmid(Vmid::new(844))]);
+        assert_eq!(
+            observed.anomalies(),
+            &[Anomaly::DuplicateVmid(Vmid::new(844))]
+        );
     }
 
     #[test]
@@ -413,8 +476,16 @@ mod tests {
             audited(),
             vec![
                 sighting(844, "forgejo", FORGEJO),
-                sighting(944, "forgejo", "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;nix-i3d00236fdkfw1v9cmasajkjhzl8zi5j;proxnix;slot-green"),
-                sighting(845, "cloudflared", "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;nix-i3d00236fdkfw1v9cmasajkjhzl8zi5j;proxnix;slot-blue"),
+                sighting(
+                    944,
+                    "forgejo",
+                    "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;nix-i3d00236fdkfw1v9cmasajkjhzl8zi5j;proxnix;slot-green",
+                ),
+                sighting(
+                    845,
+                    "cloudflared",
+                    "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;nix-i3d00236fdkfw1v9cmasajkjhzl8zi5j;proxnix;slot-blue",
+                ),
             ],
         );
         let ids: Vec<Vmid> = observed
@@ -437,10 +508,23 @@ mod tests {
         );
         assert_eq!(
             observed.slot(Vmid::new(944)),
-            SlotState::Occupied(Occupant::Unsettled(Vmid::new(944), Unsettled::Locked(LockKind::Create)))
+            SlotState::Occupied(Occupant::Unsettled(
+                Vmid::new(944),
+                Unsettled::Locked(LockKind::Create)
+            ))
         );
-        assert_eq!(observed.slot(Vmid::new(947)), SlotState::Occupied(Occupant::Unsettled(Vmid::new(947), Unsettled::Incomplete)));
-        assert_eq!(observed.managed().iter().map(Managed::id).collect::<Vec<_>>(), vec![Vmid::new(844)]);
+        assert_eq!(
+            observed.slot(Vmid::new(947)),
+            SlotState::Occupied(Occupant::Unsettled(Vmid::new(947), Unsettled::Incomplete))
+        );
+        assert_eq!(
+            observed
+                .managed()
+                .iter()
+                .map(Managed::id)
+                .collect::<Vec<_>>(),
+            vec![Vmid::new(844)]
+        );
         assert!(observed.anomalies().is_empty());
     }
 
@@ -448,9 +532,18 @@ mod tests {
     fn a_vmid_seen_settled_and_unsettled_is_reported_and_stays_occupied() {
         let observed = Observation::new(
             audited(),
-            vec![sighting(844, "forgejo", FORGEJO), Sighting::Unsettled(Vmid::new(844), Unsettled::Unreadable)],
+            vec![
+                sighting(844, "forgejo", FORGEJO),
+                Sighting::Unsettled(Vmid::new(844), Unsettled::Unreadable),
+            ],
         );
-        assert_eq!(observed.anomalies(), &[Anomaly::DuplicateVmid(Vmid::new(844))]);
-        assert!(matches!(observed.slot(Vmid::new(844)), SlotState::Occupied(_)));
+        assert_eq!(
+            observed.anomalies(),
+            &[Anomaly::DuplicateVmid(Vmid::new(844))]
+        );
+        assert!(matches!(
+            observed.slot(Vmid::new(844)),
+            SlotState::Occupied(_)
+        ));
     }
 }

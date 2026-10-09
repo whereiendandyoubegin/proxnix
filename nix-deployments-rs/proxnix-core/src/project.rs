@@ -5,7 +5,7 @@ use crate::desired::Desired;
 #[pure_only]
 use crate::effect::{Effect, Event, GuestEffect, Outcome, ProbeEffect, ResourceChange};
 #[pure_only]
-use crate::guest::{GuestStatus, KindFacts, Resources};
+use crate::guest::{GuestStatus, Resources};
 #[pure_only]
 use crate::ids::Vmid;
 #[pure_only]
@@ -13,7 +13,7 @@ use crate::memo::Memo;
 #[pure_only]
 use crate::observation::{Guest, Observation, Settled};
 #[pure_only]
-use crate::spec::{GuestName, KindSpec};
+use crate::spec::GuestName;
 #[pure_only]
 use crate::step::{Input, Report, step};
 #[pure_only]
@@ -46,15 +46,12 @@ pub struct Projection {
 #[pure_only]
 #[must_use]
 pub fn placeholder_address(id: Vmid) -> Ipv4Addr {
-    Ipv4Addr::new(192, 0, 2, u8::try_from(id.get() % 250).unwrap_or(0).saturating_add(1))
-}
-
-#[pure_only]
-fn facts(kind: &KindSpec) -> KindFacts {
-    match kind {
-        KindSpec::Qemu { sockets } => KindFacts::Qemu { sockets: *sockets },
-        KindSpec::Lxc { privilege, mounts } => KindFacts::Lxc { privilege: *privilege, mounts: mounts.clone() },
-    }
+    Ipv4Addr::new(
+        192,
+        0,
+        2,
+        u8::try_from(id.get() % 250).unwrap_or(0).saturating_add(1),
+    )
 }
 
 #[pure_only]
@@ -66,31 +63,54 @@ fn revise(observed: &Observation, id: Vmid, change: impl FnOnce(&Guest) -> Guest
 }
 
 #[pure_only]
-fn retag(observed: &Observation, id: Vmid, change: impl FnOnce(ManagedTags) -> ManagedTags) -> Observation {
+fn retag(
+    observed: &Observation,
+    id: Vmid,
+    change: impl FnOnce(ManagedTags) -> ManagedTags,
+) -> Observation {
     revise(observed, id, |guest| match guest.ownership() {
-        Ownership::Managed(tags) => guest.revised(guest.status(), guest.resources(), Ownership::Managed(change(tags.clone()))),
+        Ownership::Managed(tags) => guest.revised(
+            guest.status(),
+            guest.resources(),
+            Ownership::Managed(change(tags.clone())),
+        ),
         _ => guest.clone(),
     })
 }
 
 #[pure_only]
 fn restate(observed: &Observation, id: Vmid, status: GuestStatus) -> Observation {
-    revise(observed, id, |guest| guest.revised(status, guest.resources(), guest.ownership().clone()))
+    revise(observed, id, |guest| {
+        guest.revised(status, guest.resources(), guest.ownership().clone())
+    })
 }
 
 #[pure_only]
 fn resized(resources: Resources, changes: &[ResourceChange]) -> Resources {
-    changes.iter().fold(resources, |resources, change| match change {
-        ResourceChange::Memory(memory) => Resources { memory: *memory, ..resources },
-        ResourceChange::Cores(cores) => Resources { cores: *cores, ..resources },
-        ResourceChange::Sockets(_) => resources,
-    })
+    changes
+        .iter()
+        .fold(resources, |resources, change| match change {
+            ResourceChange::Memory(memory) => Resources {
+                memory: *memory,
+                ..resources
+            },
+            ResourceChange::Cores(cores) => Resources {
+                cores: *cores,
+                ..resources
+            },
+            ResourceChange::Sockets(_) => resources,
+        })
 }
 
 #[pure_only]
 fn assume_guest(observed: &Observation, effect: &GuestEffect) -> Observation {
     match effect {
-        GuestEffect::Create { target, spec, fresh, .. } => observed.replaced(
+        GuestEffect::Create {
+            target,
+            spec,
+            fresh,
+            ..
+        } => observed.replaced(
             target.id(),
             Some(Guest::projected(
                 Settled {
@@ -99,7 +119,7 @@ fn assume_guest(observed: &Observation, effect: &GuestEffect) -> Observation {
                     status: GuestStatus::Stopped,
                     tags: RawTags::from(String::new()),
                     resources: spec.resources,
-                    facts: facts(&spec.kind),
+                    facts: spec.kind.facts(fresh.slot()),
                 },
                 Ownership::Managed(ManagedTags {
                     nix: fresh.nix().clone(),
@@ -114,16 +134,32 @@ fn assume_guest(observed: &Observation, effect: &GuestEffect) -> Observation {
         ),
         GuestEffect::Start(member) => restate(observed, member.id(), GuestStatus::Running),
         GuestEffect::Stop(member) => restate(observed, member.id(), GuestStatus::Stopped),
-        GuestEffect::Record { guest, address } => retag(observed, guest.id(), |tags| ManagedTags { service_ip: Some(*address), ..tags }),
-        GuestEffect::Role { guest, role } => retag(observed, guest.id(), |tags| ManagedTags { role: Some(role.clone()), ..tags }),
+        GuestEffect::Record { guest, address } => retag(observed, guest.id(), |tags| ManagedTags {
+            service_ip: Some(*address),
+            ..tags
+        }),
+        GuestEffect::Role { guest, role } => retag(observed, guest.id(), |tags| ManagedTags {
+            role: Some(role.clone()),
+            ..tags
+        }),
         GuestEffect::Commit(promotion) => {
-            retag(observed, promotion.guest().id(), |tags| ManagedTags { generation: Some(promotion.generation()), pending: false, ..tags })
+            retag(observed, promotion.guest().id(), |tags| ManagedTags {
+                generation: Some(promotion.generation()),
+                pending: false,
+                ..tags
+            })
         }
         GuestEffect::Update { guest, changes } => revise(observed, guest.id(), |seen| {
-            seen.revised(seen.status(), resized(seen.resources(), changes), seen.ownership().clone())
+            seen.revised(
+                seen.status(),
+                resized(seen.resources(), changes),
+                seen.ownership().clone(),
+            )
         }),
         GuestEffect::Undo(provisioned) => observed.replaced(provisioned.id(), None),
-        GuestEffect::Reclaim(doomed) | GuestEffect::Retire(doomed) => observed.replaced(doomed.id(), None),
+        GuestEffect::Reclaim(doomed) | GuestEffect::Retire(doomed) => {
+            observed.replaced(doomed.id(), None)
+        }
     }
 }
 
@@ -132,7 +168,10 @@ fn assume_guest(observed: &Observation, effect: &GuestEffect) -> Observation {
 pub fn assume(observed: &Observation, effect: &Effect) -> (Observation, Outcome) {
     match effect {
         Effect::Guest(guest) => (assume_guest(observed, guest), Outcome::Done),
-        Effect::Probe(ProbeEffect::ReadAddress(member)) => (observed.clone(), Outcome::Address(placeholder_address(member.id()))),
+        Effect::Probe(ProbeEffect::ReadAddress(member)) => (
+            observed.clone(),
+            Outcome::Address(placeholder_address(member.id())),
+        ),
         Effect::Probe(_) | Effect::Route(_) => (observed.clone(), Outcome::Done),
     }
 }
@@ -149,8 +188,24 @@ struct Walk {
 }
 
 #[pure_only]
-fn walk<R: Registry>(desired: &Desired, images: &Images, observed: &Observation, tick: &Tick, pacing: &Pacing, scope: Scope, limit: usize) -> Projection {
-    let start = Walk { observed: observed.clone(), memo: Memo::default(), events: vec![], now: Moment(0), effects: vec![], first: None, last: None };
+fn walk<R: Registry>(
+    desired: &Desired,
+    images: &Images,
+    observed: &Observation,
+    tick: &Tick,
+    pacing: &Pacing,
+    scope: Scope,
+    limit: usize,
+) -> Projection {
+    let start = Walk {
+        observed: observed.clone(),
+        memo: Memo::default(),
+        events: vec![],
+        now: Moment(0),
+        effects: vec![],
+        first: None,
+        last: None,
+    };
     let finished = (0..limit).try_fold(start, |walk, _| {
         let stepped = step::<R>(Input {
             memo: walk.memo,
@@ -172,10 +227,22 @@ fn walk<R: Registry>(desired: &Desired, images: &Images, observed: &Observation,
                 settled: true,
             }));
         }
-        let (observed, events) = stepped.effects.iter().fold((walk.observed, Vec::new()), |(observed, events), planned| {
-            let (observed, outcome) = assume(&observed, &planned.effect);
-            (observed, events.into_iter().chain([Event { effect: planned.id, outcome }]).collect())
-        });
+        let (observed, events) = stepped.effects.iter().fold(
+            (walk.observed, Vec::new()),
+            |(observed, events), planned| {
+                let (observed, outcome) = assume(&observed, &planned.effect);
+                (
+                    observed,
+                    events
+                        .into_iter()
+                        .chain([Event {
+                            effect: planned.id,
+                            outcome,
+                        }])
+                        .collect(),
+                )
+            },
+        );
         let now = match (stepped.effects.is_empty(), stepped.wake) {
             (true, Some(wake)) => wake.max(walk.now.after(crate::guest::DurationMs(1))),
             _ => walk.now.after(crate::guest::DurationMs(1000)),
@@ -185,7 +252,11 @@ fn walk<R: Registry>(desired: &Desired, images: &Images, observed: &Observation,
             memo: stepped.memo,
             events,
             now,
-            effects: walk.effects.into_iter().chain(stepped.effects.into_iter().map(|planned| planned.effect)).collect(),
+            effects: walk
+                .effects
+                .into_iter()
+                .chain(stepped.effects.into_iter().map(|planned| planned.effect))
+                .collect(),
             first,
             last: Some(stepped.report),
         })
@@ -194,9 +265,15 @@ fn walk<R: Registry>(desired: &Desired, images: &Images, observed: &Observation,
         Err(projection) => *projection,
         Ok(walk) => Projection {
             scope,
-            first: walk.first.unwrap_or(Report { workloads: vec![], anomalies: vec![] }),
+            first: walk.first.unwrap_or(Report {
+                workloads: vec![],
+                anomalies: vec![],
+            }),
             effects: walk.effects,
-            last: walk.last.unwrap_or(Report { workloads: vec![], anomalies: vec![] }),
+            last: walk.last.unwrap_or(Report {
+                workloads: vec![],
+                anomalies: vec![],
+            }),
             settled: false,
         },
     }
@@ -204,12 +281,36 @@ fn walk<R: Registry>(desired: &Desired, images: &Images, observed: &Observation,
 
 #[pure_only]
 #[must_use]
-pub fn project<R: Registry>(desired: &Desired, images: &Images, observed: &Observation, tick: &Tick, pacing: &Pacing) -> Vec<Projection> {
+pub fn project<R: Registry>(
+    desired: &Desired,
+    images: &Images,
+    observed: &Observation,
+    tick: &Tick,
+    pacing: &Pacing,
+) -> Vec<Projection> {
     let limit = 10_000;
     desired
         .names()
         .into_iter()
-        .map(|name| walk::<R>(&desired.workload(&name), images, observed, tick, pacing, Scope::Workload(name), limit))
-        .chain([walk::<R>(&desired.teardown(), images, observed, tick, pacing, Scope::Teardown, limit)])
+        .map(|name| {
+            walk::<R>(
+                &desired.workload(&name),
+                images,
+                observed,
+                tick,
+                pacing,
+                Scope::Workload(name),
+                limit,
+            )
+        })
+        .chain([walk::<R>(
+            &desired.teardown(),
+            images,
+            observed,
+            tick,
+            pacing,
+            Scope::Teardown,
+            limit,
+        )])
         .collect()
 }

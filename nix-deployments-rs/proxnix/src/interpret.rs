@@ -6,9 +6,9 @@ use crate::types::{AppError, ContainerConfig, Result, VMConfig};
 use proxmox_api::client::Client;
 use proxmox_api::nodes::node::{lxc, qemu};
 use proxnix_core::{
-    Artifact, Backend, Detail, DurationMs, Effect, EffectError, Endpoint, Event, GuestEffect,
-    GuestKind, GuestName, ManagedTags, Outcome, Ownership, Planned, ProbeEffect, ProxySpec,
-    ResourceChange, RouteEffect, SlotId, Vmid, WorkloadSpec,
+    Artifact, Backend, BySlot, Detail, DurationMs, Effect, EffectError, Endpoint, Event,
+    GuestEffect, GuestKind, GuestName, ManagedTags, Outcome, Ownership, Planned, ProbeEffect,
+    ProxySpec, ResourceChange, RouteEffect, SlotId, Storage, Vmid, WorkloadSpec,
 };
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone)]
 pub struct Placed {
     pub config: ContainerConfig,
-    pub storage: std::result::Result<proxnix_core::Storage, proxnix_core::StorageFault>,
+    pub storage: std::result::Result<BySlot<Storage>, proxnix_core::StorageFault>,
 }
 
 #[derive(Debug, Clone)]
@@ -819,7 +819,7 @@ mod tests {
             },
             kind: KindSpec::Lxc {
                 privilege: Privilege::Unprivileged,
-                mounts: vec![],
+                mounts: BySlot::default(),
             },
         }
     }

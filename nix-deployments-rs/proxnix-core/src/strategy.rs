@@ -5,6 +5,8 @@ use crate::cohort::{Cohort, CohortFault, Member};
 #[pure_only]
 use crate::desired::ConfigFault;
 #[pure_only]
+use crate::effect::ProbeEffect;
+#[pure_only]
 use crate::effect::{Backend, Check, Effect, EffectError, Provisioned};
 #[pure_only]
 use crate::guest::{DurationMs, GuestPath, HostPath};
@@ -14,8 +16,6 @@ use crate::ids::Vmid;
 use crate::memo::{Action, Failure, Memo, Progress, StartGate};
 #[pure_only]
 use crate::observation::{Observation, Unsettled};
-#[pure_only]
-use crate::effect::ProbeEffect;
 #[pure_only]
 use crate::spec::WorkloadSpec;
 #[pure_only]
@@ -46,7 +46,15 @@ impl<'a> Context<'a> {
         now: Moment,
         memo: &'a Memo,
     ) -> Context<'a> {
-        Context { spec, cohort, image, push, observed, now, memo }
+        Context {
+            spec,
+            cohort,
+            image,
+            push,
+            observed,
+            now,
+            memo,
+        }
     }
 
     #[must_use]
@@ -98,7 +106,10 @@ impl<'a> Context<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
     Act(Effect),
-    Probe { probe: ProbeEffect, within: DurationMs },
+    Probe {
+        probe: ProbeEffect,
+        within: DurationMs,
+    },
     Wake(Moment),
 }
 
@@ -114,7 +125,11 @@ pub enum SkipReason {
 pub enum Blocker {
     SlotTaken(Vmid),
     Unsettled(Vmid, Unsettled),
-    StateMoved { at: GuestPath, from: HostPath, to: HostPath },
+    StateMoved {
+        at: GuestPath,
+        from: HostPath,
+        to: HostPath,
+    },
     Ambiguous,
     NoAddress,
     NoProof,
@@ -157,22 +172,34 @@ pub struct Plan {
 impl Plan {
     #[must_use]
     pub fn idle(stage: Stage) -> Plan {
-        Plan { stage, intents: vec![] }
+        Plan {
+            stage,
+            intents: vec![],
+        }
     }
 
     #[must_use]
     pub fn act(stage: Stage, effect: Effect) -> Plan {
-        Plan { stage, intents: vec![Intent::Act(effect)] }
+        Plan {
+            stage,
+            intents: vec![Intent::Act(effect)],
+        }
     }
 
     #[must_use]
     pub fn probe(check: Check, probe: ProbeEffect, within: DurationMs) -> Plan {
-        Plan { stage: Stage::Checking(check), intents: vec![Intent::Probe { probe, within }] }
+        Plan {
+            stage: Stage::Checking(check),
+            intents: vec![Intent::Probe { probe, within }],
+        }
     }
 
     #[must_use]
     pub fn wake(stage: Stage, at: Moment) -> Plan {
-        Plan { stage, intents: vec![Intent::Wake(at)] }
+        Plan {
+            stage,
+            intents: vec![Intent::Wake(at)],
+        }
     }
 }
 
@@ -197,7 +224,10 @@ pub trait Registry {
 #[pure_only]
 #[must_use]
 pub fn refused(ctx: &Context<'_>, member: &Member, actions: &[Action]) -> Option<Failure> {
-    actions
-        .iter()
-        .find_map(|action| ctx.failed(member, *action).map(|error| Failure::Refused { action: *action, error: error.clone() }))
+    actions.iter().find_map(|action| {
+        ctx.failed(member, *action).map(|error| Failure::Refused {
+            action: *action,
+            error: error.clone(),
+        })
+    })
 }

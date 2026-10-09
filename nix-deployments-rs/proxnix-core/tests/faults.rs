@@ -210,7 +210,7 @@ fn pve01() -> (World, Vec<WorkloadSpec>) {
                     },
                     |workload| workload.resources,
                 ),
-                facts: sim::facts(kind),
+                facts: kind.facts(tags.as_ref().map_or(Slot::Blue, |tags| tags.slot)),
                 tags,
             },
         )

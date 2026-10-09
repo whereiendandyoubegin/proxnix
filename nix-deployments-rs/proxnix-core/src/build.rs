@@ -47,13 +47,19 @@ impl std::str::FromStr for StorePath {
     type Err = StorePathFault;
 
     fn from_str(text: &str) -> Result<Self, StorePathFault> {
-        let entry = text.strip_prefix("/nix/store/").ok_or(StorePathFault::NotInStore)?;
+        let entry = text
+            .strip_prefix("/nix/store/")
+            .ok_or(StorePathFault::NotInStore)?;
         let (hash, name) = entry.split_once('-').ok_or(StorePathFault::NoName)?;
-        let valid_name = !name.is_empty() && !name.starts_with('.') && name.chars().all(store_name_character);
+        let valid_name =
+            !name.is_empty() && !name.starts_with('.') && name.chars().all(store_name_character);
         match (hash.parse::<NixHash>(), valid_name) {
             (Err(fault), _) => Err(StorePathFault::Hash(fault)),
             (Ok(_), false) => Err(StorePathFault::BadName),
-            (Ok(hash), true) => Ok(StorePath { hash, name: StoreName(String::from(name)) }),
+            (Ok(hash), true) => Ok(StorePath {
+                hash,
+                name: StoreName(String::from(name)),
+            }),
         }
     }
 }
@@ -152,9 +158,18 @@ mod tests {
 
     #[test]
     fn anything_that_is_not_a_store_path_is_rejected() {
-        assert_eq!("/tmp/78s0iadvjz6s48aqvx4rw78lwrzkjzlw-x".parse::<StorePath>(), Err(StorePathFault::NotInStore));
-        assert_eq!("/nix/store/78s0iadvjz6s48aqvx4rw78lwrzkjzlw".parse::<StorePath>(), Err(StorePathFault::NoName));
-        assert_eq!("/nix/store/abc-x".parse::<StorePath>(), Err(StorePathFault::Hash(HashFault::Length)));
+        assert_eq!(
+            "/tmp/78s0iadvjz6s48aqvx4rw78lwrzkjzlw-x".parse::<StorePath>(),
+            Err(StorePathFault::NotInStore)
+        );
+        assert_eq!(
+            "/nix/store/78s0iadvjz6s48aqvx4rw78lwrzkjzlw".parse::<StorePath>(),
+            Err(StorePathFault::NoName)
+        );
+        assert_eq!(
+            "/nix/store/abc-x".parse::<StorePath>(),
+            Err(StorePathFault::Hash(HashFault::Length))
+        );
         assert_eq!(
             "/nix/store/78s0iadvjz6s48aqvx4rw78lwrzkjzlw-a/b".parse::<StorePath>(),
             Err(StorePathFault::BadName)
@@ -168,13 +183,30 @@ mod tests {
     #[test]
     fn an_image_nobody_built_this_run_is_known_to_be_unbuilt() {
         let images: Images = [
-            Built { image: ImageType(String::from("ok")), outcome: Ok(Artifact { path: PATH.parse().unwrap() }) },
-            Built { image: ImageType(String::from("bad")), outcome: Err(BuildFault::TimedOut(DurationMs(1))) },
+            Built {
+                image: ImageType(String::from("ok")),
+                outcome: Ok(Artifact {
+                    path: PATH.parse().unwrap(),
+                }),
+            },
+            Built {
+                image: ImageType(String::from("bad")),
+                outcome: Err(BuildFault::TimedOut(DurationMs(1))),
+            },
         ]
         .into_iter()
         .collect();
-        assert!(matches!(images.knowledge(&ImageType(String::from("ok"))), Knowledge::Built(_)));
-        assert!(matches!(images.knowledge(&ImageType(String::from("bad"))), Knowledge::Failed(BuildFault::TimedOut(_))));
-        assert_eq!(images.knowledge(&ImageType(String::from("other"))), Knowledge::NotBuiltThisRun);
+        assert!(matches!(
+            images.knowledge(&ImageType(String::from("ok"))),
+            Knowledge::Built(_)
+        ));
+        assert!(matches!(
+            images.knowledge(&ImageType(String::from("bad"))),
+            Knowledge::Failed(BuildFault::TimedOut(_))
+        ));
+        assert_eq!(
+            images.knowledge(&ImageType(String::from("other"))),
+            Knowledge::NotBuiltThisRun
+        );
     }
 }

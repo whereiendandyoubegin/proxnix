@@ -234,7 +234,7 @@ pub fn plan(commit: &proxnix_core::CommitHash, projections: &[Projection]) -> St
 mod tests {
     use super::*;
     use proxnix_core::{
-        Artifact, Audited, BridgeName, Built, Builtin, Cores, Cutover, Desired, DiskGib,
+        Artifact, Audited, BridgeName, Built, Builtin, BySlot, Cores, Cutover, Desired, DiskGib,
         DurationMs, Grant, GuestName, GuestStatus, Hostname, ImageType, Images, KindFacts,
         KindSpec, MemoryMb, Observation, Pacing, Permissions, Port, Privilege, ProxySpec, Purity,
         Push, RawTags, Resources, Settled, Sighting, SlotPair, Tick, Timeouts, WorkloadSpec,
@@ -271,7 +271,7 @@ mod tests {
             },
             kind: KindSpec::Lxc {
                 privilege: Privilege::Unprivileged,
-                mounts: vec![],
+                mounts: BySlot::default(),
             },
         };
         let observed = Observation::new(

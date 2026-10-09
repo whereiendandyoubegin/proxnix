@@ -1,6 +1,7 @@
 #[pure_only]
 use crate::guest::{GuestPath, HostPath, Mount, MountMode, PathFault, Privilege};
-use crate::ids::Slot;
+#[pure_only]
+use crate::ids::{BySlot, Slot};
 #[pure_only]
 use crate::spec::{Cutover, GuestName};
 use proxnix_pure::pure_only;
@@ -44,13 +45,6 @@ enum Fixed {
     Nix,
     Blue { rehearsal: Option<Rehearsal> },
     Green { rehearsal: Option<Rehearsal> },
-}
-
-#[pure_only]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlotColour {
-    Blue,
-    Green,
 }
 
 #[pure_only]
@@ -216,16 +210,62 @@ pub enum StoreMode {
 #[pure_only]
 pub fn store_cutover(store: StoreMode, cutover: Cutover) -> Result<(), StorageFault> {
     match (store, cutover) {
-        (StoreMode::Private, Cutover::Overlap) => Err(StorageFault::PrivateStoreNeedsStopStart),
-        _ => Ok(()),
+        (StoreMode::Private, Cutover::Overlap | Cutover::FenceTransfer) => {
+            Err(StorageFault::PrivateStoreNeedsStopStart)
+        }
+        (
+            _,
+            Cutover::Overlap | Cutover::FenceTransfer | Cutover::StopStart | Cutover::Protected,
+        ) => Ok(()),
     }
 }
 
 #[pure_only]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Placement {
+enum Placement {
     Shared,
-    PerSlot(SlotColour),
+    PerSlot(Slot),
+}
+
+#[pure_only]
+impl Placement {
+    fn for_cutover(cutover: Cutover, slot: Slot) -> Placement {
+        match cutover {
+            Cutover::FenceTransfer => Placement::PerSlot(slot),
+            Cutover::StopStart | Cutover::Overlap | Cutover::Protected => Placement::Shared,
+        }
+    }
+}
+
+#[pure_only]
+enum StateHome {
+    Datasets(Dataset),
+    Directories(Dataset),
+}
+
+#[pure_only]
+impl StateHome {
+    fn hold(&self, label: &StateLabel, owner: Owner) -> (HostPath, HostEffect) {
+        match self {
+            StateHome::Datasets(home) => {
+                let dataset = home.child(label.0.clone());
+                (
+                    dataset.mountpoint(),
+                    HostEffect::EnsureDataset { dataset, owner },
+                )
+            }
+            StateHome::Directories(slot_home) => {
+                let path = HostPath::within(slot_home, std::slice::from_ref(&label.0));
+                (path.clone(), HostEffect::EnsureDirectory { path, owner })
+            }
+        }
+    }
+}
+
+#[pure_only]
+struct Attachment {
+    mount: Mount,
+    needs: Vec<HostEffect>,
 }
 
 #[pure_only]
@@ -272,14 +312,6 @@ fn repeated<T: PartialEq + Clone>(items: &[T]) -> Option<T> {
 }
 
 #[pure_only]
-fn determine_placement(plan: (Cutover, SlotColour)) -> Placement {
-    match plan {
-        (Cutover::FenceTransfer, _) => Placement::PerSlot(plan.1),
-        _ => Placement::Shared,
-    }
-}
-
-#[pure_only]
 fn labelled(state: &[GuestPath]) -> Result<Vec<(GuestPath, StateLabel)>, StorageFault> {
     let found: Vec<(GuestPath, StateLabel)> = state
         .iter()
@@ -314,6 +346,41 @@ fn distinct(mounts: Vec<Mount>) -> Result<Vec<Mount>, StorageFault> {
 }
 
 #[pure_only]
+fn once<T: PartialEq>(items: impl IntoIterator<Item = T>) -> Vec<T> {
+    items.into_iter().fold(Vec::new(), |seen, item| {
+        if seen.contains(&item) {
+            seen
+        } else {
+            seen.into_iter().chain([item]).collect()
+        }
+    })
+}
+
+#[pure_only]
+fn ensure(dataset: &Dataset, owner: Owner) -> HostEffect {
+    HostEffect::EnsureDataset {
+        dataset: dataset.clone(),
+        owner,
+    }
+}
+
+#[pure_only]
+#[must_use]
+pub fn host_prepare<'a>(
+    storages: impl IntoIterator<Item = &'a BySlot<Storage>>,
+) -> Vec<HostEffect> {
+    once(storages.into_iter().flat_map(|storage| {
+        storage
+            .blue
+            .prepare
+            .iter()
+            .filter(|effect| storage.green.prepare.contains(effect))
+            .cloned()
+            .collect::<Vec<_>>()
+    }))
+}
+
+#[pure_only]
 fn workload(name: &GuestName) -> Result<Segment, StorageFault> {
     Segment::try_from(name.0.as_str()).map_err(|_| StorageFault::UnnamableWorkload(name.clone()))
 }
@@ -343,10 +410,23 @@ impl Layout {
         self.root.child(Segment::from(Fixed::State))
     }
 
-    pub fn slot_home(&self, name: &GuestName, slot: SlotColour) -> Result<Dataset, StorageFault> {
+    pub fn slot_home(&self, name: &GuestName, slot: Slot) -> Result<Dataset, StorageFault> {
+        self.side(name, slot, None)
+    }
+
+    pub fn aside(&self, name: &GuestName, slot: Slot) -> Result<Dataset, StorageFault> {
+        self.side(name, slot, Some(Rehearsal {}))
+    }
+
+    fn side(
+        &self,
+        name: &GuestName,
+        slot: Slot,
+        rehearsal: Option<Rehearsal>,
+    ) -> Result<Dataset, StorageFault> {
         let side = match slot {
-            SlotColour::Blue => Fixed::Blue { rehearsal: None },
-            SlotColour::Green => Fixed::Green { rehearsal: None },
+            Slot::Blue => Fixed::Blue { rehearsal },
+            Slot::Green => Fixed::Green { rehearsal },
         };
         Ok(self
             .state()
@@ -359,112 +439,118 @@ impl Layout {
         self.root.child(Segment::from(Fixed::Logs))
     }
 
-    pub fn storage(
+    pub fn storage_for(
+        &self,
+        name: &GuestName,
+        wanted: &StorageSpec,
+        cutover: Cutover,
+    ) -> Result<BySlot<Storage>, StorageFault> {
+        BySlot::try_new(|slot| self.storage(name, wanted, Placement::for_cutover(cutover, slot)))
+    }
+
+    fn storage(
         &self,
         name: &GuestName,
         wanted: &StorageSpec,
         placement: Placement,
     ) -> Result<Storage, StorageFault> {
-        let workload = Segment::try_from(name.0.as_str())
-            .map_err(|_| StorageFault::UnnamableWorkload(name.clone()))?;
-        let labelled = labelled(&wanted.state)?;
+        let workload = workload(name)?;
         let owner = Owner::writer(wanted.privilege);
         let home = self.state().child(workload.clone());
-        #[pure_only]
-        enum StateHome {
-            Datasets(Dataset),
-            Directories(Dataset),
-        }
         let state_home = match placement {
             Placement::Shared => StateHome::Datasets(home.clone()),
-            Placement::PerSlot(colour) => StateHome::Directories(self.slot_home(name, colour)?),
+            Placement::PerSlot(slot) => StateHome::Directories(self.slot_home(name, slot)?),
         };
-        let logs = Mount {
-            host: HostPath::within(&self.logs(), &[workload]),
-            guest: journal(),
-            mode: MountMode::ReadWrite,
-        };
-        let private = home.child(Segment::from(Fixed::Nix));
-        let store = match wanted.store {
-            StoreMode::Image => None,
-            StoreMode::Shared => Some(Mount {
-                host: HostPath::within(
-                    &self.store(),
-                    &[Segment::from(Fixed::Nix), Segment::from(Fixed::Store)],
-                ),
-                guest: nix_store(),
-                mode: MountMode::ReadOnly,
-            }),
-            StoreMode::Private => Some(Mount {
-                host: HostPath::within(&private, &[Segment::from(Fixed::Nix)]),
-                guest: nix(),
-                mode: MountMode::ReadWrite,
-            }),
-        };
-        let owns_home = !labelled.is_empty() || wanted.store == StoreMode::Private;
-        let mounts = distinct(
-            labelled
-                .iter()
-                .map(|(at, label)| Mount {
-                    // host: home.child(label.0.clone()).mountpoint(),
-                    host: match &state_home {
-                        StateHome::Datasets(home) => home.child(label.0.clone()).mountpoint(),
-                        StateHome::Directories(slot_home) => {
-                            HostPath::within(slot_home, &[label.0.clone()])
-                        }
+        let attached: Vec<Attachment> = labelled(&wanted.state)?
+            .into_iter()
+            .map(|(at, label)| {
+                let (host, made) = state_home.hold(&label, owner);
+                Attachment {
+                    mount: Mount {
+                        host,
+                        guest: at,
+                        mode: MountMode::ReadWrite,
                     },
-                    guest: at.clone(),
-                    mode: MountMode::ReadWrite,
-                })
-                .chain(wanted.mounts.iter().cloned())
-                .chain([logs.clone()])
-                .chain(wanted.secrets.then(|| Mount {
+                    needs: vec![ensure(&home, Owner::HostRoot), made],
+                }
+            })
+            .chain(wanted.mounts.iter().map(|mount| {
+                Attachment {
+                    mount: mount.clone(),
+                    needs: (mount.mode == MountMode::ReadWrite)
+                        .then(|| HostEffect::EnsureHostPath {
+                            path: mount.host.clone(),
+                            owner,
+                        })
+                        .into_iter()
+                        .collect(),
+                }
+            }))
+            .chain([self.journal(workload, owner)])
+            .chain(wanted.secrets.then(|| Attachment {
+                mount: Mount {
                     host: self.secrets.clone(),
                     guest: sops_key(),
                     mode: MountMode::ReadOnly,
-                }))
-                .chain(store)
-                .collect(),
-        )?;
-        let prepare = [self.root.clone(), self.state()]
-            .into_iter()
-            .chain(owns_home.then(|| home.clone()))
-            .map(|dataset| HostEffect::EnsureDataset {
-                dataset,
-                owner: Owner::HostRoot,
-            })
-            .chain(labelled.iter().map(|(_, label)| HostEffect::EnsureDataset {
-                dataset: home.child(label.0.clone()),
-                owner,
+                },
+                needs: vec![],
             }))
-            .chain(
-                (wanted.store == StoreMode::Private).then(|| HostEffect::EnsureDataset {
-                    dataset: private.clone(),
-                    owner,
-                }),
-            )
-            .chain([
-                HostEffect::EnsureDataset {
-                    dataset: self.logs(),
-                    owner: Owner::HostRoot,
-                },
-                HostEffect::EnsureDirectory {
-                    path: logs.host,
-                    owner,
-                },
-            ])
-            .chain(
-                wanted
-                    .mounts
-                    .iter()
-                    .filter(|mount| mount.mode == MountMode::ReadWrite)
-                    .map(|mount| HostEffect::EnsureHostPath {
-                        path: mount.host.clone(),
-                        owner,
-                    }),
-            )
+            .chain(self.nix(&home, wanted.store, owner))
             .collect();
-        Ok(Storage { mounts, prepare })
+        Ok(Storage {
+            mounts: distinct(attached.iter().map(|each| each.mount.clone()).collect())?,
+            prepare: once(
+                [
+                    ensure(&self.root, Owner::HostRoot),
+                    ensure(&self.state(), Owner::HostRoot),
+                ]
+                .into_iter()
+                .chain(attached.into_iter().flat_map(|each| each.needs)),
+            ),
+        })
+    }
+
+    fn journal(&self, workload: Segment, owner: Owner) -> Attachment {
+        let host = HostPath::within(&self.logs(), &[workload]);
+        Attachment {
+            mount: Mount {
+                host: host.clone(),
+                guest: journal(),
+                mode: MountMode::ReadWrite,
+            },
+            needs: vec![
+                ensure(&self.logs(), Owner::HostRoot),
+                HostEffect::EnsureDirectory { path: host, owner },
+            ],
+        }
+    }
+
+    fn nix(&self, home: &Dataset, store: StoreMode, owner: Owner) -> Option<Attachment> {
+        match store {
+            StoreMode::Image => None,
+            StoreMode::Shared => Some(Attachment {
+                mount: Mount {
+                    host: HostPath::within(
+                        &self.store(),
+                        &[Segment::from(Fixed::Nix), Segment::from(Fixed::Store)],
+                    ),
+                    guest: nix_store(),
+                    mode: MountMode::ReadOnly,
+                },
+                needs: vec![],
+            }),
+            StoreMode::Private => {
+                let private = home.child(Segment::from(Fixed::Nix));
+                Some(Attachment {
+                    mount: Mount {
+                        host: HostPath::within(&private, &[Segment::from(Fixed::Nix)]),
+                        guest: nix(),
+                        mode: MountMode::ReadWrite,
+                    },
+                    needs: vec![ensure(home, Owner::HostRoot), ensure(&private, owner)],
+                })
+            }
+        }
     }
 }
 
@@ -524,6 +610,113 @@ mod tests {
         GuestName(String::from(name))
     }
 
+    fn shared(name: &GuestName, wanted: &StorageSpec) -> Result<Storage, StorageFault> {
+        layout().storage(name, wanted, Placement::Shared)
+    }
+
+    fn per_slot(slot: Slot) -> Storage {
+        layout()
+            .storage(
+                &workload("monitoring"),
+                &wanted(&["/var/lib/monitoring"], false),
+                Placement::PerSlot(slot),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn only_fence_transfer_places_state_per_slot() {
+        let placed =
+            |cutover| [Slot::Blue, Slot::Green].map(|slot| Placement::for_cutover(cutover, slot));
+        assert_eq!(
+            placed(Cutover::FenceTransfer),
+            [
+                Placement::PerSlot(Slot::Blue),
+                Placement::PerSlot(Slot::Green)
+            ]
+        );
+        [Cutover::Overlap, Cutover::StopStart, Cutover::Protected]
+            .into_iter()
+            .for_each(|cutover| assert_eq!(placed(cutover), [Placement::Shared; 2]));
+    }
+
+    #[test]
+    fn per_slot_state_lives_in_each_slots_own_dataset() {
+        assert_eq!(
+            hosts(&per_slot(Slot::Blue))[0],
+            (
+                String::from("/ZFS/proxnix/state/monitoring/blue/monitoring"),
+                String::from("/var/lib/monitoring")
+            )
+        );
+        assert_eq!(
+            hosts(&per_slot(Slot::Blue))
+                .into_iter()
+                .map(|(host, guest)| (host.replace("/blue/", "/green/"), guest))
+                .collect::<Vec<_>>(),
+            hosts(&per_slot(Slot::Green))
+        );
+    }
+
+    #[test]
+    fn per_slot_state_is_directories_and_never_creates_the_slot_dataset() {
+        let storage = per_slot(Slot::Green);
+        let slot_home = layout()
+            .slot_home(&workload("monitoring"), Slot::Green)
+            .unwrap();
+        let label = Segment::try_from("monitoring").unwrap();
+        assert!(storage.prepare.contains(&HostEffect::EnsureDirectory {
+            path: HostPath::within(&slot_home, std::slice::from_ref(&label)),
+            owner: Owner::GuestRoot,
+        }));
+        let shared_dataset = layout().state().child(label.clone()).child(label);
+        assert!(!storage.prepare.iter().any(|effect| matches!(
+            effect,
+            HostEffect::EnsureDataset { dataset, .. }
+                if dataset.segments().starts_with(slot_home.segments()) || *dataset == shared_dataset
+        )));
+    }
+
+    #[test]
+    fn only_effects_both_slots_need_are_prepared_up_front() {
+        let fenced = layout()
+            .storage_for(
+                &workload("monitoring"),
+                &wanted(&["/var/lib/monitoring"], false),
+                Cutover::FenceTransfer,
+            )
+            .unwrap();
+        let stopped = layout()
+            .storage_for(
+                &workload("forgejo"),
+                &wanted(&["/var/lib/forgejo"], false),
+                Cutover::StopStart,
+            )
+            .unwrap();
+        assert_eq!(host_prepare([&stopped]), stopped.blue.prepare);
+        assert!(host_prepare([&fenced]).iter().all(
+            |effect| !matches!(effect, HostEffect::EnsureDirectory { path, .. }
+            if fenced.blue.mounts[0].host == *path || fenced.green.mounts[0].host == *path)
+        ));
+        assert_eq!(host_prepare([&stopped, &stopped]), stopped.blue.prepare);
+    }
+
+    #[test]
+    fn the_rehearsal_sits_beside_the_slot_home() {
+        assert_eq!(
+            named(&layout().aside(&workload("monitoring"), Slot::Blue).unwrap()),
+            "ZFS/proxnix/state/monitoring/blue-rehearsal"
+        );
+        assert_eq!(
+            named(
+                &layout()
+                    .slot_home(&workload("monitoring"), Slot::Green)
+                    .unwrap()
+            ),
+            "ZFS/proxnix/state/monitoring/green"
+        );
+    }
+
     #[test]
     fn the_layout_lives_under_the_pool_in_three_fixed_datasets() {
         assert_eq!(named(&layout().store()), "ZFS/proxnix/store");
@@ -536,9 +729,7 @@ mod tests {
 
     #[test]
     fn a_layout_path_and_the_same_path_reported_by_proxmox_are_equal() {
-        let storage = layout()
-            .storage(&workload("forgejo"), &wanted(&["/var/lib/forgejo"], false))
-            .unwrap();
+        let storage = shared(&workload("forgejo"), &wanted(&["/var/lib/forgejo"], false)).unwrap();
         assert_eq!(
             storage.mounts[0].host,
             path("/ZFS/proxnix/state/forgejo/forgejo")
@@ -565,12 +756,11 @@ mod tests {
 
     #[test]
     fn each_state_path_gets_its_own_dataset_named_by_its_last_component() {
-        let storage = layout()
-            .storage(
-                &workload("hydra"),
-                &wanted(&["/var/lib/hydra", "/var/lib/nix-cache-key"], false),
-            )
-            .unwrap();
+        let storage = shared(
+            &workload("hydra"),
+            &wanted(&["/var/lib/hydra", "/var/lib/nix-cache-key"], false),
+        )
+        .unwrap();
         assert_eq!(
             hosts(&storage),
             vec![
@@ -603,26 +793,24 @@ mod tests {
     #[test]
     fn two_state_paths_with_one_name_or_one_guest_path_are_refused() {
         assert_eq!(
-            layout().storage(&workload("x"), &wanted(&["/a/data", "/b/data"], false)),
+            shared(&workload("x"), &wanted(&["/a/data", "/b/data"], false)),
             Err(StorageFault::SameLabel(
                 StateLabel::of(&at("/a/data")).unwrap()
             ))
         );
         assert_eq!(
-            layout().storage(&workload("x"), &wanted(&["/var/log/journal"], false)),
+            shared(&workload("x"), &wanted(&["/var/log/journal"], false)),
             Err(StorageFault::MountedTwice(journal()))
         );
         assert_eq!(
-            layout().storage(&workload("no/slash"), &wanted(&[], false)),
+            shared(&workload("no/slash"), &wanted(&[], false)),
             Err(StorageFault::UnnamableWorkload(workload("no/slash")))
         );
     }
 
     #[test]
     fn a_workload_without_state_gets_no_state_dataset() {
-        let storage = layout()
-            .storage(&workload("cloudflared"), &wanted(&[], true))
-            .unwrap();
+        let storage = shared(&workload("cloudflared"), &wanted(&[], true)).unwrap();
         let home = layout()
             .state()
             .child(Segment::try_from("cloudflared").unwrap());
@@ -633,13 +821,9 @@ mod tests {
 
     #[test]
     fn the_secrets_key_is_mounted_read_only_only_when_asked_for() {
-        let without = layout()
-            .storage(&workload("updater"), &wanted(&[], false))
-            .unwrap();
+        let without = shared(&workload("updater"), &wanted(&[], false)).unwrap();
         assert!(without.mounts.iter().all(|mount| mount.guest != sops_key()));
-        let with = layout()
-            .storage(&workload("forgejo"), &wanted(&[], true))
-            .unwrap();
+        let with = shared(&workload("forgejo"), &wanted(&[], true)).unwrap();
         assert!(with.mounts.contains(&Mount {
             host: path("/var/lib/proxnix/sops"),
             guest: sops_key(),
@@ -656,9 +840,7 @@ mod tests {
 
     #[test]
     fn datasets_are_ensured_parents_first_and_owned_by_whoever_writes_them() {
-        let storage = layout()
-            .storage(&workload("forgejo"), &wanted(&["/var/lib/forgejo"], true))
-            .unwrap();
+        let storage = shared(&workload("forgejo"), &wanted(&["/var/lib/forgejo"], true)).unwrap();
         let ensured: Vec<(String, Owner)> = storage
             .prepare
             .iter()
@@ -691,15 +873,14 @@ mod tests {
             guest: at("/data/media"),
             mode: MountMode::ReadWrite,
         };
-        let storage = layout()
-            .storage(
-                &workload("nixflix"),
-                &StorageSpec {
-                    mounts: vec![media.clone()],
-                    ..wanted(&["/data/.state"], true)
-                },
-            )
-            .unwrap();
+        let storage = shared(
+            &workload("nixflix"),
+            &StorageSpec {
+                mounts: vec![media.clone()],
+                ..wanted(&["/data/.state"], true)
+            },
+        )
+        .unwrap();
         assert!(storage.mounts.contains(&media));
         assert!(storage.prepare.contains(&HostEffect::EnsureHostPath {
             path: media.host,
@@ -709,9 +890,7 @@ mod tests {
 
     #[test]
     fn an_image_container_gets_no_store_mount_at_all() {
-        let storage = layout()
-            .storage(&workload("forgejo"), &wanted(&["/var/lib/forgejo"], true))
-            .unwrap();
+        let storage = shared(&workload("forgejo"), &wanted(&["/var/lib/forgejo"], true)).unwrap();
         assert!(
             storage
                 .mounts
@@ -722,18 +901,15 @@ mod tests {
 
     #[test]
     fn a_shared_store_container_mounts_the_synced_store_read_only_and_owns_nothing_new() {
-        let image = layout()
-            .storage(&workload("test-container"), &wanted(&[], true))
-            .unwrap();
-        let shared = layout()
-            .storage(
-                &workload("test-container"),
-                &StorageSpec {
-                    store: StoreMode::Shared,
-                    ..wanted(&[], true)
-                },
-            )
-            .unwrap();
+        let image = shared(&workload("test-container"), &wanted(&[], true)).unwrap();
+        let shared = shared(
+            &workload("test-container"),
+            &StorageSpec {
+                store: StoreMode::Shared,
+                ..wanted(&[], true)
+            },
+        )
+        .unwrap();
         assert!(shared.mounts.contains(&Mount {
             host: path("/ZFS/proxnix/store/nix/store"),
             guest: nix_store(),
@@ -747,15 +923,14 @@ mod tests {
 
     #[test]
     fn a_private_store_container_gets_its_own_writable_nix_dataset() {
-        let storage = layout()
-            .storage(
-                &workload("hydra"),
-                &StorageSpec {
-                    store: StoreMode::Private,
-                    ..wanted(&["/var/lib/hydra"], true)
-                },
-            )
-            .unwrap();
+        let storage = shared(
+            &workload("hydra"),
+            &StorageSpec {
+                store: StoreMode::Private,
+                ..wanted(&["/var/lib/hydra"], true)
+            },
+        )
+        .unwrap();
         assert!(storage.mounts.contains(&Mount {
             host: path("/ZFS/proxnix/state/hydra/nix/nix"),
             guest: nix(),
@@ -784,6 +959,10 @@ mod tests {
             Err(StorageFault::PrivateStoreNeedsStopStart)
         );
         assert_eq!(
+            store_cutover(StoreMode::Private, Cutover::FenceTransfer),
+            Err(StorageFault::PrivateStoreNeedsStopStart)
+        );
+        assert_eq!(
             store_cutover(StoreMode::Private, Cutover::StopStart),
             Ok(())
         );
@@ -798,7 +977,7 @@ mod tests {
     #[test]
     fn a_private_store_mounted_over_a_state_path_is_refused() {
         assert_eq!(
-            layout().storage(
+            shared(
                 &workload("x"),
                 &StorageSpec {
                     store: StoreMode::Private,
@@ -811,15 +990,14 @@ mod tests {
 
     #[test]
     fn a_privileged_container_leaves_its_state_owned_by_host_root() {
-        let storage = layout()
-            .storage(
-                &workload("pihole"),
-                &StorageSpec {
-                    privilege: Privilege::Privileged,
-                    ..wanted(&["/etc/pihole"], false)
-                },
-            )
-            .unwrap();
+        let storage = shared(
+            &workload("pihole"),
+            &StorageSpec {
+                privilege: Privilege::Privileged,
+                ..wanted(&["/etc/pihole"], false)
+            },
+        )
+        .unwrap();
         assert!(storage.prepare.iter().all(|effect| match effect {
             HostEffect::EnsureDataset { owner, .. }
             | HostEffect::EnsureDirectory { owner, .. }

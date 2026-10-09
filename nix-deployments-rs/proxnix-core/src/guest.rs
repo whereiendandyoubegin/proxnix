@@ -116,7 +116,11 @@ impl TryFrom<&str> for HostPath {
 
     fn try_from(text: &str) -> Result<HostPath, PathFault> {
         let relative = text.strip_prefix('/').ok_or(PathFault::Relative)?;
-        let parts: Vec<PathPart> = relative.split('/').filter(|part| !part.is_empty()).map(PathPart::try_from).collect::<Result<_, _>>()?;
+        let parts: Vec<PathPart> = relative
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(PathPart::try_from)
+            .collect::<Result<_, _>>()?;
         match parts.as_slice() {
             [nix, store, ..] if nix.0 == "nix" && store.0 == "store" => Err(PathFault::InStore),
             _ => Ok(HostPath(parts)),
@@ -131,8 +135,18 @@ impl HostPath {
         &self.0
     }
 
-    pub(crate) fn within(dataset: &crate::layout::Dataset, rest: &[crate::layout::Segment]) -> HostPath {
-        HostPath(dataset.segments().iter().chain(rest).map(|segment| PathPart(String::from(segment.as_ref()))).collect())
+    pub(crate) fn within(
+        dataset: &crate::layout::Dataset,
+        rest: &[crate::layout::Segment],
+    ) -> HostPath {
+        HostPath(
+            dataset
+                .segments()
+                .iter()
+                .chain(rest)
+                .map(|segment| PathPart(String::from(segment.as_ref())))
+                .collect(),
+        )
     }
 }
 
@@ -151,8 +165,13 @@ pub struct Mount {
 #[pure_only]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KindFacts {
-    Qemu { sockets: Sockets },
-    Lxc { privilege: Privilege, mounts: Vec<Mount> },
+    Qemu {
+        sockets: Sockets,
+    },
+    Lxc {
+        privilege: Privilege,
+        mounts: Vec<Mount>,
+    },
 }
 
 #[pure_only]
@@ -178,9 +197,19 @@ mod tests {
 
     #[test]
     fn facts_know_their_kind() {
-        assert_eq!(KindFacts::Qemu { sockets: Sockets(1) }.kind(), GuestKind::Qemu);
         assert_eq!(
-            KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] }.kind(),
+            KindFacts::Qemu {
+                sockets: Sockets(1)
+            }
+            .kind(),
+            GuestKind::Qemu
+        );
+        assert_eq!(
+            KindFacts::Lxc {
+                privilege: Privilege::Unprivileged,
+                mounts: vec![]
+            }
+            .kind(),
             GuestKind::Lxc
         );
     }

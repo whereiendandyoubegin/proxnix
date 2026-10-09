@@ -54,7 +54,12 @@ fn sockets_change(spec: &WorkloadSpec, guest: &Guest) -> Option<ResourceChange> 
 
 #[pure_only]
 #[must_use]
-pub fn changes(spec: &WorkloadSpec, guest: &Guest, deployed: &NixHash, image: Knowledge<'_>) -> Changes {
+pub fn changes(
+    spec: &WorkloadSpec,
+    guest: &Guest,
+    deployed: &NixHash,
+    image: Knowledge<'_>,
+) -> Changes {
     let seen = guest.resources();
     Changes {
         rebuild: [
@@ -79,8 +84,10 @@ pub fn changes(spec: &WorkloadSpec, guest: &Guest, deployed: &NixHash, image: Kn
 mod tests {
     use super::*;
     use crate::build::{Artifact, BuildFault};
-    use crate::guest::{Cores, DiskGib, DurationMs, GuestStatus, MemoryMb, Port, Privilege, Resources, Sockets};
-    use crate::ids::{SlotPair, Vmid};
+    use crate::guest::{
+        Cores, DiskGib, DurationMs, GuestStatus, MemoryMb, Port, Privilege, Resources, Sockets,
+    };
+    use crate::ids::{BySlot, SlotPair, Vmid};
     use crate::observation::Settled;
     use crate::spec::{BridgeName, Cutover, GuestName, Hostname, ImageType, ProxySpec, Timeouts};
     use crate::tags::RawTags;
@@ -103,7 +110,10 @@ mod tests {
                 tcp_ports: vec![],
                 bridge: BridgeName(String::from("vmbr0")),
             },
-            timeouts: Timeouts { dhcp: DurationMs(1), health_check: DurationMs(1) },
+            timeouts: Timeouts {
+                dhcp: DurationMs(1),
+                health_check: DurationMs(1),
+            },
             kind,
         }
     }
@@ -120,22 +130,40 @@ mod tests {
     }
 
     fn sized(memory: u32, disk: u32, cores: u16) -> Resources {
-        Resources { memory: MemoryMb(memory), disk: DiskGib(disk), cores: Cores(cores) }
+        Resources {
+            memory: MemoryMb(memory),
+            disk: DiskGib(disk),
+            cores: Cores(cores),
+        }
     }
 
     fn built(nix: &str) -> Artifact {
-        Artifact { path: format!("/nix/store/{nix}-website").parse().unwrap() }
+        Artifact {
+            path: format!("/nix/store/{nix}-website").parse().unwrap(),
+        }
     }
 
     fn qemu(sockets: u8) -> (KindSpec, KindFacts) {
-        (KindSpec::Qemu { sockets: Sockets(sockets) }, KindFacts::Qemu { sockets: Sockets(sockets) })
+        (
+            KindSpec::Qemu {
+                sockets: Sockets(sockets),
+            },
+            KindFacts::Qemu {
+                sockets: Sockets(sockets),
+            },
+        )
     }
 
     #[test]
     fn nothing_changes_when_the_image_and_resources_match() {
         let (kind, facts) = qemu(1);
         let artifact = built(DEPLOYED);
-        let found = changes(&spec(kind, sized(2048, 10, 2)), &guest(facts, sized(2048, 10, 2)), &DEPLOYED.parse().unwrap(), Knowledge::Built(&artifact));
+        let found = changes(
+            &spec(kind, sized(2048, 10, 2)),
+            &guest(facts, sized(2048, 10, 2)),
+            &DEPLOYED.parse().unwrap(),
+            Knowledge::Built(&artifact),
+        );
         assert!(found.none());
     }
 
@@ -143,32 +171,79 @@ mod tests {
     fn a_new_image_or_a_bigger_disk_needs_a_rebuild_and_resources_change_in_place() {
         let (kind, facts) = qemu(1);
         let artifact = built(NEWER);
-        let found = changes(&spec(kind, sized(4096, 20, 4)), &guest(facts, sized(2048, 10, 2)), &DEPLOYED.parse().unwrap(), Knowledge::Built(&artifact));
-        assert_eq!(found.rebuild, vec![RebuildCause::DiskGrew, RebuildCause::Image]);
-        assert_eq!(found.in_place, vec![ResourceChange::Memory(MemoryMb(4096)), ResourceChange::Cores(Cores(4))]);
+        let found = changes(
+            &spec(kind, sized(4096, 20, 4)),
+            &guest(facts, sized(2048, 10, 2)),
+            &DEPLOYED.parse().unwrap(),
+            Knowledge::Built(&artifact),
+        );
+        assert_eq!(
+            found.rebuild,
+            vec![RebuildCause::DiskGrew, RebuildCause::Image]
+        );
+        assert_eq!(
+            found.in_place,
+            vec![
+                ResourceChange::Memory(MemoryMb(4096)),
+                ResourceChange::Cores(Cores(4))
+            ]
+        );
     }
 
     #[test]
     fn a_smaller_disk_is_not_a_change() {
         let (kind, facts) = qemu(1);
-        assert!(changes(&spec(kind, sized(2048, 8, 2)), &guest(facts, sized(2048, 10, 2)), &DEPLOYED.parse().unwrap(), Knowledge::NotBuiltThisRun).none());
+        assert!(
+            changes(
+                &spec(kind, sized(2048, 8, 2)),
+                &guest(facts, sized(2048, 10, 2)),
+                &DEPLOYED.parse().unwrap(),
+                Knowledge::NotBuiltThisRun
+            )
+            .none()
+        );
     }
 
     #[test]
     fn an_image_that_was_not_built_or_failed_is_not_a_change() {
         let (kind, facts) = qemu(1);
         let fault = BuildFault::TimedOut(DurationMs(1));
-        assert!(changes(&spec(kind.clone(), sized(2048, 10, 2)), &guest(facts.clone(), sized(2048, 10, 2)), &DEPLOYED.parse().unwrap(), Knowledge::NotBuiltThisRun).none());
-        assert!(changes(&spec(kind, sized(2048, 10, 2)), &guest(facts, sized(2048, 10, 2)), &DEPLOYED.parse().unwrap(), Knowledge::Failed(&fault)).none());
+        assert!(
+            changes(
+                &spec(kind.clone(), sized(2048, 10, 2)),
+                &guest(facts.clone(), sized(2048, 10, 2)),
+                &DEPLOYED.parse().unwrap(),
+                Knowledge::NotBuiltThisRun
+            )
+            .none()
+        );
+        assert!(
+            changes(
+                &spec(kind, sized(2048, 10, 2)),
+                &guest(facts, sized(2048, 10, 2)),
+                &DEPLOYED.parse().unwrap(),
+                Knowledge::Failed(&fault)
+            )
+            .none()
+        );
     }
 
     #[test]
     fn an_impure_workload_rebuilds_whenever_it_is_built() {
         let (kind, facts) = qemu(1);
         let artifact = built(DEPLOYED);
-        let impure = WorkloadSpec { purity: Purity::Impure, ..spec(kind, sized(2048, 10, 2)) };
+        let impure = WorkloadSpec {
+            purity: Purity::Impure,
+            ..spec(kind, sized(2048, 10, 2))
+        };
         assert_eq!(
-            changes(&impure, &guest(facts, sized(2048, 10, 2)), &DEPLOYED.parse().unwrap(), Knowledge::Built(&artifact)).rebuild,
+            changes(
+                &impure,
+                &guest(facts, sized(2048, 10, 2)),
+                &DEPLOYED.parse().unwrap(),
+                Knowledge::Built(&artifact)
+            )
+            .rebuild,
             vec![RebuildCause::Image]
         );
     }
@@ -176,15 +251,37 @@ mod tests {
     #[test]
     fn only_vms_compare_sockets() {
         let found = changes(
-            &spec(KindSpec::Qemu { sockets: Sockets(2) }, sized(2048, 10, 2)),
-            &guest(KindFacts::Qemu { sockets: Sockets(1) }, sized(2048, 10, 2)),
+            &spec(
+                KindSpec::Qemu {
+                    sockets: Sockets(2),
+                },
+                sized(2048, 10, 2),
+            ),
+            &guest(
+                KindFacts::Qemu {
+                    sockets: Sockets(1),
+                },
+                sized(2048, 10, 2),
+            ),
             &DEPLOYED.parse().unwrap(),
             Knowledge::NotBuiltThisRun,
         );
         assert_eq!(found.in_place, vec![ResourceChange::Sockets(Sockets(2))]);
         let container = changes(
-            &spec(KindSpec::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] }, sized(2048, 10, 2)),
-            &guest(KindFacts::Lxc { privilege: Privilege::Unprivileged, mounts: vec![] }, sized(2048, 10, 2)),
+            &spec(
+                KindSpec::Lxc {
+                    privilege: Privilege::Unprivileged,
+                    mounts: BySlot::default(),
+                },
+                sized(2048, 10, 2),
+            ),
+            &guest(
+                KindFacts::Lxc {
+                    privilege: Privilege::Unprivileged,
+                    mounts: vec![],
+                },
+                sized(2048, 10, 2),
+            ),
             &DEPLOYED.parse().unwrap(),
             Knowledge::NotBuiltThisRun,
         );
