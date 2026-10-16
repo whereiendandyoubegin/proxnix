@@ -292,6 +292,7 @@ mod tests {
                     mounts: vec![],
                 },
             })],
+            Vec::new(),
         );
         let images: Images = [Built {
             image: spec.image.clone(),

@@ -352,6 +352,7 @@ pub fn observe(pve: &Pve) -> std::result::Result<Observation, ObserveFault> {
             .into_iter()
             .chain(sightings::<Lxc>(lxc, |id| Lxc::config(pve, id)))
             .collect(),
+        Vec::new(),
     ))
 }
 
@@ -1045,6 +1046,7 @@ mod tests {
         Ok(Observation::new(
             audited,
             qemu.into_iter().chain(lxc).collect(),
+            Vec::new(),
         ))
     }
 

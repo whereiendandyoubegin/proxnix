@@ -356,6 +356,7 @@ mod tests {
             })
             .unwrap(),
             sightings,
+            Vec::new(),
         );
         Cohort::gather(&observed, &spec())
     }

@@ -912,6 +912,7 @@ mod tests {
             })
             .unwrap(),
             vec![],
+            Vec::new(),
         )
     }
 

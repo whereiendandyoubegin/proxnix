@@ -3,7 +3,7 @@ use crate::build::Images;
 #[pure_only]
 use crate::cohort::Cohort;
 #[pure_only]
-use crate::desired::{Desired, Orphan};
+use crate::desired::{ConfigFault, Desired, Orphan};
 #[pure_only]
 use crate::effect::{Effect, EffectId, Event, GuestEffect, RouteEffect};
 #[pure_only]
@@ -11,7 +11,7 @@ use crate::guest::{KindFacts, MountMode};
 #[pure_only]
 use crate::memo::{Action, Failure, Memo};
 #[pure_only]
-use crate::observation::{Anomaly, Observation, Occupant, SlotState};
+use crate::observation::{Anomaly, DataFacts, Observation, Occupant, SlotState};
 #[pure_only]
 use crate::pair::{Keep, Overlap, StopStart};
 #[pure_only]
@@ -135,20 +135,27 @@ fn workload<R: Registry>(
     now: Moment,
     memo: &Memo,
 ) -> Plan {
-    unsettled_in(observed, spec).unwrap_or_else(|| match Cohort::gather(observed, spec) {
-        Err(fault) => Plan::idle(Stage::Conflict(fault)),
-        Ok(cohort) => moved(spec, &cohort, tick).unwrap_or_else(|| {
-            R::plan(&Context::new(
-                spec,
-                &cohort,
-                images.knowledge(&spec.image),
-                tick.push(),
-                observed,
-                now,
-                memo,
-            ))
-        }),
-    })
+    match observed.lookup(&spec.name) {
+        DataFacts::Unobservable(fault) => {
+            Plan::idle(Stage::Invalid(vec![ConfigFault::Data(fault)]))
+        }
+        DataFacts::Observed(_) => {
+            unsettled_in(observed, spec).unwrap_or_else(|| match Cohort::gather(observed, spec) {
+                Err(fault) => Plan::idle(Stage::Conflict(fault)),
+                Ok(cohort) => moved(spec, &cohort, tick).unwrap_or_else(|| {
+                    R::plan(&Context::new(
+                        spec,
+                        &cohort,
+                        images.knowledge(&spec.image),
+                        tick.push(),
+                        observed,
+                        now,
+                        memo,
+                    ))
+                }),
+            })
+        }
+    }
 }
 
 #[pure_only]

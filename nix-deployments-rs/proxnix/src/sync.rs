@@ -388,6 +388,7 @@ mod tests {
             })
             .unwrap(),
             sightings,
+            Vec::new(),
         )
     }
 

@@ -58,8 +58,10 @@ pub use layout::{
 pub use memo::{Action, Failure, Memo, Progress};
 #[pure_only]
 pub use observation::{
-    Anomaly, Audited, Grant, Guest, LockKind, Managed, Observation, Occupant, Permissions, Settled,
-    Sighting, SlotState, Unsettled, Vacant, VisibilityFault,
+    AclType, Anomaly, Atime, Audited, DataFacts, DataFault, DataOrigin, DataProperties,
+    DataSighting, DataSlots, EXPECTED_PROPERTIES, FinalState, Grant, Guest, Home, LockKind,
+    Managed, Observation, Occupant, Permissions, Settled, Sighting, SlotDataset, SlotFacts,
+    SlotState, StartState, Unsettled, Vacant, VisibilityFault, Xattr,
 };
 #[pure_only]
 pub use pair::{Fence, Keep, Overlap, PairPhase, StopStart, pair_phase, pair_plan};

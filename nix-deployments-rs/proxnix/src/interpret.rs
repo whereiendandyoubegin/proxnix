@@ -857,6 +857,7 @@ mod tests {
                     format!("proxnix;nix-{NEW};commit-{COMMIT};slot-green;ip-10.0.0.94;gen-2"),
                 ),
             ],
+            Vec::new(),
         );
         let cohort = Cohort::gather(&observed, &spec(false)).unwrap();
         let find = |id: u32| {
@@ -1142,6 +1143,7 @@ mod tests {
             })
             .unwrap(),
             vec![],
+            Vec::new(),
         );
         let vacant = match observed.slot(Vmid::new(944)) {
             proxnix_core::SlotState::Vacant(vacant) => vacant,
@@ -1211,6 +1213,7 @@ mod tests {
             })
             .unwrap(),
             vec![],
+            Vec::new(),
         );
         let vacant = match observed.slot(Vmid::new(944)) {
             proxnix_core::SlotState::Vacant(vacant) => vacant,

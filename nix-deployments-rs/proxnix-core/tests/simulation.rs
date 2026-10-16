@@ -1,8 +1,9 @@
 mod sim;
 
 use proxnix_core::{
-    Blocker, Builtin, BySlot, Check, Cutover, Desired, Failure, Images, LockKind, MemoryMb, Slot,
-    Stage, Tick, Unsettled, Vmid, WorkloadSpec,
+    Blocker, Builtin, BySlot, Check, ConfigFault, Cutover, DataFault, DataOrigin, DataSighting,
+    Desired, EXPECTED_PROPERTIES, Failure, Images, LockKind, MemoryMb, Slot, SlotDataset, Stage,
+    Tick, Unsettled, Vmid, WorkloadSpec,
 };
 use sim::{
     COMMIT_B, Kind, NIX_A, NIX_B, World, built, images, kinds, last_stage, lxc, push, qemu, run,
@@ -223,6 +224,31 @@ fn a_workload_with_a_config_error_is_reported_and_never_treated_as_an_orphan() {
     );
     assert!(done.effects.is_empty(), "{:?}", kinds(&done.effects));
     assert!(matches!(last_stage(&done, "website"), Stage::Invalid(_)));
+    assert_eq!(done.world.members("website").len(), 1);
+}
+
+#[test]
+fn an_unobservable_workload_is_reported_and_its_guests_are_left_alone() {
+    let website = website();
+    let world = World::default()
+        .legacy(&website, Slot::Blue, NIX_A)
+        .datasets(vec![DataSighting {
+            name: website.name.clone(),
+            slot: Slot::Blue,
+            dataset: SlotDataset::Home(DataOrigin::Foreign, EXPECTED_PROPERTIES),
+        }]);
+    let done = run::<Builtin>(
+        world,
+        &one(&website),
+        &images(vec![built(&website, NIX_B)]),
+        &push(COMMIT_B),
+        None,
+    );
+    assert!(done.effects.is_empty(), "{:?}", kinds(&done.effects));
+    assert_eq!(
+        last_stage(&done, "website"),
+        Stage::Invalid(vec![ConfigFault::Data(DataFault::ForeignOrigin)])
+    );
     assert_eq!(done.world.members("website").len(), 1);
 }
 

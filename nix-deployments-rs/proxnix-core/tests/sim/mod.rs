@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 use proxnix_core::{
-    Artifact, Audited, BridgeName, Built, BySlot, Cores, Cutover, Desired, Detail, DiskGib,
-    DurationMs, Effect, EffectError, Endpoint, Event, Grant, GuestEffect, GuestName, GuestStatus,
-    Hostname, ImageType, Images, Input, KindFacts, KindSpec, Memo, MemoryMb, Moment, Observation,
-    Outcome, Pacing, Permissions, Port, Privilege, ProbeEffect, ProxySpec, Purity, Push, RawTags,
-    Registry, Report, ResourceChange, Resources, RouteEffect, Settled, Sighting, Slot, SlotPair,
-    Sockets, Stage, Tick, Timeouts, Unsettled, Vmid, WorkloadSpec, step,
+    Artifact, Audited, BridgeName, Built, BySlot, Cores, Cutover, DataSighting, Desired, Detail,
+    DiskGib, DurationMs, Effect, EffectError, Endpoint, Event, Grant, GuestEffect, GuestName,
+    GuestStatus, Hostname, ImageType, Images, Input, KindFacts, KindSpec, Memo, MemoryMb, Moment,
+    Observation, Outcome, Pacing, Permissions, Port, Privilege, ProbeEffect, ProxySpec, Purity,
+    Push, RawTags, Registry, Report, ResourceChange, Resources, RouteEffect, Settled, Sighting,
+    Slot, SlotPair, Sockets, Stage, Tick, Timeouts, Unsettled, Vmid, WorkloadSpec, step,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
@@ -60,6 +60,7 @@ pub struct Faults {
 pub struct World {
     pub guests: BTreeMap<Vmid, SimGuest>,
     pub unsettled: BTreeMap<Vmid, Unsettled>,
+    pub data: Vec<DataSighting>,
     pub routes: BTreeMap<(String, Endpoint), SimRoute>,
     pub faults: Faults,
     pub applied: usize,
@@ -229,6 +230,13 @@ impl World {
         }
     }
 
+    pub fn datasets(self, rows: Vec<DataSighting>) -> World {
+        World {
+            data: self.data.into_iter().chain(rows).collect(),
+            ..self
+        }
+    }
+
     pub fn unmanaged(self, id: Vmid, name: &str) -> World {
         self.with_guest(
             id,
@@ -276,6 +284,7 @@ impl World {
                         .map(|(id, why)| Sighting::Unsettled(*id, *why)),
                 )
                 .collect(),
+            self.data.clone(),
         )
     }
 

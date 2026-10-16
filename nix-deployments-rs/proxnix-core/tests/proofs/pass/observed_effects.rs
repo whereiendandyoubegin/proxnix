@@ -39,6 +39,7 @@ fn main() {
             sighting(Vmid::new(844), "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;nix-78s0iadvjz6s48aqvx4rw78lwrzkjzlw;proxnix;slot-blue;gen-2"),
             sighting(Vmid::new(944), "commit-66d0ba6b605de2703e0fb7bbf58b922d5b36597e;nix-i3d00236fdkfw1v9cmasajkjhzl8zi5j;proxnix;slot-green;gen-1"),
         ],
+        Vec::new(),
     );
     let cohort = Cohort::gather(&observed, &spec).unwrap();
     let serving = cohort.highest().unwrap();

@@ -5,7 +5,7 @@ use crate::ids::{SlotId, Vmid};
 #[pure_only]
 use crate::layout::StorageFault;
 #[pure_only]
-use crate::observation::{Managed, Observation};
+use crate::observation::{DataFault, Managed, Observation};
 #[pure_only]
 use crate::spec::{GuestName, WorkloadSpec};
 #[pure_only]
@@ -24,6 +24,7 @@ pub enum ConfigFault {
     SharedVmid { id: Vmid, with: GuestName },
     SharedServiceAddress { address: Ipv4Addr, with: GuestName },
     Storage(StorageFault),
+    Data(DataFault),
 }
 
 #[pure_only]
