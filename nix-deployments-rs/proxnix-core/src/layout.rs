@@ -186,6 +186,7 @@ pub enum StorageFault {
     SameLabel(StateLabel),
     MountedTwice(GuestPath),
     PrivateStoreNeedsStopStart,
+    ReservedLabel,
 }
 
 #[pure_only]
@@ -312,13 +313,23 @@ fn repeated<T: PartialEq + Clone>(items: &[T]) -> Option<T> {
 }
 
 #[pure_only]
+const RESERVED_LABELS: [&str; 5] = ["blue", "green", "blue-rehearsal", "green-rehearsal", "nix"];
+
+#[pure_only]
 fn labelled(state: &[GuestPath]) -> Result<Vec<(GuestPath, StateLabel)>, StorageFault> {
     let found: Vec<(GuestPath, StateLabel)> = state
         .iter()
         .map(|at| {
             StateLabel::of(at)
-                .map(|label| (at.clone(), label))
                 .ok_or_else(|| StorageFault::UnlabelledState(at.clone()))
+                .and_then(|label| {
+                    if RESERVED_LABELS.contains(&label.as_ref()) {
+                        Err(StorageFault::ReservedLabel)
+                    } else {
+                        Ok(label)
+                    }
+                })
+                .map(|label| (at.clone(), label))
         })
         .collect::<Result<_, _>>()?;
     match repeated(
@@ -984,7 +995,7 @@ mod tests {
                     ..wanted(&["/nix"], false)
                 }
             ),
-            Err(StorageFault::MountedTwice(nix()))
+            Err(StorageFault::ReservedLabel)
         );
     }
 
@@ -1003,5 +1014,40 @@ mod tests {
             | HostEffect::EnsureDirectory { owner, .. }
             | HostEffect::EnsureHostPath { owner, .. } => *owner == Owner::HostRoot,
         }));
+    }
+
+    fn guest_path(at: &str) -> GuestPath {
+        GuestPath(String::from(at))
+    }
+
+    #[test]
+    fn every_reserved_label_is_refused() {
+        for reserved in ["blue", "green", "blue-rehearsal", "green-rehearsal", "nix"] {
+            let state = [guest_path(&format!("/var/lib/{reserved}"))];
+            assert!(
+                matches!(labelled(&state), Err(StorageFault::ReservedLabel)),
+                "{reserved} was accepted as a state label"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reserved_label_among_ordinary_ones_is_still_refused() {
+        let state = [
+            guest_path("/var/lib/prometheus"),
+            guest_path("/var/lib/green"),
+            guest_path("/var/lib/grafana"),
+        ];
+        assert!(matches!(labelled(&state), Err(StorageFault::ReservedLabel)));
+    }
+
+    #[test]
+    fn a_label_that_only_starts_with_a_reserved_name_is_allowed() {
+        let state = [
+            guest_path("/var/lib/blueprint"),
+            guest_path("/var/lib/greenmail"),
+            guest_path("/var/lib/nixos"),
+        ];
+        assert!(labelled(&state).is_ok());
     }
 }
